@@ -1,0 +1,175 @@
+"""
+recognize.py
+
+Real-time face recognition with unknown-face alert.
+
+- Loads known employee encodings from encodings.pickle (see enroll_faces.py)
+- Opens the webcam (or an RTSP/IP camera URL if passed via --source)
+- Draws a green box + name around recognized employees
+- Draws a red box + "UNKNOWN" around unrecognized faces and plays an
+  alert sound (alert.wav — generate it first with generate_alert_sound.py)
+- Logs every event (known or unknown) to attendance_log.csv with a timestamp
+- Alert sound has a cooldown so it doesn't spam-play every frame
+
+Usage:
+    python recognize.py
+    python recognize.py --source "rtsp://user:pass@192.168.1.50:554/stream1"
+    python recognize.py --tolerance 0.5 --process-every 3
+"""
+
+import argparse
+import csv
+import os
+import pickle
+import threading
+import time
+from datetime import datetime
+
+import cv2
+import face_recognition
+
+try:
+    import simpleaudio as sa
+    HAVE_AUDIO = True
+except ImportError:
+    HAVE_AUDIO = False
+
+ENCODINGS_PATH = "encodings.pickle"
+ALERT_SOUND_PATH = "alert.wav"
+LOG_PATH = "attendance_log.csv"
+
+ALERT_COOLDOWN_SEC = 3.0  # minimum gap between alert sounds
+LOG_COOLDOWN_SEC = 10.0   # avoid re-logging the same known person every frame
+
+
+def load_known_faces():
+    if not os.path.exists(ENCODINGS_PATH):
+        raise FileNotFoundError(
+            f"{ENCODINGS_PATH} not found. Enroll at least one employee first "
+            f"with enroll_faces.py"
+        )
+    with open(ENCODINGS_PATH, "rb") as f:
+        data = pickle.load(f)
+
+    names = []
+    encodings = []
+    for name, enc_list in data.items():
+        for enc in enc_list:
+            names.append(name)
+            encodings.append(enc)
+    return names, encodings
+
+
+def play_alert_async():
+    if not HAVE_AUDIO or not os.path.exists(ALERT_SOUND_PATH):
+        return
+
+    def _play():
+        try:
+            wave_obj = sa.WaveObject.from_wave_file(ALERT_SOUND_PATH)
+            wave_obj.play()
+        except Exception as e:
+            print(f"Could not play alert sound: {e}")
+
+    threading.Thread(target=_play, daemon=True).start()
+
+
+def log_event(name: str):
+    file_exists = os.path.exists(LOG_PATH)
+    with open(LOG_PATH, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp", "name", "status"])
+        status = "KNOWN" if name != "UNKNOWN" else "UNKNOWN"
+        writer.writerow([datetime.now().isoformat(timespec="seconds"), name, status])
+
+
+def run(source, tolerance: float, process_every: int):
+    known_names, known_encodings = load_known_faces()
+    print(f"Loaded {len(known_encodings)} face samples for {len(set(known_names))} people.")
+
+    cap = cv2.VideoCapture(source if source is not None else 0)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video source: {source or 0}")
+
+    last_alert_time = 0.0
+    last_logged_at = {}  # name -> timestamp, to avoid log spam
+    frame_count = 0
+    cached_boxes, cached_names = [], []
+
+    print("Running. Press Q to quit.")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Frame grab failed, stopping.")
+            break
+
+        frame_count += 1
+
+        # Only run the (expensive) detection/recognition every N frames;
+        # reuse the last result on skipped frames for smooth display.
+        if frame_count % process_every == 0:
+            small = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
+            rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+
+            boxes = face_recognition.face_locations(rgb_small, model="hog")
+            encodings = face_recognition.face_encodings(rgb_small, boxes)
+
+            names = []
+            for encoding in encodings:
+                matches = face_recognition.compare_faces(
+                    known_encodings, encoding, tolerance=tolerance
+                )
+                name = "UNKNOWN"
+
+                if True in matches:
+                    distances = face_recognition.face_distance(known_encodings, encoding)
+                    best_match_idx = distances.argmin()
+                    if matches[best_match_idx]:
+                        name = known_names[best_match_idx]
+
+                names.append(name)
+
+                now = time.time()
+                if name == "UNKNOWN":
+                    if now - last_alert_time > ALERT_COOLDOWN_SEC:
+                        play_alert_async()
+                        last_alert_time = now
+                        log_event("UNKNOWN")
+                else:
+                    if now - last_logged_at.get(name, 0) > LOG_COOLDOWN_SEC:
+                        log_event(name)
+                        last_logged_at[name] = now
+
+            # scale boxes back up (we detected on a 0.25x resized frame)
+            cached_boxes = [(top * 4, right * 4, bottom * 4, left * 4)
+                             for (top, right, bottom, left) in boxes]
+            cached_names = names
+
+        # draw results every frame for smooth video
+        for (top, right, bottom, left), name in zip(cached_boxes, cached_names):
+            color = (0, 200, 0) if name != "UNKNOWN" else (0, 0, 255)
+            cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+            label_y = top - 10 if top - 10 > 10 else top + 20
+            cv2.putText(frame, name, (left, label_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        cv2.imshow("Face ID - Employee Recognition", frame)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Real-time employee face recognition with alerts.")
+    parser.add_argument("--source", default=None,
+                         help="Video source: webcam index (default 0) or an RTSP/IP camera URL")
+    parser.add_argument("--tolerance", type=float, default=0.5,
+                         help="Lower = stricter matching (default 0.5). Try 0.4-0.6.")
+    parser.add_argument("--process-every", type=int, default=2,
+                         help="Run recognition every N frames for performance (default 2).")
+    args = parser.parse_args()
+
+    run(args.source, args.tolerance, args.process_every)

@@ -1,0 +1,68 @@
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Eggs / distributions
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+wheels/
+
+# Generated project data
+encodings.pickle
+attendance_log.csv
+alert.wav
+
+# Unknown face snapshots (if added later)
+snapshots/
+unknown_faces/
+
+# Uploaded / enrolled photos (keep out of repo)
+photos/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+
+images/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+
+faces/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Archives
+*.zip
