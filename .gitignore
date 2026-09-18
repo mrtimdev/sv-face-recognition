@@ -23,6 +23,8 @@ wheels/
 encodings.pickle
 attendance_log.csv
 alert.wav
+.auto-upload-config.json
+.auto-upload-state.json
 
 # Unknown face snapshots (if added later)
 snapshots/

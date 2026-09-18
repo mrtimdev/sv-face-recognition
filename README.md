@@ -113,5 +113,24 @@ Press **Q** in the video window to quit.
 | `enroll_faces.py` | Register a new employee's face |
 | `recognize.py` | Real-time recognition + alert loop |
 | `generate_alert_sound.py` | Creates the alert beep WAV |
+| `auto-upload.py` | Desktop folder monitor and concurrent uploader |
 | `encodings.pickle` | Generated — stores enrolled face encodings |
 | `attendance_log.csv` | Generated — event log |
+
+## Desktop auto uploader
+
+Run `python auto-upload.py` to open the PyQt6 dashboard. Select a target folder, enter the HTTP upload URL,
+choose sub-folder detection, and set the concurrent batch size. The app shows
+live upload, retry, failure, and overall progress. **Upload existing files**
+scans the folder immediately; monitoring detects subsequent changes.
+
+Uploads use multipart field `file` plus form field `relative_path`. No API token
+or authorization header is used.
+
+For the Spring service, set the upload URL to `http://localhost:8083/api/client/scans`.
+The uploader automatically publishes monitor and per-file status events to
+`ws://localhost:8083/ws/upload-monitor` (or the matching host and `wss://` scheme).
+
+Reusable modules are under `uploader_app/`: `engine.py` contains the independent
+monitor/upload service, `storage.py` contains persistence helpers, and `ui.py`
+contains only the PyQt6 desktop interface.
