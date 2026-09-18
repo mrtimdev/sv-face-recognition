@@ -1,0 +1,2 @@
+# Optional sound support; the terminal works without it.
+simpleaudio==1.0.4
