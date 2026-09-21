@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, 
                              QPushButton, QScrollArea, QSpinBox, QTimeEdit, QVBoxLayout,
                              QWidget)
 
-from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source
+from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source, hash_pin
 from ..widgets import ToastBar
 
 
@@ -51,6 +51,7 @@ class SettingsScreen(QWidget):
         column.addWidget(self._build_storage_group())
         column.addWidget(self._build_report_group())
         column.addWidget(self._build_telegram_group())
+        column.addWidget(self._build_security_group())
         column.addStretch(1)
         scroll.setWidget(holder)
         outer.addWidget(scroll, 1)
@@ -234,6 +235,81 @@ class SettingsScreen(QWidget):
         form.addRow("", container)
         self.tg_test_button.clicked.connect(self._test_telegram)
         return group
+
+    def _build_security_group(self):
+        group, form = self._form("Security")
+        self.pin_edit = QLineEdit()
+        self.pin_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pin_edit.setPlaceholderText("Enter new PIN (leave empty to disable)")
+        self.pin_confirm_edit = QLineEdit()
+        self.pin_confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pin_confirm_edit.setPlaceholderText("Confirm PIN")
+        self.pin_set_button = QPushButton("Set PIN")
+        self.pin_clear_button = QPushButton("Remove PIN")
+        self.pin_clear_button.setObjectName("danger")
+        self.pin_status = QLabel(
+            "PIN is set" if self.settings.dashboard_pin_hash else "No PIN configured")
+        self.pin_status.setObjectName("screenSubtitle")
+        form.addRow("Dashboard PIN", self.pin_edit)
+        form.addRow("Confirm PIN", self.pin_confirm_edit)
+        row = QHBoxLayout()
+        row.addWidget(self.pin_set_button)
+        row.addWidget(self.pin_clear_button)
+        row.addWidget(self.pin_status)
+        row.addStretch(1)
+        container = QWidget()
+        container.setLayout(row)
+        form.addRow("", container)
+        note = QLabel("The PIN protects the dashboard on startup. "
+                      "A SHA-256 hash is stored in settings.json, never the PIN itself.")
+        note.setObjectName("screenSubtitle")
+        note.setWordWrap(True)
+        form.addRow("", note)
+        self.pin_set_button.clicked.connect(self._set_pin)
+        self.pin_clear_button.clicked.connect(self._clear_pin)
+        return group
+
+    def _set_pin(self):
+        pin = self.pin_edit.text()
+        confirm = self.pin_confirm_edit.text()
+        if not pin:
+            self.toast.show_message("Enter a PIN first.", "warn")
+            return
+        if len(pin) < 4:
+            self.toast.show_message("PIN must be at least 4 characters.", "warn")
+            return
+        if pin != confirm:
+            self.toast.show_message("PINs do not match.", "bad")
+            return
+        self.settings.dashboard_pin_hash = hash_pin(pin)
+        try:
+            self.settings.save()
+        except OSError as exc:
+            self.toast.show_message(f"Could not save: {exc}", "bad")
+            return
+        self.pin_edit.clear()
+        self.pin_confirm_edit.clear()
+        self.pin_status.setText("PIN is set")
+        self.toast.show_message("Dashboard PIN saved. It takes effect on next launch.", "ok")
+        self.settingsApplied.emit(self.settings, False)
+
+    def _clear_pin(self):
+        confirmed = QMessageBox.question(
+            self, "Remove PIN",
+            "Remove the dashboard PIN? Anyone with access to this machine will be able to "
+            "open the dashboard without authentication.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        self.settings.dashboard_pin_hash = ""
+        try:
+            self.settings.save()
+        except OSError as exc:
+            self.toast.show_message(f"Could not save: {exc}", "bad")
+            return
+        self.pin_status.setText("No PIN configured")
+        self.toast.show_message("Dashboard PIN removed.", "ok")
+        self.settingsApplied.emit(self.settings, False)
 
     def _test_telegram(self):
         token = self.fields["telegram_bot_token"].text().strip()

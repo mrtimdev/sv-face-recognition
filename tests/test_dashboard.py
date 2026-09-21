@@ -178,10 +178,12 @@ class StubEngine:
         class _Signals(QObject):
             frameReady = pyqtSignal(object)
             catalogChanged = pyqtSignal(object)
+            attendanceSaved = pyqtSignal(object)
 
         self._signals = _Signals()
         self.frameReady = self._signals.frameReady
         self.catalogChanged = self._signals.catalogChanged
+        self.attendanceSaved = self._signals.attendanceSaved
         self.running = True
         self._frame = frame
         self.started = 0

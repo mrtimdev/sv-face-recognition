@@ -31,7 +31,7 @@ def verified(track_id=1, employee_id="E001", now=10.0):
                      employee_id=employee_id, employee_name="Employee " + employee_id,
                      last_recognized=now, identity_valid=True, confirmation_count=4,
                      verified_presence=3.1, last_evidence_at=now,
-                     flow_ok=True, last_flow_at=now, state=State.VERIFYING)
+                     flow_ok=True, liveness_ok=True, last_flow_at=now, state=State.VERIFYING)
 
 
 class AttendanceTests(unittest.TestCase):
@@ -86,7 +86,8 @@ class AttendanceTests(unittest.TestCase):
     def test_blocked_capture_conditions(self):
         for changes in ({"visible": False}, {"ambiguous": True}, {"identity_valid": False},
                         {"last_seen": 8}, {"last_recognized": 8}, {"flow_ok": False},
-                        {"confirmation_count": 1}, {"verified_presence": 2.9}):
+                        {"liveness_ok": False}, {"confirmation_count": 1},
+                        {"verified_presence": 2.9}):
             with self.subTest(changes=changes):
                 track = verified()
                 for field, value in changes.items():

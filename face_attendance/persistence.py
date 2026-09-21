@@ -18,6 +18,7 @@ class PersistenceWorker:
         self.snapshots = snapshots or SnapshotService(config.capture_dir)
         self.jobs = queue.Queue(maxsize=config.persistence_queue_size)
         self.observations = queue.Queue(maxsize=32)
+        self._audit_queue = queue.Queue(maxsize=64)
         self.results = queue.Queue(maxsize=config.persistence_queue_size + 1)
         self.startup = LatestValue()
         self.stop_event, self.wake = threading.Event(), threading.Event()
@@ -44,6 +45,13 @@ class PersistenceWorker:
             self.wake.set()
         except queue.Full:
             pass  # Optional observation telemetry never displaces attendance.
+
+    def log_audit(self, action, detail="", actor="system"):
+        try:
+            self._audit_queue.put_nowait((action, detail, actor))
+            self.wake.set()
+        except queue.Full:
+            pass
 
     def _init_audio(self):
         if not self.config.alert_path.exists():
@@ -96,8 +104,13 @@ class PersistenceWorker:
                     self.stop_event.wait(self.config.retry_sec)
             if repository is None:
                 return
+            last_checkpoint = time.monotonic()
             while not self.stop_event.is_set() or not self.jobs.empty():
                 self.wake.clear()
+                now = time.monotonic()
+                if now - last_checkpoint >= 3600:
+                    repository.checkpoint()
+                    last_checkpoint = now
                 try:
                     job = self.jobs.get_nowait()
                 except queue.Empty:
@@ -114,12 +127,20 @@ class PersistenceWorker:
                     if result.outcome == "saved":
                         self._alert()
                         logging.info("Attendance saved for employee %s: %s", job.employee_id, result.snapshot)
+                        repository.audit("attendance_saved",
+                                         f"{job.employee_name} ({job.employee_id}), {job.duration:.1f}s")
                     elif result.outcome == "error":
                         logging.error("Attendance save failed: %s", result.error)
+                        repository.audit("attendance_error", result.error)
                     self.jobs.task_done()
                     continue
                 try:
                     self._observe(self.observations.get_nowait())
+                except queue.Empty:
+                    pass
+                try:
+                    action, detail, actor = self._audit_queue.get_nowait()
+                    repository.audit(action, detail, actor)
                 except queue.Empty:
                     self.wake.wait(0.1)
         finally:
@@ -132,5 +153,7 @@ class PersistenceWorker:
         self.stop_event.set()
         self.wake.set()
         if self.thread.ident is not None:
-            # Finish the small, bounded set of accepted attendance jobs before exiting.
-            self.thread.join()
+            self.thread.join(timeout=10)
+            if self.thread.is_alive():
+                logging.error("Persistence worker did not finish within 10s; "
+                              "%d job(s) may be lost", self.jobs.qsize())

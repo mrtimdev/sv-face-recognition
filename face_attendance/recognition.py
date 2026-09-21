@@ -22,7 +22,8 @@ class RecognitionService:
             self.employee_indices.setdefault(employee.employee_id, []).append(index)
 
     def match(self, encoding):
-        # compare_faces also computes distances internally; compute them just once.
+        if len(self.catalog.encodings) == 0:
+            return None, 1.0
         with FACE_BACKEND_LOCK:
             distances = self.backend.face_distance(self.catalog.encodings, encoding)
         ranked = sorted((float(np.min(distances[indices])), indices[0])
@@ -77,9 +78,18 @@ class RecognitionService:
             if due:
                 encode_indices.append(index)
         encodings = []
+        landmarks_map = {}
         if encode_indices:
+            encode_boxes = [boxes[i] for i in encode_indices]
             with FACE_BACKEND_LOCK:
-                encodings = self.backend.face_encodings(rgb, [boxes[i] for i in encode_indices])
+                encodings = self.backend.face_encodings(rgb, encode_boxes)
+                if hasattr(self.backend, "face_landmarks"):
+                    try:
+                        landmarks_list = self.backend.face_landmarks(rgb, encode_boxes)
+                        for idx, lm in zip(encode_indices, landmarks_list):
+                            landmarks_map[idx] = lm
+                    except Exception:
+                        pass
         matches = {}
         for index, encoding in zip(encode_indices, encodings):
             matches[index] = self.match(encoding)
@@ -87,8 +97,9 @@ class RecognitionService:
         for index, box in enumerate(full_boxes):
             employee, distance = matches.get(index, (None, None))
             hint = hints[index]
+            lm = landmarks_map.get(index)
             detections.append(Detection(box, employee, distance, index in encode_indices,
-                                        hint.track_id if hint else None))
+                                        hint.track_id if hint else None, lm))
         return RecognitionResult(packet, tuple(detections), time.monotonic() - started)
 
 

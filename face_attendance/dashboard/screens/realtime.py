@@ -170,6 +170,9 @@ class RealtimeScreen(QWidget):
             if snapshot["track_id"] in self.unknown_seen:
                 continue
             self.unknown_seen.add(snapshot["track_id"])
+            if len(self.unknown_seen) > 10000:
+                oldest = min(self.unknown_seen)
+                self.unknown_seen.discard(oldest)
             stamp = datetime.now().strftime("%H:%M:%S")
             self.alerts.insertItem(0, QListWidgetItem(
                 f"{stamp}  face #{snapshot['track_id']} not enrolled ({snapshot['age']:.0f}s in view)"))
@@ -231,13 +234,20 @@ class RealtimeScreen(QWidget):
         self._render_records()
 
     def _render_records(self):
-        self.records_table.setRowCount(len(self.records))
+        count = len(self.records)
+        self.records_table.setRowCount(count)
         for index, record in enumerate(self.records):
             values = (record["time"], record["name"], record["employee_id"],
                       f"{record['duration']:.1f}s",
                       Path(record["snapshot"]).name if record["snapshot"] else "-")
             for column, value in enumerate(values):
-                self.records_table.setItem(index, column, QTableWidgetItem(str(value)))
+                text = str(value)
+                existing = self.records_table.item(index, column)
+                if existing is not None:
+                    if existing.text() != text:
+                        existing.setText(text)
+                else:
+                    self.records_table.setItem(index, column, QTableWidgetItem(text))
 
     def _open_snapshot(self, row, column):
         if not 0 <= row < len(self.records):

@@ -121,6 +121,7 @@ class AttendanceService:
             eligible = (measured >= 1 and track.confirmation_count >= cfg.min_confirmation_frames
                         and track.flow_ok and now - track.last_flow_at <= cfg.detection_fresh_sec
                         and now - track.last_recognized <= cfg.detection_fresh_sec
+                        and track.liveness_ok
                         and self.ready)
             if not eligible:
                 continue

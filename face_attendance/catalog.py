@@ -30,12 +30,16 @@ def load_employee_map(path):
 
 
 class FaceCatalog:
-    def __init__(self, encodings_path, employees_path):
+    def __init__(self, encodings_path, employees_path, allow_empty=False):
         self.employee_map = load_employee_map(employees_path)
         path = Path(encodings_path)
         if not path.exists():
+            if allow_empty:
+                self.employees = ()
+                self.encodings = np.zeros((0, 128), dtype=np.float64)
+                self.enrolled_count = 0
+                return
             raise FileNotFoundError(f"{path} not found. Run enroll_faces.py first.")
-        # This is the existing local pickle format. Only load files you trust.
         with path.open("rb") as handle:
             data = pickle.load(handle)
         if not isinstance(data, dict):
@@ -51,6 +55,11 @@ class FaceCatalog:
                 employees.append(employee)
                 encodings.append(vector)
         if not encodings:
+            if allow_empty:
+                self.employees = ()
+                self.encodings = np.zeros((0, 128), dtype=np.float64)
+                self.enrolled_count = 0
+                return
             raise ValueError("No enrolled face samples. Run enroll_faces.py first.")
         self.employees = tuple(employees)
         self.encodings = np.stack(encodings)

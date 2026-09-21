@@ -5,6 +5,7 @@ only stores overrides and rebuilds a validated ``Config`` from them. Because
 ``Config`` is frozen and the workers capture it at construction time, saved
 changes take effect when the engine is restarted.
 """
+import hashlib
 import json
 import os
 import tempfile
@@ -17,6 +18,10 @@ from .config import ROOT, Config, parse_source
 SETTINGS_PATH = ROOT / "settings.json"
 LOCK_PATH = ROOT / "attendance.lock"
 THEMES = ("dark", "light")
+
+
+def hash_pin(pin):
+    return hashlib.sha256(pin.encode("utf-8")).hexdigest()
 
 
 def mask_url_credentials(value):
@@ -76,6 +81,7 @@ class Settings:
     telegram_chat_id: str = ""
     telegram_notify_capture: bool = True
     telegram_notify_unknown: bool = True
+    dashboard_pin_hash: str = ""
 
     def to_config(self):
         """Build a validated ``Config``; raises ``ValueError`` for bad values."""
@@ -155,6 +161,10 @@ class Settings:
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         return path
 
     @classmethod

@@ -29,6 +29,8 @@ from .lock import EngineLock
 
 PUBLISH_INTERVAL = 0.1  # Statistics/track updates; frames still follow target_fps.
 JOIN_TIMEOUT = 3.0
+MAX_RESTART_BACKOFF = 60.0
+UNKNOWN_ALERT_EXPIRY = 3600.0
 
 
 def track_snapshot(track, now):
@@ -43,6 +45,7 @@ def track_snapshot(track, now):
             "visible": bool(track.visible),
             "ambiguous": bool(track.ambiguous),
             "identity_valid": bool(track.identity_valid),
+            "liveness_ok": bool(track.liveness_ok),
             "distance": None if track.recognition_distance is None else round(track.recognition_distance, 3),
             "age": round(now - track.first_seen, 1),
             "error": track.error}
@@ -77,7 +80,7 @@ class AttendanceEngine(QObject):
         self._thread = None
         self._stats = {}
         self._last_elapsed = 0.0
-        self._unknown_alerted = set()
+        self._unknown_alerted = {}
         self.config = None
         self.catalog = None
         self._build()
@@ -85,7 +88,8 @@ class AttendanceEngine(QObject):
     def _build(self):
         """Construct workers for the current settings; may raise for bad input."""
         self.config = self.settings.to_config()
-        self.catalog = FaceCatalog(self.config.encodings_path, self.config.employees_path)
+        self.catalog = FaceCatalog(self.config.encodings_path, self.config.employees_path,
+                                    allow_empty=True)
         self.camera = (CameraManager(self.config) if self._capture_factory is None else
                        CameraManager(self.config, capture_factory=self._capture_factory))
         self.recognition = RecognitionWorker(
@@ -115,7 +119,7 @@ class AttendanceEngine(QObject):
         if self.running:
             return
         self.acquire_lock()
-        self._unknown_alerted.clear()
+        self._unknown_alerted = {}
         self._build()
         self._stop.clear()
         self.persistence.start()
@@ -127,6 +131,9 @@ class AttendanceEngine(QObject):
         self.catalogChanged.emit(self.employee_rows())
         self.logMessage.emit(f"Engine started: {describe_source(self.settings.source)} | "
                              f"{self.catalog.enrolled_count} employee(s)")
+        self.persistence.log_audit("engine_started",
+                                   f"source={describe_source(self.settings.source)}, "
+                                   f"enrolled={self.catalog.enrolled_count}")
 
     def stop(self):
         self._stop.set()
@@ -193,84 +200,105 @@ class AttendanceEngine(QObject):
         self.logMessage.emit(f"Catalog reloaded: {self.catalog.enrolled_count} employee(s)")
 
     def _run(self):
-        """The coordination loop from ``runtime.run``, publishing instead of drawing."""
+        """The coordination loop with auto-restart on failure."""
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                self._loop()
+                break  # Clean exit via _stop
+            except Exception as exc:
+                logging.exception("Attendance engine loop failed")
+                self.errorRaised.emit(str(exc))
+                if self._stop.is_set():
+                    break
+                self.logMessage.emit(f"Engine crashed, restarting in {backoff:.0f}s...")
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, MAX_RESTART_BACKOFF)
+                if not self._stop.is_set():
+                    self.tracker.clear()
+                    self.logMessage.emit("Engine loop restarted")
+
+    def _loop(self):
         cfg = self.config
         frame = np.full((cfg.camera_height, cfg.camera_width, 3), (32, 29, 25), np.uint8)
         sequence, submitted, generation = -1, -cfg.detection_interval, None
         preview_fps, count, fps_since = 0.0, 0, time.monotonic()
         recognition_error, published = "", 0.0
-        try:
-            while not self._stop.is_set():
-                started = now = time.monotonic()
-                wall_time = time.time()
-                packet = self.camera.frames.get()
-                status = self.camera.status(now)
-                paused = self._paused
-                new_frame = (packet is not None and packet.sequence != sequence
-                             and status == "CONNECTED")
-                if new_frame:
-                    if packet.generation != generation:
-                        submitted, generation = -cfg.detection_interval, packet.generation
-                    sequence, frame = packet.sequence, packet.frame
-                    with self._clean_lock:
-                        self._clean = packet.frame  # Read-only: consumers copy it.
-                    self.tracker.advance(packet)
-                    count += 1
-                if status != "CONNECTED":
-                    self.tracker.suspend()
-                result = self.recognition.results.take()
-                if result is not None:
-                    self._last_elapsed = result.elapsed
-                if result is not None and status == "CONNECTED":
-                    if self.tracker.apply(result, now):
-                        recognition_error = ""
-                    elif result.error:
-                        recognition_error = result.error
-                if new_frame and sequence - submitted >= cfg.detection_interval:
-                    self.recognition.requests.put(RecognitionRequest(packet, self.tracker.hints()))
-                    submitted = sequence
-                for kind, saved in self.attendance.poll(self.tracker.tracks, now, wall_time):
-                    self.renderer.animations.result(kind, saved, now)
-                    if kind == "success":
-                        self.attendanceSaved.emit(saved)
-                    else:
-                        self.attendanceFailed.emit(saved)
-                if not paused:
-                    for job in self.attendance.update(self.tracker.tracks, packet, now,
-                                                      status == "CONNECTED"):
-                        self.renderer.animations.capture(job, now)
-                        self.captureTriggered.emit(job)
-                    self.attendance.observe(self.tracker.tracks, now, wall_time)
-                elapsed = now - fps_since
-                if elapsed >= 1.0:
-                    preview_fps, count, fps_since = count / elapsed, 0, now
-                image = self.renderer.render_overlay(frame, self.tracker.tracks, now, wall_time,
-                                                     status, "" if paused else recognition_error)
-                self.frameReady.emit(image)
-                if now - published >= PUBLISH_INTERVAL:
-                    published = now
-                    self.tracksReady.emit([track_snapshot(track, now)
-                                           for track in self.tracker.tracks.values()])
-                    self._stats = self._statistics(status, preview_fps, recognition_error)
-                    self.statsReady.emit(self._stats)
-                    for track in self.tracker.tracks.values():
-                        if (track.visible and not track.employee_id
-                                and track.track_id not in self._unknown_alerted
-                                and now - track.first_seen >= 2.0):
-                            self._unknown_alerted.add(track.track_id)
-                            with self._clean_lock:
-                                snap = None if self._clean is None else self._clean.copy()
-                            self.unknownFaceAlert.emit({
-                                "track_id": track.track_id,
-                                "age": round(now - track.first_seen, 1),
-                                "frame": snap,
-                            })
-                delay = 1 / cfg.target_fps - (time.monotonic() - started)
-                if delay > 0:
-                    self._stop.wait(delay)
-        except Exception as exc:
-            logging.exception("Attendance engine loop failed")
-            self.errorRaised.emit(str(exc))
+        while not self._stop.is_set():
+            started = now = time.monotonic()
+            wall_time = time.time()
+            packet = self.camera.frames.get()
+            status = self.camera.status(now)
+            paused = self._paused
+            new_frame = (packet is not None and packet.sequence != sequence
+                         and status == "CONNECTED")
+            if new_frame:
+                if packet.generation != generation:
+                    submitted, generation = -cfg.detection_interval, packet.generation
+                sequence, frame = packet.sequence, packet.frame
+                with self._clean_lock:
+                    self._clean = packet.frame
+                self.tracker.advance(packet)
+                count += 1
+            if status != "CONNECTED":
+                self.tracker.suspend()
+            result = self.recognition.results.take()
+            if result is not None:
+                self._last_elapsed = result.elapsed
+            if result is not None and status == "CONNECTED":
+                if self.tracker.apply(result, now):
+                    recognition_error = ""
+                elif result.error:
+                    recognition_error = result.error
+            if new_frame and sequence - submitted >= cfg.detection_interval:
+                self.recognition.requests.put(RecognitionRequest(packet, self.tracker.hints()))
+                submitted = sequence
+            for kind, saved in self.attendance.poll(self.tracker.tracks, now, wall_time):
+                self.renderer.animations.result(kind, saved, now)
+                if kind == "success":
+                    self.attendanceSaved.emit(saved)
+                else:
+                    self.attendanceFailed.emit(saved)
+            if not paused:
+                for job in self.attendance.update(self.tracker.tracks, packet, now,
+                                                  status == "CONNECTED"):
+                    self.renderer.animations.capture(job, now)
+                    self.captureTriggered.emit(job)
+                self.attendance.observe(self.tracker.tracks, now, wall_time)
+            elapsed = now - fps_since
+            if elapsed >= 1.0:
+                preview_fps, count, fps_since = count / elapsed, 0, now
+            image = self.renderer.render_overlay(frame, self.tracker.tracks, now, wall_time,
+                                                 status, "" if paused else recognition_error)
+            self.frameReady.emit(image)
+            if now - published >= PUBLISH_INTERVAL:
+                published = now
+                self.tracksReady.emit([track_snapshot(track, now)
+                                       for track in self.tracker.tracks.values()])
+                self._stats = self._statistics(status, preview_fps, recognition_error)
+                self.statsReady.emit(self._stats)
+                self._expire_unknown_alerts(now)
+                for track in self.tracker.tracks.values():
+                    if (track.visible and not track.employee_id
+                            and track.track_id not in self._unknown_alerted
+                            and now - track.first_seen >= 2.0):
+                        self._unknown_alerted[track.track_id] = now
+                        with self._clean_lock:
+                            snap = None if self._clean is None else self._clean.copy()
+                        self.unknownFaceAlert.emit({
+                            "track_id": track.track_id,
+                            "age": round(now - track.first_seen, 1),
+                            "frame": snap,
+                        })
+            delay = 1 / cfg.target_fps - (time.monotonic() - started)
+            if delay > 0:
+                self._stop.wait(delay)
+
+    def _expire_unknown_alerts(self, now):
+        expired = [tid for tid, ts in self._unknown_alerted.items()
+                   if now - ts > UNKNOWN_ALERT_EXPIRY]
+        for tid in expired:
+            del self._unknown_alerted[tid]
 
     def _statistics(self, status, preview_fps, recognition_error):
         """Snapshot of the engine state for the Live Monitor cards."""

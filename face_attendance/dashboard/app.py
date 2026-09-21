@@ -4,13 +4,15 @@ The window owns the engine and the screens. Screens only talk to the engine via
 signals and are notified of settings changes by ``_broadcast_settings``.
 """
 import logging
+from datetime import datetime
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                             QMainWindow, QMessageBox, QStackedWidget, QStatusBar,
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel,
+                             QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+                             QMessageBox, QPushButton, QStackedWidget, QStatusBar,
                              QVBoxLayout, QWidget)
 
-from ..settings import SETTINGS_PATH, Settings, describe_source
+from ..settings import SETTINGS_PATH, Settings, describe_source, hash_pin
 from .engine import AttendanceEngine
 from .screens.employees import EmployeesScreen
 from .screens.live import LiveScreen
@@ -22,7 +24,52 @@ from .theme import stylesheet
 from .widgets import StatusPill
 
 
-NAV = ("Live Monitor", "Real-time Attendance", "Attendance Report", "Employees", "Settings")
+NAV = (
+    ("\U0001F4FA", "Live Monitor"),
+    ("\U0001F4CB", "Real-time Attendance"),
+    ("\U0001F4CA", "Attendance Report"),
+    ("\U0001F465", "Employees"),
+    ("⚙️", "Settings"),
+)
+
+
+class LoginDialog(QDialog):
+    """Blocks dashboard access until the correct PIN is entered."""
+
+    def __init__(self, pin_hash, parent=None):
+        super().__init__(parent)
+        self._pin_hash = pin_hash
+        self._attempts = 0
+        self.setWindowTitle("Face ID Attendance - Login")
+        self.setFixedSize(360, 180)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.addWidget(QLabel("Enter the dashboard PIN to continue:"))
+        self._pin = QLineEdit()
+        self._pin.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pin.setPlaceholderText("PIN")
+        self._pin.returnPressed.connect(self._check)
+        layout.addWidget(self._pin)
+        self._message = QLabel("")
+        layout.addWidget(self._message)
+        self._button = QPushButton("Unlock")
+        self._button.clicked.connect(self._check)
+        layout.addWidget(self._button)
+
+    def _check(self):
+        if hash_pin(self._pin.text()) == self._pin_hash:
+            self.accept()
+            return
+        self._attempts += 1
+        remaining = max(0, 5 - self._attempts)
+        if remaining == 0:
+            self._message.setText("Too many failed attempts.")
+            self.reject()
+            return
+        self._message.setText(f"Incorrect PIN. {remaining} attempt(s) remaining.")
+        self._pin.clear()
+        self._pin.setFocus()
 
 
 class MainWindow(QMainWindow):
@@ -54,41 +101,111 @@ class MainWindow(QMainWindow):
 
     def _build(self):
         central = QWidget()
-        layout = QHBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Header bar ──────────────────────────────────────────────
+        header = QFrame()
+        header.setObjectName("headerBar")
+        header.setFixedHeight(64)
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(20, 0, 20, 0)
+        hl.setSpacing(16)
+
+        welcome_col = QVBoxLayout()
+        welcome_col.setSpacing(0)
+        self.welcome_label = QLabel("Welcome back, Admin")
+        self.welcome_label.setObjectName("welcomeText")
+        self.welcome_sub = QLabel("Face ID Attendance System")
+        self.welcome_sub.setObjectName("welcomeSub")
+        welcome_col.addWidget(self.welcome_label)
+        welcome_col.addWidget(self.welcome_sub)
+        hl.addLayout(welcome_col)
+        hl.addStretch(1)
+
+        self.engine_pill = StatusPill("STOPPED", "idle")
+        hl.addWidget(self.engine_pill)
+
+        self.notif_label = QLabel("\U0001F514")
+        self.notif_label.setToolTip("Notifications")
+        self.notif_label.setStyleSheet("font-size: 18px; background: transparent;")
+        hl.addWidget(self.notif_label)
+
+        clock_col = QVBoxLayout()
+        clock_col.setSpacing(0)
+        clock_col.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.clock_label = QLabel("")
+        self.clock_label.setObjectName("headerClock")
+        self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.date_label = QLabel("")
+        self.date_label.setObjectName("headerDate")
+        self.date_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        clock_col.addWidget(self.clock_label)
+        clock_col.addWidget(self.date_label)
+        hl.addLayout(clock_col)
+
+        avatar = QLabel("\U0001F464")
+        avatar.setStyleSheet(
+            "font-size: 24px; background: #E2E8F0; border-radius: 18px; "
+            "padding: 4px 8px; min-width: 36px; min-height: 36px;")
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hl.addWidget(avatar)
+        root.addWidget(header)
+
+        # ── Body: sidebar + content ─────────────────────────────────
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+
+        # Sidebar
+        sidebar = QVBoxLayout()
+        sidebar.setContentsMargins(0, 0, 0, 0)
+        sidebar.setSpacing(0)
+
+        logo_frame = QWidget()
+        logo_lay = QVBoxLayout(logo_frame)
+        logo_lay.setContentsMargins(16, 16, 16, 8)
+        logo_lay.setSpacing(4)
+        logo = QLabel("SV Face ID")
+        logo.setObjectName("appTitle")
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        online_label = QLabel("● Online")
+        online_label.setStyleSheet("color: #16A34A; font-size: 12px; font-weight: 600;")
+        online_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_lay.addWidget(logo)
+        logo_lay.addWidget(online_label)
+        self._online_label = online_label
+        sidebar.addWidget(logo_frame)
 
         self.nav = QListWidget()
         self.nav.setObjectName("nav")
-        self.nav.setFixedWidth(210)
-        for name in NAV:
-            self.nav.addItem(QListWidgetItem(name))
-        layout.addWidget(self.nav)
+        self.nav.setFixedWidth(220)
+        for icon, name in NAV:
+            self.nav.addItem(QListWidgetItem(f"{icon}  {name}"))
+        sidebar.addWidget(self.nav, 1)
 
-        right = QVBoxLayout()
-        right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(0)
-        header = QWidget()
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(18, 12, 18, 12)
-        titles = QVBoxLayout()
-        title = QLabel("Face ID Attendance")
-        title.setObjectName("appTitle")
-        self.header_subtitle = QLabel("")
-        self.header_subtitle.setObjectName("screenSubtitle")
-        titles.addWidget(title)
-        titles.addWidget(self.header_subtitle)
-        header_layout.addLayout(titles)
-        header_layout.addStretch(1)
-        self.engine_pill = StatusPill("STOPPED", "idle")
+        # Sidebar footer
+        footer_frame = QFrame()
+        footer_frame.setObjectName("sidebarFooter")
+        footer_frame.setFixedWidth(220)
+        footer_lay = QVBoxLayout(footer_frame)
+        footer_lay.setContentsMargins(14, 10, 14, 10)
+        footer_lay.setSpacing(4)
         self.source_pill = StatusPill("-", "idle")
-        self.clock_label = QLabel("")
-        self.clock_label.setObjectName("muted")
-        header_layout.addWidget(self.source_pill)
-        header_layout.addWidget(self.engine_pill)
-        header_layout.addWidget(self.clock_label)
-        right.addWidget(header)
+        footer_lay.addWidget(self.source_pill)
+        self.sys_status_label = QLabel("✅ All Systems Operational")
+        self.sys_status_label.setObjectName("muted")
+        self.sys_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        footer_lay.addWidget(self.sys_status_label)
+        version = QLabel("v1.0.0  © 2026 SV Technologies")
+        version.setObjectName("versionLabel")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        footer_lay.addWidget(version)
+        sidebar.addWidget(footer_frame)
+        body.addLayout(sidebar)
 
+        # Content stack
         self.stack = QStackedWidget()
         self.screens = [
             LiveScreen(self.engine, self.settings),
@@ -99,14 +216,14 @@ class MainWindow(QMainWindow):
         ]
         for screen in self.screens:
             self.stack.addWidget(screen)
-        right.addWidget(self.stack, 1)
-        layout.addLayout(right, 1)
-        self.setCentralWidget(central)
+        body.addWidget(self.stack, 1)
+        root.addLayout(body, 1)
 
+        self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage(
-            "Attendance is written to SQLite; the CSV log is observation telemetry only. "
-            "This build does not implement anti-spoofing/liveness detection.")
+            "Blink-based liveness detection is active.  "
+            "Attendance is persisted to SQLite with WAL journaling.")
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
         self._refresh_header()
@@ -124,7 +241,16 @@ class MainWindow(QMainWindow):
 
     # --- state propagation ------------------------------------------------
     def _engine_state(self, running):
-        self.engine_pill.set_status("RUNNING" if running else "STOPPED", "ok" if running else "idle")
+        self.engine_pill.set_status("RUNNING" if running else "STOPPED",
+                                    "ok" if running else "idle")
+        if running:
+            self._online_label.setText("● Online")
+            self._online_label.setStyleSheet("color: #16A34A; font-size: 12px; font-weight: 600;")
+            self.sys_status_label.setText("✅ All Systems Operational")
+        else:
+            self._online_label.setText("● Offline")
+            self._online_label.setStyleSheet("color: #DC2626; font-size: 12px; font-weight: 600;")
+            self.sys_status_label.setText("⚠️ Engine Stopped")
         self._refresh_header()
 
     def _refresh_header(self):
@@ -133,8 +259,8 @@ class MainWindow(QMainWindow):
             enrolled = self.engine.catalog.enrolled_count
         except Exception:
             enrolled = 0
-        self.header_subtitle.setText(f"{enrolled} employee(s) enrolled  |  "
-                                     f"recording pauses automatically when the camera drops")
+        self.welcome_sub.setText(
+            f"{enrolled} employee(s) enrolled  •  Face ID Attendance System")
 
     def _broadcast_settings(self, settings, restart):
         self.settings = settings
@@ -151,6 +277,9 @@ class MainWindow(QMainWindow):
                 handler(settings)
         self._refresh_header()
         self._note(f"Settings saved{'' if restart else ' (restart the engine to apply)'}")
+        if self.engine.running:
+            self.engine.persistence.log_audit("settings_changed",
+                                              "restart" if restart else "no_restart")
 
     def apply_theme(self, theme):
         application = QApplication.instance()
@@ -162,8 +291,9 @@ class MainWindow(QMainWindow):
                 setter(theme)
 
     def _tick(self):
-        from datetime import datetime
-        self.clock_label.setText(datetime.now().strftime("%a %d %b  %H:%M:%S"))
+        now = datetime.now()
+        self.clock_label.setText(now.strftime("%H:%M:%S"))
+        self.date_label.setText(now.strftime("%a %d %b %Y"))
 
     def _note(self, message):
         logging.info("dashboard: %s", message)
@@ -198,7 +328,6 @@ class MainWindow(QMainWindow):
         self.clock_timer.stop()
         self.telegram.stop()
         self.engine.shutdown()
-        # Closing each screen stops its timers and closes read-only connections.
         for screen in self.screens:
             try:
                 screen.close()
@@ -213,6 +342,11 @@ def run_dashboard(settings_path=None, autostart=False, argv=None):
     application = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
     application.setApplicationName("Face ID Attendance Dashboard")
     settings = Settings.load(settings_path)
+    if settings.dashboard_pin_hash:
+        dialog = LoginDialog(settings.dashboard_pin_hash)
+        application.setStyleSheet(stylesheet(settings.theme))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return 1
     window = MainWindow(settings, autostart=autostart)
     window.show()
     return application.exec()

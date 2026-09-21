@@ -1,10 +1,29 @@
 """All terminal tuning lives here; CLI arguments override these defaults."""
+import os
+import sys
 from dataclasses import dataclass
 import math
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent.parent
+def _app_root():
+    """When running from source, ROOT is the repo root.  When frozen by
+    PyInstaller, use a writable user-data directory so the app can create
+    databases, captures, and settings without needing write access to the
+    bundle itself."""
+    if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support" / "SV Face ID"
+        elif sys.platform == "win32":
+            base = Path(os.environ.get("APPDATA", Path.home())) / "SV Face ID"
+        else:
+            base = Path.home() / ".sv-face-id"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    return Path(__file__).resolve().parent.parent
+
+
+ROOT = _app_root()
 
 
 @dataclass(frozen=True)

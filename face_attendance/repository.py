@@ -54,6 +54,12 @@ class AttendanceRepository:
             conn.execute("""CREATE TABLE IF NOT EXISTS attendance_outbox (
                 event_id TEXT PRIMARY KEY, payload TEXT NOT NULL,
                 created_at TEXT NOT NULL, synced_at TEXT)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                action TEXT NOT NULL,
+                detail TEXT,
+                actor TEXT DEFAULT 'system')""")
             for row in conn.execute("SELECT id, name, timestamp FROM attendance WHERE employee_id IS NULL").fetchall():
                 employee_id = self._employee_id(row["name"])
                 try:
@@ -153,5 +159,21 @@ class AttendanceRepository:
             self.connection.execute("UPDATE attendance_outbox SET synced_at=? WHERE event_id=?",
                                     (utc_iso(self.clock()), event_id))
 
+    def audit(self, action, detail="", actor="system"):
+        try:
+            self.connection.execute(
+                "INSERT INTO audit_log(timestamp, action, detail, actor) VALUES (?, ?, ?, ?)",
+                (utc_iso(self.clock()), action, detail, actor))
+            self.connection.commit()
+        except Exception:
+            logging.debug("Audit log write failed", exc_info=True)
+
+    def checkpoint(self):
+        try:
+            self.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            logging.exception("WAL checkpoint failed")
+
     def close(self):
+        self.checkpoint()
         self.connection.close()

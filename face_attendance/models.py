@@ -59,6 +59,7 @@ class Detection:
     distance: Optional[float] = None
     encoded: bool = False
     hint_id: Optional[int] = None
+    landmarks: Any = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ class FaceTrack:
     visible: bool = True
     ambiguous: bool = False
     flow_ok: bool = False
+    liveness_ok: bool = False
     last_flow_at: float = float("-inf")
     state_since: float = 0.0
     retry_at: float = 0.0

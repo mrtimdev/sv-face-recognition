@@ -9,6 +9,9 @@ from .channels import LatestValue
 from .models import FramePacket
 
 
+MAX_RECONNECT_BACKOFF = 30.0
+
+
 class CameraManager:
     def __init__(self, config, capture_factory=None, clock=time.monotonic):
         self.config = config
@@ -55,6 +58,7 @@ class CameraManager:
 
     def _run(self):
         sequence, generation = 0, 0
+        backoff = self.config.reconnect_sec
         while not self.stop_event.is_set():
             cap = None
             try:
@@ -64,6 +68,7 @@ class CameraManager:
                     self._set_status("CAMERA DISCONNECTED")
                 else:
                     generation += 1
+                    backoff = self.config.reconnect_sec
                     count, fps_since = 0, self._clock()
                     while not self.stop_event.is_set():
                         ok, frame = cap.read()
@@ -76,7 +81,6 @@ class CameraManager:
                         if now - fps_since >= 1:
                             self.fps = count / (now - fps_since)
                             count, fps_since = 0, now
-                        # The published array is never modified by consumers.
                         self.frames.put(FramePacket(sequence, now, time.time(), generation, frame))
                         self._set_status("CONNECTED")
             except Exception:
@@ -85,7 +89,8 @@ class CameraManager:
             finally:
                 if cap is not None:
                     cap.release()
-            self.stop_event.wait(self.config.reconnect_sec)
+            self.stop_event.wait(backoff)
+            backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF)
         self._set_status("STOPPED")
 
     def close(self):

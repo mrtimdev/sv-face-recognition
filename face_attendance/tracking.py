@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from .geometry import association_cost, clamp_box, iou
+from .liveness import LivenessChecker
 from .models import FaceTrack, State, TrackHint
 
 
@@ -17,11 +18,13 @@ class FaceTracker:
         self.scale = 1.0
         self.generation = None
         self.last_result_sequence = -1
+        self.liveness = LivenessChecker()
 
     def clear(self):
         self.tracks.clear()
         self.previous_gray = None
         self.last_result_sequence = -1
+        self.liveness.clear()
 
     def suspend(self):
         for track in self.tracks.values():
@@ -183,6 +186,11 @@ class FaceTracker:
         track.recognition_distance = detection.distance
         track.recognition_history.append((packet.captured_at, employee.employee_id if employee else None,
                                           detection.distance))
+        if detection.landmarks:
+            _blinks, passed = self.liveness.update(track.track_id, detection.landmarks)
+            track.liveness_ok = passed
+        elif not self.liveness.active(track.track_id):
+            track.liveness_ok = True
         if employee is None:
             track.invalidate_identity()
             if track.pending_event_id is None:

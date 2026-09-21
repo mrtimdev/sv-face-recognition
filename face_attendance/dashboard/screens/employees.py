@@ -199,6 +199,7 @@ class EmployeesScreen(QWidget):
         self._engine_was_running = False
         self._thumb_cache = {}
         self._captures_map = {}
+        self._captures_dirty = True
         self._theme = settings.theme if hasattr(settings, "theme") else "dark"
         self._build()
         self._connect()
@@ -500,6 +501,7 @@ class EmployeesScreen(QWidget):
 
     def _connect(self):
         self.engine.catalogChanged.connect(lambda rows: self.reload())
+        self.engine.attendanceSaved.connect(lambda _: self._invalidate_captures())
         self.runner.finished.connect(self.on_enrollment_finished)
         self.sample_runner.validated.connect(self.on_sample_validated)
         self.probeReady.connect(self.on_probe)
@@ -1077,9 +1079,14 @@ class EmployeesScreen(QWidget):
     #  Catalog management (table, selection, delete)
     # =======================================================================
 
+    def _invalidate_captures(self):
+        self._captures_dirty = True
+
     def reload(self):
-        self._captures_map = self._scan_captures()
-        self._thumb_cache.clear()
+        if self._captures_dirty:
+            self._captures_map = self._scan_captures()
+            self._thumb_cache.clear()
+            self._captures_dirty = False
         self.rows = self.service.employees()
         self.table.setRowCount(len(self.rows))
         self.table.setSortingEnabled(False)
