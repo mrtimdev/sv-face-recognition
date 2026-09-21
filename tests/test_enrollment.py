@@ -1,4 +1,6 @@
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -30,3 +32,78 @@ class EnrollmentTests(unittest.TestCase):
                 patch.object(enroll_faces, "save_encodings") as save:
             enroll_faces.enroll("Test", "test.jpg")
             save.assert_not_called()
+
+
+class ConcurrencyProbe:
+    """Counts how many backend calls run at the same moment.
+
+    ``face_recognition`` wraps ONE global dlib detector, which is not
+    thread-safe: concurrent use segfaults the process (seen live when clicking
+    Capture while the recognition worker was detecting). The lock must reduce
+    every caller's overlap to exactly one.
+    """
+
+    def __init__(self):
+        self._guard = threading.Lock()
+        self.inside = 0
+        self.peak = 0
+
+    def _enter(self):
+        with self._guard:
+            self.inside += 1
+            self.peak = max(self.peak, self.inside)
+
+    def _leave(self):
+        with self._guard:
+            self.inside -= 1
+
+    def face_locations(self, image, model):
+        self._enter()
+        time.sleep(0.03)
+        self._leave()
+        return [(0, 10, 10, 0)]
+
+    def face_encodings(self, image, boxes):
+        self._enter()
+        time.sleep(0.03)
+        self._leave()
+        return [np.zeros(128) for _ in boxes]
+
+    def face_distance(self, known, candidate):
+        self._enter()
+        time.sleep(0.03)
+        self._leave()
+        return np.array([0.3])
+
+
+class BackendLockTests(unittest.TestCase):
+    FRAME = np.zeros((240, 320, 3), np.uint8)
+
+    def _run_threads(self, target, count=4):
+        threads = [threading.Thread(target=target) for _ in range(count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    def test_enrollment_detection_is_serialized(self):
+        from face_attendance.enrollment import detect_faces
+        probe = ConcurrencyProbe()
+        self._run_threads(lambda: detect_faces(probe, self.FRAME))
+        self.assertEqual(probe.peak, 1, "detect_faces ran concurrently on dlib")
+
+    def test_recognition_backend_calls_are_serialized(self):
+        from types import SimpleNamespace
+
+        from face_attendance.config import Config
+        from face_attendance.models import Employee, FramePacket, RecognitionRequest
+        from face_attendance.recognition import RecognitionService
+
+        probe = ConcurrencyProbe()
+        catalog = SimpleNamespace(employees=(Employee("A", "Alice"), Employee("A", "Alice")),
+                                  encodings=np.zeros((2, 128)))
+        service = RecognitionService(Config(), catalog, probe)
+        packet = FramePacket(100, 10, 1000, 1, self.FRAME)
+        self._run_threads(lambda: service.process(RecognitionRequest(packet, ())))
+        self.assertEqual(probe.peak, 1,
+                         "recognition worker and enrollment overlapped on dlib")

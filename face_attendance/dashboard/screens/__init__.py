@@ -1,0 +1,1 @@
+"""Dashboard screens; each one is a plain QWidget driven by engine signals."""

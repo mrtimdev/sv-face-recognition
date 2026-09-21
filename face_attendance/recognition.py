@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from .channels import LatestValue
+from .enrollment import FACE_BACKEND_LOCK
 from .geometry import association_cost, iou
 from .models import Detection, RecognitionResult
 
@@ -22,7 +23,8 @@ class RecognitionService:
 
     def match(self, encoding):
         # compare_faces also computes distances internally; compute them just once.
-        distances = self.backend.face_distance(self.catalog.encodings, encoding)
+        with FACE_BACKEND_LOCK:
+            distances = self.backend.face_distance(self.catalog.encodings, encoding)
         ranked = sorted((float(np.min(distances[indices])), indices[0])
                         for indices in self.employee_indices.values())
         best, index = ranked[0]
@@ -40,7 +42,8 @@ class RecognitionService:
                                           max(1, round(height * cfg.detection_scale))),
                            interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-        boxes = self.backend.face_locations(rgb, model="hog")
+        with FACE_BACKEND_LOCK:
+            boxes = self.backend.face_locations(rgb, model="hog")
         sx, sy = width / small.shape[1], height / small.shape[0]
         full_boxes = [(t * sy, r * sx, b * sy, l * sx) for t, r, b, l in boxes]
         hints, encode_indices, used_hints = {}, [], set()
@@ -64,7 +67,10 @@ class RecognitionService:
                 due = packet.sequence - hint.last_encoded_sequence >= cfg.recognition_interval
             if due:
                 encode_indices.append(index)
-        encodings = self.backend.face_encodings(rgb, [boxes[i] for i in encode_indices]) if encode_indices else []
+        encodings = []
+        if encode_indices:
+            with FACE_BACKEND_LOCK:
+                encodings = self.backend.face_encodings(rgb, [boxes[i] for i in encode_indices])
         matches = {}
         for index, encoding in zip(encode_indices, encodings):
             matches[index] = self.match(encoding)

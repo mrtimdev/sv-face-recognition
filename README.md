@@ -51,6 +51,47 @@ python generate_alert_sound.py
 The application works without audio. Sound is cached and played asynchronously
 from the persistence worker, with an alert cooldown.
 
+
+## Dashboard (PyQt6 admin UI)
+
+Launch the graphical admin dashboard:
+
+```bash
+python dashboard.py            # window opens with the engine stopped
+python dashboard.py --start    # open the camera and record attendance immediately
+python -m face_attendance.dashboard
+```
+
+Screens:
+
+- **Live Monitor** - live camera preview with overlays, engine start/pause/stop,
+  and health cards (camera status, FPS, latency, storage queue, DB path).
+- **Real-time Attendance** - streaming check-in feed for today with snapshot
+  thumbnails, per-face verification state/progress and unknown-face alerts.
+- **Attendance Report** - date presets/custom range, employee search, paging,
+  summary cards, outbox pending/synced counts and CSV export (UTF-8 BOM).
+- **Employees** - enroll by **live capture** (countdown, quality coaching,
+  multiple samples) or **photo upload** (drag & drop, single-face validation),
+  with display name and optional employee ID; manage/delete samples and aliases.
+- **Settings** - camera source (webcam index, IP/RTSP URL with masked password,
+  video file), resolution/FPS, recognition tuning, storage paths and dark/light
+  theme. Changes are saved to `settings.json` and applied when the engine
+  restarts (`Config` is immutable while running).
+
+Behavior notes:
+
+- One engine per data directory (`attendance.lock`); a second dashboard or a
+  terminal instance refuses to run against the same data.
+- Reports read through a separate read-only SQLite connection; they can never
+  record or modify attendance.
+- No anti-spoofing/liveness detection. The report can optionally label rows
+  Late/On time against a configured work start time (computed, never stored);
+  no shift/absent policy exists.
+- RTSP passwords are masked on screen and never logged. `settings.json` and
+  `attendance.lock` are gitignored local state.
+- macOS shows a camera-permission prompt on first run.
+
+
 ## Enrollment and employee IDs
 
 Existing `encodings.pickle` files work unchanged. The file still stores

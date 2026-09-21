@@ -60,6 +60,10 @@ faces/
 .AppleDouble
 .LSOverride
 
+# Dashboard local state (machine-specific settings and the engine lock)
+settings.json
+attendance.lock
+
 # IDE / editor
 .vscode/
 .idea/

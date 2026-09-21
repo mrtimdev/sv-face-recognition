@@ -101,6 +101,34 @@ class UIRenderer:
         self.config = config
         self.animations = AnimationManager(config)
         self.canvas = None
+        self.overlay_canvas = None
+
+    def render_overlay(self, clean_frame, tracks, now, wall_time, camera_status, recognition_error=""):
+        """Brackets, scan line and notifications only: no HUD, no resizing.
+
+        Used by the dashboard, which draws its statistics as Qt widgets beside
+        the video. The camera frame itself is never modified; the caller keeps
+        ownership of ``clean_frame`` and receives an internal canvas.
+        """
+        if self.overlay_canvas is None or self.overlay_canvas.shape != clean_frame.shape:
+            self.overlay_canvas = np.empty_like(clean_frame)
+        image = self.overlay_canvas
+        np.copyto(image, clean_frame)
+        height, width = image.shape[:2]
+        layout = Layout(width, height)
+        scan_y = int((now * height / 5) % height)
+        tint(image, (0, scan_y, width, scan_y + layout.px(2)), GREEN, 0.22)
+        for track in tracks.values():
+            if now - track.last_seen <= self.config.session_timeout:
+                self._face(image, track, now, layout)
+        captures, notices = self.animations.active(now)
+        self._capture(image, captures, now, layout)
+        self._notices(image, notices, now, wall_time, layout)
+        if camera_status != "CONNECTED":
+            self._status(image, camera_status, "Attendance paused until live video returns", layout)
+        elif recognition_error:
+            self._status(image, "RECOGNITION UNAVAILABLE", "Check the dashboard log", layout)
+        return image
 
     def render(self, clean_frame, tracks, now, wall_time, camera_status, camera_fps,
                preview_fps, enrolled, attendance, recognition_error=""):

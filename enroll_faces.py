@@ -15,72 +15,39 @@ Encodings are stored in encodings.pickle as:
 
 You can enroll the same person multiple times (different angles/lighting)
 to improve recognition accuracy -- each new encoding is appended.
+
+The atomic writers and the optional quality gates live in
+``face_attendance.enrollment`` and are shared with the dashboard, so both entry
+points write identical formats.
 """
 
 import argparse
-import json
-import os
-import pickle
-import tempfile
-from pathlib import Path
 
 import cv2
 import face_recognition
 
-from face_attendance.config import Config, parse_source
+from face_attendance import enrollment
 from face_attendance.catalog import load_employee_map
+from face_attendance.config import Config, parse_source
 
 
+# Kept at module level so existing callers can redirect the catalog paths and
+# keep the atomic writers patchable.
 ENCODINGS_PATH = str(Config().encodings_path)
 EMPLOYEES_PATH = Config().employees_path
 
 
 def load_encodings():
-    if os.path.exists(ENCODINGS_PATH):
-        with open(ENCODINGS_PATH, "rb") as f:
-            return pickle.load(f)
-    return {}
+    """The existing local format: {enrollment_name: [encoding, ...]}."""
+    return enrollment.read_encodings(ENCODINGS_PATH)
 
 
 def save_encodings(data):
-    path = Path(ENCODINGS_PATH)
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
-        temporary = Path(handle.name)
-        try:
-            pickle.dump(data, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        except Exception:
-            temporary.unlink(missing_ok=True)
-            raise
-    try:
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    enrollment.write_encodings(ENCODINGS_PATH, data)
 
 
 def save_employee(name, employee_id):
-    records = load_employee_map(EMPLOYEES_PATH)
-    previous = records.get(name)
-    if previous and previous.employee_id != employee_id:
-        raise ValueError(f"{name!r} is already mapped to {previous.employee_id}; use a deliberate ID migration to change it")
-    data = {key: {"employee_id": value.employee_id, "name": value.name} for key, value in records.items()}
-    canonical = previous.name if previous else next(
-        (employee.name for employee in records.values() if employee.employee_id == employee_id), name)
-    data[name] = {"employee_id": employee_id, "name": canonical}
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=EMPLOYEES_PATH.parent, delete=False) as handle:
-        temporary = Path(handle.name)
-        try:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        except Exception:
-            temporary.unlink(missing_ok=True)
-            raise
-    try:
-        os.replace(temporary, EMPLOYEES_PATH)
-    finally:
-        temporary.unlink(missing_ok=True)
+    return enrollment.write_employee(EMPLOYEES_PATH, name, employee_id)
 
 
 def capture_from_webcam(source=0):
@@ -110,7 +77,7 @@ def capture_from_webcam(source=0):
     return captured
 
 
-def enroll(name: str, image_path: str = None, employee_id=None, source=0):
+def enroll(name: str, image_path: str = None, employee_id=None, source=0, check_quality=False):
     if not name.strip() or (employee_id is not None and not employee_id.strip()):
         raise ValueError("Employee name and supplied employee ID must not be empty")
     if employee_id:
@@ -136,6 +103,12 @@ def enroll(name: str, image_path: str = None, employee_id=None, source=0):
     if len(boxes) > 1:
         print(f"Found {len(boxes)} faces. Use a photo with exactly one employee to avoid mis-enrollment.")
         return
+    if check_quality:
+        # Off by default so previously accepted photos keep working.
+        issues = enrollment.frame_quality(image, boxes[0])
+        if issues:
+            print("Sample rejected: " + "; ".join(issues))
+            return
 
     encodings = face_recognition.face_encodings(rgb, boxes)
     new_encoding = encodings[0]
@@ -157,6 +130,8 @@ if __name__ == "__main__":
     parser.add_argument("--image", default=None, help="Path to a photo (optional; else uses webcam)")
     parser.add_argument("--employee-id", help="Stable employee ID from your HRM backend (optional)")
     parser.add_argument("--source", default="0", help="Webcam index for enrollment (default 0)")
+    parser.add_argument("--check-quality", action="store_true",
+                        help="Also reject tiny, blurred or badly lit samples")
     args = parser.parse_args()
 
-    enroll(args.name, args.image, args.employee_id, args.source)
+    enroll(args.name, args.image, args.employee_id, args.source, args.check_quality)
