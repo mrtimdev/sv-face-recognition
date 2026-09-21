@@ -54,6 +54,8 @@ class AttendanceEngine(QObject):
     frameReady = pyqtSignal(object)          # annotated BGR frame (numpy)
     tracksReady = pyqtSignal(object)         # list of track snapshots
     statsReady = pyqtSignal(object)          # dict of live statistics
+    captureTriggered = pyqtSignal(object)    # CaptureJob when auto-capture fires
+    unknownFaceAlert = pyqtSignal(object)   # dict snapshot of unknown face for alerts
     attendanceSaved = pyqtSignal(object)     # SaveResult after a committed row
     attendanceFailed = pyqtSignal(object)    # SaveResult with outcome "error"
     catalogChanged = pyqtSignal(object)      # employee rows after rebuild
@@ -75,6 +77,7 @@ class AttendanceEngine(QObject):
         self._thread = None
         self._stats = {}
         self._last_elapsed = 0.0
+        self._unknown_alerted = set()
         self.config = None
         self.catalog = None
         self._build()
@@ -112,7 +115,7 @@ class AttendanceEngine(QObject):
         if self.running:
             return
         self.acquire_lock()
-        # Rebuild on every start: settings or the enrollment catalog may have changed.
+        self._unknown_alerted.clear()
         self._build()
         self._stop.clear()
         self.persistence.start()
@@ -236,6 +239,7 @@ class AttendanceEngine(QObject):
                     for job in self.attendance.update(self.tracker.tracks, packet, now,
                                                       status == "CONNECTED"):
                         self.renderer.animations.capture(job, now)
+                        self.captureTriggered.emit(job)
                     self.attendance.observe(self.tracker.tracks, now, wall_time)
                 elapsed = now - fps_since
                 if elapsed >= 1.0:
@@ -249,6 +253,18 @@ class AttendanceEngine(QObject):
                                            for track in self.tracker.tracks.values()])
                     self._stats = self._statistics(status, preview_fps, recognition_error)
                     self.statsReady.emit(self._stats)
+                    for track in self.tracker.tracks.values():
+                        if (track.visible and not track.employee_id
+                                and track.track_id not in self._unknown_alerted
+                                and now - track.first_seen >= 2.0):
+                            self._unknown_alerted.add(track.track_id)
+                            with self._clean_lock:
+                                snap = None if self._clean is None else self._clean.copy()
+                            self.unknownFaceAlert.emit({
+                                "track_id": track.track_id,
+                                "age": round(now - track.first_seen, 1),
+                                "frame": snap,
+                            })
                 delay = 1 / cfg.target_fps - (time.monotonic() - started)
                 if delay > 0:
                     self._stop.wait(delay)
@@ -283,4 +299,5 @@ class AttendanceEngine(QObject):
                 "queue_max": cfg.persistence_queue_size,
                 "db_path": str(cfg.db_path),
                 "capture_dir": str(cfg.capture_dir),
-                "recognition_error_count": len([track for track in tracks.values() if track.error])}
+                "recognition_error_count": len([track for track in tracks.values() if track.error]),
+                "max_detect_faces": getattr(cfg, "max_detect_faces", 5)}

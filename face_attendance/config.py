@@ -36,6 +36,7 @@ class Config:
     reconnect_sec: float = 1.0
     camera_stale_sec: float = 1.0
     opencv_threads: int = 1
+    max_detect_faces: int = 5
     alert_cooldown_sec: float = 3.0
     log_cooldown_sec: float = 10.0
     encodings_path: Path = ROOT / "encodings.pickle"
@@ -52,7 +53,8 @@ class Config:
                       "max_result_age_sec", "session_timeout", "tracker_width",
                       "flash_duration", "shutter_duration", "success_duration", "retry_sec",
                       "persistence_queue_size", "camera_timeout_ms", "reconnect_sec",
-                      "camera_stale_sec", "opencv_threads", "stable_recheck_sec"):
+                      "camera_stale_sec", "opencv_threads", "stable_recheck_sec",
+                      "max_detect_faces"):
             if not math.isfinite(getattr(self, field)) or getattr(self, field) <= 0:
                 raise ValueError(f"{field} must be positive")
         if not 0 < self.detection_scale <= 1:

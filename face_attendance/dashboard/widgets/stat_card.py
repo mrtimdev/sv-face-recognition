@@ -1,4 +1,8 @@
-"""Compact metric tile with an optional tone colour."""
+"""Compact metric tile with an optional tone colour.
+
+Caches the current value and tone so redundant updates (which would trigger
+expensive Qt style re-polishing) are skipped entirely.
+"""
 from PyQt6.QtWidgets import QFrame, QLabel, QVBoxLayout
 
 
@@ -19,18 +23,29 @@ class StatCard(QFrame):
         for widget in (self.title_label, self.value_label, self.hint_label):
             layout.addWidget(widget)
         self.setMinimumWidth(120)
+        self._current_value = str(value)
+        self._current_tone = "idle"
+        self._current_hint = hint
         self.set_tone("idle")
 
     def set_value(self, value, tone=None):
-        self.value_label.setText(str(value))
-        if tone is not None:
+        text = str(value)
+        if text != self._current_value:
+            self._current_value = text
+            self.value_label.setText(text)
+        if tone is not None and tone != self._current_tone:
             self.set_tone(tone)
 
     def set_hint(self, hint):
-        self.hint_label.setText(str(hint))
+        hint = str(hint)
+        if hint != self._current_hint:
+            self._current_hint = hint
+            self.hint_label.setText(hint)
 
     def set_tone(self, tone):
-        self._repolish(self.value_label, tone)
+        if tone != self._current_tone:
+            self._current_tone = tone
+            self._repolish(self.value_label, tone)
 
     def set_theme(self, theme):
         for widget in (self.title_label, self.value_label, self.hint_label):

@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QComboBox, QGridLayout, QHBoxLayout, QHeaderView, Q
                              QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ...report import AttendanceReader, preset_range
+from ..sound import SoundPlayer
 from ..theme import palette
 from ..widgets import StatCard, ToastBar, VideoView
 
@@ -30,6 +31,8 @@ class RealtimeScreen(QWidget):
         self.unknown_seen = set()
         self.records = []
         self.cards = {}
+        self._prev_track_count = 0
+        self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
         self._build()
         self._connect()
         self.refresh_timer = QTimer(self)
@@ -128,6 +131,7 @@ class RealtimeScreen(QWidget):
         self.engine.frameReady.connect(self.video.set_frame)
         self.engine.statsReady.connect(self.on_stats)
         self.engine.tracksReady.connect(self.on_tracks)
+        self.engine.captureTriggered.connect(self.on_capture)
         self.engine.attendanceSaved.connect(self.on_saved)
         self.engine.errorRaised.connect(lambda message: self.toast.show_message(message, "bad"))
         self.refresh_button.clicked.connect(self.reload)
@@ -137,13 +141,21 @@ class RealtimeScreen(QWidget):
     # --- engine signals ---------------------------------------------------
     def on_stats(self, stats):
         self.cards["faces"].set_value(stats.get("faces", 0))
-        self.cards["faces"].set_hint(f"{stats.get('known_faces', 0)} verified")
+        max_faces = stats.get("max_detect_faces", 5)
+        self.cards["faces"].set_hint(
+            f"{stats.get('known_faces', 0)} verified  |  max {max_faces}")
         if not stats.get("storage_ready", True):
             self.toast.show_message("Attendance storage is not ready.", "bad")
 
     def on_tracks(self, tracks):
         self.tracks = tracks
         self._note_unknown(tracks)
+
+    def on_capture(self, job):
+        """Play a capture sound and show feedback when a face is auto-grabbed."""
+        self.toast.show_message(
+            f"Captured {job.employee_name} - saving...", "warn")
+        self._sound.play()
 
     def on_saved(self, result):
         self.toast.show_message(f"{result.job.employee_name} checked in "
@@ -166,8 +178,14 @@ class RealtimeScreen(QWidget):
             self.cards["unknown"].set_value(len(self.unknown_seen))
 
     def _render_tracks(self):
+        """Update the tracks table, reusing existing items where possible to
+        avoid widget churn and reduce layout recalculation overhead."""
         rows = self.tracks
-        self.tracks_table.setRowCount(len(rows))
+        count = len(rows)
+        # Only resize the table when the row count changes.
+        if count != self._prev_track_count:
+            self.tracks_table.setRowCount(count)
+            self._prev_track_count = count
         colors = palette(self.settings.theme)
         for index, snapshot in enumerate(rows):
             state = snapshot["state"]
@@ -175,13 +193,27 @@ class RealtimeScreen(QWidget):
                       state, f"{snapshot['progress'] * 100:.0f}%",
                       f"{snapshot['cooldown']:.0f}s" if snapshot["cooldown"] else "-")
             for column, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                if column == 3:
-                    tone = STATE_TONES.get(state, "idle")
-                    item.setForeground(QColor(colors["accent" if tone == "ok" else
-                                                    "warn" if tone == "warn" else
-                                                    "danger" if tone == "bad" else "muted"]))
-                self.tracks_table.setItem(index, column, item)
+                text = str(value)
+                existing = self.tracks_table.item(index, column)
+                if existing is not None:
+                    # Reuse the existing item — just update its text and colour.
+                    if existing.text() != text:
+                        existing.setText(text)
+                    if column == 3:
+                        tone = STATE_TONES.get(state, "idle")
+                        color = QColor(colors["accent" if tone == "ok" else
+                                                "warn" if tone == "warn" else
+                                                "danger" if tone == "bad" else "muted"])
+                        if existing.foreground().color() != color:
+                            existing.setForeground(color)
+                else:
+                    item = QTableWidgetItem(text)
+                    if column == 3:
+                        tone = STATE_TONES.get(state, "idle")
+                        item.setForeground(QColor(colors["accent" if tone == "ok" else
+                                                          "warn" if tone == "warn" else
+                                                          "danger" if tone == "bad" else "muted"]))
+                    self.tracks_table.setItem(index, column, item)
 
     # --- committed attendance ---------------------------------------------
     def reload(self):
@@ -221,12 +253,14 @@ class RealtimeScreen(QWidget):
         self.settings = settings
         self.reader.close()
         self.reader = AttendanceReader(self.settings.db_path)
+        self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
         self.reload()
 
     def closeEvent(self, event):
         self.reader.close()
         self.refresh_timer.stop()
         self.track_timer.stop()
+        self._sound.stop()
         super().closeEvent(event)
 
     def set_theme(self, theme):

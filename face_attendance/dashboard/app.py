@@ -17,6 +17,7 @@ from .screens.live import LiveScreen
 from .screens.realtime import RealtimeScreen
 from .screens.report import ReportScreen
 from .screens.settings import SettingsScreen
+from .telegram import TelegramService
 from .theme import stylesheet
 from .widgets import StatusPill
 
@@ -31,6 +32,12 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.engine = AttendanceEngine(settings, self, backend=backend,
                                       capture_factory=capture_factory, use_lock=use_lock)
+        self.telegram = TelegramService(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+            notify_capture=settings.telegram_notify_capture,
+            notify_unknown=settings.telegram_notify_unknown,
+        )
         self.setWindowTitle("Face ID Attendance - Admin Dashboard")
         self.resize(1500, 950)
         self.setMinimumSize(1100, 720)
@@ -40,6 +47,8 @@ class MainWindow(QMainWindow):
         self.engine.logMessage.connect(self._note)
         self.engine.errorRaised.connect(lambda message: self._note(f"ERROR: {message}"))
         self.engine.catalogChanged.connect(lambda rows: self._refresh_header())
+        self.engine.attendanceSaved.connect(self._telegram_on_saved)
+        self.engine.unknownFaceAlert.connect(self._telegram_on_unknown)
         if autostart:
             QTimer.singleShot(0, self._autostart)
 
@@ -130,6 +139,12 @@ class MainWindow(QMainWindow):
     def _broadcast_settings(self, settings, restart):
         self.settings = settings
         self.apply_theme(settings.theme)
+        self.telegram.reconfigure(
+            bot_token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+            notify_capture=settings.telegram_notify_capture,
+            notify_unknown=settings.telegram_notify_unknown,
+        )
         for screen in self.screens:
             handler = getattr(screen, "on_settings_changed", None)
             if callable(handler):
@@ -154,6 +169,23 @@ class MainWindow(QMainWindow):
         logging.info("dashboard: %s", message)
         self.statusBar().showMessage(message, 8000)
 
+    # --- telegram handlers ------------------------------------------------
+    def _telegram_on_saved(self, result):
+        job = result.job
+        self.telegram.send_capture(
+            employee_name=job.employee_name,
+            employee_id=job.employee_id,
+            duration=job.duration,
+            frame=job.frame,
+        )
+
+    def _telegram_on_unknown(self, info):
+        self.telegram.send_unknown_alert(
+            track_id=info["track_id"],
+            age=info["age"],
+            frame=info.get("frame"),
+        )
+
     def _autostart(self):
         try:
             self.engine.start()
@@ -164,6 +196,7 @@ class MainWindow(QMainWindow):
     # --- shutdown ---------------------------------------------------------
     def closeEvent(self, event):
         self.clock_timer.stop()
+        self.telegram.stop()
         self.engine.shutdown()
         # Closing each screen stops its timers and closes read-only connections.
         for screen in self.screens:

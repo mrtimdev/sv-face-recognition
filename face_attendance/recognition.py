@@ -46,6 +46,15 @@ class RecognitionService:
             boxes = self.backend.face_locations(rgb, model="hog")
         sx, sy = width / small.shape[1], height / small.shape[0]
         full_boxes = [(t * sy, r * sx, b * sy, l * sx) for t, r, b, l in boxes]
+        # Limit to max_detect_faces, keeping the largest faces first.
+        max_faces = getattr(cfg, "max_detect_faces", 5)
+        if len(full_boxes) > max_faces:
+            sized = sorted(enumerate(full_boxes),
+                           key=lambda item: (item[1][2] - item[1][0]) * (item[1][1] - item[1][3]),
+                           reverse=True)
+            keep = {item[0] for item in sized[:max_faces]}
+            boxes = [boxes[i] for i in sorted(keep)]
+            full_boxes = [full_boxes[i] for i in sorted(keep)]
         hints, encode_indices, used_hints = {}, [], set()
         for index, box in enumerate(full_boxes):
             candidates = sorted((association_cost(box, hint.bounding_box), hint.track_id, hint)

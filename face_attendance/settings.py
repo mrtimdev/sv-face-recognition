@@ -59,6 +59,7 @@ class Settings:
     capture_after_sec: float = 3.0
     cooldown_sec: float = 30.0
     opencv_threads: int = 1
+    max_detect_faces: int = 5
     camera_timeout_ms: int = 2500
     reconnect_sec: float = 1.0
     persistence_queue_size: int = 8
@@ -71,6 +72,10 @@ class Settings:
     theme: str = "dark"
     report_page_size: int = 100
     report_work_start: str = ""  # opt-in "Late" label in reports; "" disables it
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_notify_capture: bool = True
+    telegram_notify_unknown: bool = True
 
     def to_config(self):
         """Build a validated ``Config``; raises ``ValueError`` for bad values."""

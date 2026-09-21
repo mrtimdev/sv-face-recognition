@@ -6,7 +6,7 @@ through ``Config`` itself (``Settings.to_config``) exactly like the CLI does.
 """
 from pathlib import Path
 
-from PyQt6.QtCore import QTime, Qt, pyqtSignal
+from PyQt6.QtCore import QThread, QTime, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                              QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                              QPushButton, QScrollArea, QSpinBox, QTimeEdit, QVBoxLayout,
@@ -50,6 +50,7 @@ class SettingsScreen(QWidget):
         column.addWidget(self._build_recognition_group())
         column.addWidget(self._build_storage_group())
         column.addWidget(self._build_report_group())
+        column.addWidget(self._build_telegram_group())
         column.addStretch(1)
         scroll.setWidget(holder)
         outer.addWidget(scroll, 1)
@@ -131,6 +132,9 @@ class SettingsScreen(QWidget):
     def _build_recognition_group(self):
         group, form = self._form("Recognition and attendance")
         for key, label, low, high, step, decimals, hint in (
+                ("max_detect_faces", "Max faces to detect", 1, 20, 1, 0,
+                 "Upper limit on simultaneous faces the engine will process per frame. "
+                 "Higher values use more CPU; 5 is a sensible default for most setups."),
                 ("face_tolerance", "Face tolerance", 0.3, 0.9, 0.01, 2,
                  "Lower is stricter. Loosening this never fixes duplicate enrollment data."),
                 ("identity_margin", "Identity margin", 0.0, 0.3, 0.005, 3,
@@ -197,6 +201,58 @@ class SettingsScreen(QWidget):
         self.fields["report_work_start"] = work
         return group
 
+    def _build_telegram_group(self):
+        group, form = self._form("Telegram Notifications")
+        token_edit = QLineEdit()
+        token_edit.setPlaceholderText("123456789:ABCdefGHIjklMNOpqrSTUvwxYZ")
+        token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._register(form, "telegram_bot_token", "Bot token", token_edit,
+                       "Create a bot with @BotFather on Telegram and paste the token here.")
+        chat_edit = QLineEdit()
+        chat_edit.setPlaceholderText("-1001234567890 or your user ID")
+        self._register(form, "telegram_chat_id", "Chat ID", chat_edit,
+                       "Send /start to your bot, then use @userinfobot or @RawDataBot to find your chat ID. "
+                       "For groups, add the bot and use the group's chat ID (starts with -).")
+        self.tg_capture_check = QCheckBox("Send photo and details on every attendance capture")
+        self.tg_capture_check.setChecked(True)
+        form.addRow("On capture", self.tg_capture_check)
+        self.fields["telegram_notify_capture"] = self.tg_capture_check
+        self.tg_unknown_check = QCheckBox("Send danger alert when an unknown face is detected")
+        self.tg_unknown_check.setChecked(True)
+        form.addRow("On unknown face", self.tg_unknown_check)
+        self.fields["telegram_notify_unknown"] = self.tg_unknown_check
+        self.tg_test_button = QPushButton("Verify Bot & Send Test Message")
+        self.tg_test_button.setObjectName("primary")
+        self.tg_test_result = QLabel("")
+        self.tg_test_result.setObjectName("screenSubtitle")
+        self.tg_test_result.setWordWrap(True)
+        row = QHBoxLayout()
+        row.addWidget(self.tg_test_button)
+        row.addWidget(self.tg_test_result, 1)
+        container = QWidget()
+        container.setLayout(row)
+        form.addRow("", container)
+        self.tg_test_button.clicked.connect(self._test_telegram)
+        return group
+
+    def _test_telegram(self):
+        token = self.fields["telegram_bot_token"].text().strip()
+        chat_id = self.fields["telegram_chat_id"].text().strip()
+        if not token or not chat_id:
+            self.tg_test_result.setText("Enter both a bot token and chat ID first.")
+            return
+        self.tg_test_button.setEnabled(False)
+        self.tg_test_result.setText("Connecting...")
+        self._tg_worker = _TelegramTestWorker(token, chat_id)
+        self._tg_worker.finished.connect(self._on_telegram_test_done)
+        self._tg_worker.start()
+
+    def _on_telegram_test_done(self, result):
+        self.tg_test_result.setText(result)
+        self.tg_test_button.setEnabled(True)
+        tone = "ok" if "successfully" in result.lower() else "bad"
+        self.toast.show_message(result, tone)
+
     @staticmethod
     def _spin(low, high):
         box = QSpinBox()
@@ -253,10 +309,12 @@ class SettingsScreen(QWidget):
                     parts = (str(value).split(":") + ["0", "0"])[:2]
                     widget.setTime(QTime(int(parts[0] or 0), int(parts[1] or 0)))
                 continue
-            if isinstance(widget, QComboBox):
+            if isinstance(widget, QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, QComboBox):
                 self._select_data(widget, value)
             elif isinstance(widget, QLineEdit):
-                widget.setText(str(value))
+                widget.setText(str(value) if value else "")
             else:
                 if isinstance(widget, QDoubleSpinBox):
                     widget.setValue(float(value) if value is not None else 0.0)
@@ -282,6 +340,8 @@ class SettingsScreen(QWidget):
                 continue
             if key == "report_work_start":
                 values[key] = widget.time().toString("HH:mm") if self.work_start_check.isChecked() else ""
+            elif isinstance(widget, QCheckBox):
+                values[key] = widget.isChecked()
             elif isinstance(widget, QComboBox):
                 values[key] = widget.currentData()
             elif isinstance(widget, QLineEdit):
@@ -335,3 +395,19 @@ class SettingsScreen(QWidget):
 
     def set_theme(self, theme):
         return None  # Colours come from the application stylesheet.
+
+
+class _TelegramTestWorker(QThread):
+    finished = pyqtSignal(str)
+
+    def __init__(self, token, chat_id):
+        super().__init__()
+        self._token = token
+        self._chat_id = chat_id
+
+    def run(self):
+        from ..telegram import TelegramService
+        service = TelegramService(self._token, self._chat_id)
+        result = service.send_test()
+        service.stop()
+        self.finished.emit(result)

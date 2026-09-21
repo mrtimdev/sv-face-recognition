@@ -1,4 +1,4 @@
-"""Live Monitor: preview, engine control and live statistics."""
+"""Live Monitor: preview, engine control, live statistics and capture sound."""
 from datetime import datetime
 from pathlib import Path
 
@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (QFileDialog, QGridLayout, QHBoxLayout, QLabel, QLis
                              QListWidgetItem, QPushButton, QVBoxLayout, QWidget)
 
 from ...settings import describe_source
+from ..sound import SoundPlayer
 from ..widgets import StatCard, StatusPill, ToastBar, VideoView
 
 
@@ -35,6 +36,7 @@ class LiveScreen(QWidget):
         self.engine = engine
         self.settings = settings
         self.cards = {}
+        self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
         self._build()
         self._connect()
         self._sync_running(engine.running)
@@ -109,6 +111,7 @@ class LiveScreen(QWidget):
     def _connect(self):
         self.engine.frameReady.connect(self.on_frame)
         self.engine.statsReady.connect(self.on_stats)
+        self.engine.captureTriggered.connect(self.on_capture)
         self.engine.attendanceSaved.connect(self.on_saved)
         self.engine.attendanceFailed.connect(self.on_failed)
         self.engine.runningChanged.connect(self._sync_running)
@@ -171,8 +174,10 @@ class LiveScreen(QWidget):
         self.cards["camera_fps"].set_value(f"{stats.get('camera_fps', 0):.1f}")
         self.cards["preview_fps"].set_value(f"{stats.get('preview_fps', 0):.1f}")
         faces = stats.get("faces", 0)
+        max_faces = stats.get("max_detect_faces", 5)
         self.cards["faces"].set_value(faces)
-        self.cards["faces"].set_hint(f"{stats.get('unknown_faces', 0)} unknown")
+        self.cards["faces"].set_hint(
+            f"{stats.get('unknown_faces', 0)} unknown  |  max {max_faces}")
         self.cards["known"].set_value(stats.get("known_faces", 0),
                                       "ok" if stats.get("known_faces") else "idle")
         presence = stats.get("presence", 0.0)
@@ -194,6 +199,14 @@ class LiveScreen(QWidget):
         if not stats.get("storage_ready", False):
             problems.insert(0, "Attendance storage is not ready; recording is disabled.")
         self.problem.setText(" | ".join(problems))
+
+    def on_capture(self, job):
+        """Immediate feedback when a face is auto-captured (before DB save)."""
+        self._log(f"CAPTURED  {job.employee_name} ({job.employee_id}), "
+                  f"{job.duration:.1f}s verified")
+        self.toast.show_message(
+            f"Captured {job.employee_name} - saving attendance...", "warn")
+        self._sound.play()
 
     def on_saved(self, result):
         recorded = datetime.fromtimestamp(result.recorded_at or 0).strftime("%H:%M:%S")
@@ -248,7 +261,16 @@ class LiveScreen(QWidget):
             self.activity.takeItem(self.activity.count() - 1)
         self.activity.scrollToTop()
 
+    def on_settings_changed(self, settings):
+        self.settings = settings
+        self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
+        self._update_subtitle()
+
     def set_theme(self, theme):
         self.video.set_theme(theme)
         for card in self.cards.values():
             card.set_theme(theme)
+
+    def close(self):
+        self._sound.stop()
+        super().close()
