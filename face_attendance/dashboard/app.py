@@ -6,7 +6,7 @@ signals and are notified of settings changes by ``_broadcast_settings``.
 import logging
 from datetime import datetime
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel,
                              QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                              QMessageBox, QPushButton, QStackedWidget, QStatusBar,
@@ -14,23 +14,63 @@ from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel,
 
 from ..settings import SETTINGS_PATH, Settings, describe_source, hash_pin
 from .engine import AttendanceEngine
+from .icons import IconLabel, apply_button_icon, make_icon
 from .screens.employees import EmployeesScreen
 from .screens.live import LiveScreen
 from .screens.realtime import RealtimeScreen
 from .screens.report import ReportScreen
 from .screens.settings import SettingsScreen
 from .telegram import TelegramService
-from .theme import stylesheet
-from .widgets import StatusPill
+from .theme import palette, stylesheet
+from .widgets import Avatar, StatusPill
 
+APP_VERSION = "v2.0.0"
+SIDEBAR_WIDTH = 244
 
 NAV = (
-    ("\U0001F4FA", "Live Monitor"),
-    ("\U0001F4CB", "Real-time Attendance"),
-    ("\U0001F4CA", "Attendance Report"),
-    ("\U0001F465", "Employees"),
-    ("⚙️", "Settings"),
+    ("monitor", "Live Monitor"),
+    ("list", "Real-time Attendance"),
+    ("chart", "Attendance Report"),
+    ("users", "Employees"),
+    ("gear", "Settings"),
 )
+
+
+class NotificationButton(QPushButton):
+    """Round icon button that can carry an unread-count bubble."""
+
+    def __init__(self, icon_name="bell", parent=None):
+        super().__init__(parent)
+        self.setObjectName("headerIconButton")
+        self.setFixedSize(42, 42)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._icon_label = IconLabel(icon_name, 20, palette("light")["muted"], parent=self)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._icon_label, 0, Qt.AlignmentFlag.AlignCenter)
+        self.badge = QLabel("", self)
+        self.badge.setObjectName("badge")
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.badge.setVisible(False)
+
+    def set_icon_name(self, name, color):
+        self._icon_label.set_icon(name)
+        self._icon_label.set_icon_color(color)
+
+    def set_count(self, count):
+        count = int(count or 0)
+        self.badge.setText(str(count) if count < 100 else "99+")
+        self.badge.setVisible(count > 0)
+        self._place_badge()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_badge()
+
+    def _place_badge(self):
+        width = max(16, self.badge.fontMetrics().horizontalAdvance(self.badge.text()) + 8)
+        self.badge.setFixedSize(width, 16)
+        self.badge.move(self.width() - width - 5, 3)
 
 
 class LoginDialog(QDialog):
@@ -41,21 +81,67 @@ class LoginDialog(QDialog):
         self._pin_hash = pin_hash
         self._attempts = 0
         self.setWindowTitle("Face ID Attendance - Login")
-        self.setFixedSize(360, 180)
+        self.setFixedSize(400, 320)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
-        layout = QVBoxLayout(self)
-        layout.setSpacing(12)
-        layout.addWidget(QLabel("Enter the dashboard PIN to continue:"))
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        card = QFrame()
+        card.setObjectName("loginCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(24, 26, 24, 22)
+        layout.setSpacing(10)
+
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
+        tile = QFrame()
+        tile.setObjectName("brandTile")
+        tile.setFixedSize(40, 40)
+        tile_layout = QHBoxLayout(tile)
+        tile_layout.setContentsMargins(0, 0, 0, 0)
+        self._brand_icon = IconLabel("face-id", 22, "#FFFFFF")
+        tile_layout.addWidget(self._brand_icon, 0, Qt.AlignmentFlag.AlignCenter)
+        brand_row.addWidget(tile)
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(0)
+        brand_title = QLabel("Face ID Attendance")
+        brand_title.setObjectName("appTitle")
+        brand_note = QLabel("Administrator sign-in")
+        brand_note.setObjectName("brandMark")
+        brand_text.addWidget(brand_title)
+        brand_text.addWidget(brand_note)
+        brand_row.addLayout(brand_text)
+        brand_row.addStretch(1)
+        layout.addLayout(brand_row)
+        layout.addSpacing(6)
+
+        title = QLabel("Unlock the dashboard")
+        title.setObjectName("loginTitle")
+        layout.addWidget(title)
+        hint = QLabel("Enter the dashboard PIN to continue.")
+        hint.setObjectName("emptyBody")
+        layout.addWidget(hint)
+        layout.addSpacing(4)
+
         self._pin = QLineEdit()
         self._pin.setEchoMode(QLineEdit.EchoMode.Password)
         self._pin.setPlaceholderText("PIN")
+        self._pin.setMinimumHeight(38)
         self._pin.returnPressed.connect(self._check)
         layout.addWidget(self._pin)
         self._message = QLabel("")
+        self._message.setObjectName("emptyBody")
+        self._message.setWordWrap(True)
         layout.addWidget(self._message)
-        self._button = QPushButton("Unlock")
+        layout.addStretch(1)
+
+        self._button = QPushButton("Unlock dashboard")
+        self._button.setObjectName("primary")
+        self._button.setMinimumHeight(38)
         self._button.clicked.connect(self._check)
         layout.addWidget(self._button)
+        outer.addWidget(card)
+        self._pin.setFocus()
 
     def _check(self):
         if hash_pin(self._pin.text()) == self._pin_hash:
@@ -86,8 +172,9 @@ class MainWindow(QMainWindow):
             notify_unknown=settings.telegram_notify_unknown,
         )
         self.setWindowTitle("Face ID Attendance - Admin Dashboard")
-        self.resize(1500, 950)
-        self.setMinimumSize(1100, 720)
+        self.resize(1280, 800)
+        self.setMinimumSize(1100, 680)
+        self._pending_notifications = 0
         self._build()
         self._connect()
         self.apply_theme(settings.theme)
@@ -99,113 +186,20 @@ class MainWindow(QMainWindow):
         if autostart:
             QTimer.singleShot(0, self._autostart)
 
+    # ── construction ───────────────────────────────────────────────────────
+
     def _build(self):
         central = QWidget()
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+        root.addWidget(self._build_header())
 
-        # ── Header bar ──────────────────────────────────────────────
-        header = QFrame()
-        header.setObjectName("headerBar")
-        header.setFixedHeight(64)
-        hl = QHBoxLayout(header)
-        hl.setContentsMargins(20, 0, 20, 0)
-        hl.setSpacing(16)
-
-        welcome_col = QVBoxLayout()
-        welcome_col.setSpacing(0)
-        self.welcome_label = QLabel("Welcome back, Admin")
-        self.welcome_label.setObjectName("welcomeText")
-        self.welcome_sub = QLabel("Face ID Attendance System")
-        self.welcome_sub.setObjectName("welcomeSub")
-        welcome_col.addWidget(self.welcome_label)
-        welcome_col.addWidget(self.welcome_sub)
-        hl.addLayout(welcome_col)
-        hl.addStretch(1)
-
-        self.engine_pill = StatusPill("STOPPED", "idle")
-        hl.addWidget(self.engine_pill)
-
-        self.notif_label = QLabel("\U0001F514")
-        self.notif_label.setToolTip("Notifications")
-        self.notif_label.setStyleSheet("font-size: 18px; background: transparent;")
-        hl.addWidget(self.notif_label)
-
-        clock_col = QVBoxLayout()
-        clock_col.setSpacing(0)
-        clock_col.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.clock_label = QLabel("")
-        self.clock_label.setObjectName("headerClock")
-        self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.date_label = QLabel("")
-        self.date_label.setObjectName("headerDate")
-        self.date_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        clock_col.addWidget(self.clock_label)
-        clock_col.addWidget(self.date_label)
-        hl.addLayout(clock_col)
-
-        avatar = QLabel("\U0001F464")
-        avatar.setStyleSheet(
-            "font-size: 24px; background: #E2E8F0; border-radius: 18px; "
-            "padding: 4px 8px; min-width: 36px; min-height: 36px;")
-        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hl.addWidget(avatar)
-        root.addWidget(header)
-
-        # ── Body: sidebar + content ─────────────────────────────────
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
+        body.addWidget(self._build_sidebar())
 
-        # Sidebar
-        sidebar = QVBoxLayout()
-        sidebar.setContentsMargins(0, 0, 0, 0)
-        sidebar.setSpacing(0)
-
-        logo_frame = QWidget()
-        logo_lay = QVBoxLayout(logo_frame)
-        logo_lay.setContentsMargins(16, 16, 16, 8)
-        logo_lay.setSpacing(4)
-        logo = QLabel("SV Face ID")
-        logo.setObjectName("appTitle")
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        online_label = QLabel("● Online")
-        online_label.setStyleSheet("color: #16A34A; font-size: 12px; font-weight: 600;")
-        online_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo_lay.addWidget(logo)
-        logo_lay.addWidget(online_label)
-        self._online_label = online_label
-        sidebar.addWidget(logo_frame)
-
-        self.nav = QListWidget()
-        self.nav.setObjectName("nav")
-        self.nav.setFixedWidth(220)
-        for icon, name in NAV:
-            self.nav.addItem(QListWidgetItem(f"{icon}  {name}"))
-        sidebar.addWidget(self.nav, 1)
-
-        # Sidebar footer
-        footer_frame = QFrame()
-        footer_frame.setObjectName("sidebarFooter")
-        footer_frame.setFixedWidth(220)
-        footer_lay = QVBoxLayout(footer_frame)
-        footer_lay.setContentsMargins(14, 10, 14, 10)
-        footer_lay.setSpacing(4)
-        self.source_pill = StatusPill("-", "idle")
-        footer_lay.addWidget(self.source_pill)
-        self.sys_status_label = QLabel("✅ All Systems Operational")
-        self.sys_status_label.setObjectName("muted")
-        self.sys_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_lay.addWidget(self.sys_status_label)
-        version = QLabel("v1.0.0  © 2026 SV Technologies")
-        version.setObjectName("versionLabel")
-        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_lay.addWidget(version)
-        sidebar.addWidget(footer_frame)
-        body.addLayout(sidebar)
-
-        # Content stack
         self.stack = QStackedWidget()
         self.screens = [
             LiveScreen(self.engine, self.settings),
@@ -228,11 +222,143 @@ class MainWindow(QMainWindow):
         self.nav.setCurrentRow(0)
         self._refresh_header()
 
+    def _build_header(self):
+        header = QFrame()
+        header.setObjectName("headerBar")
+        header.setFixedHeight(56)
+        row = QHBoxLayout(header)
+        row.setContentsMargins(22, 0, 22, 0)
+        row.setSpacing(14)
+
+        greeting = QVBoxLayout()
+        greeting.setSpacing(1)
+        self.welcome_label = QLabel("\U0001F44B  Welcome back, Admin")
+        self.welcome_label.setObjectName("welcomeText")
+        self.welcome_sub = QLabel("Face ID Attendance System")
+        self.welcome_sub.setObjectName("welcomeSub")
+        greeting.addWidget(self.welcome_label)
+        greeting.addWidget(self.welcome_sub)
+        row.addLayout(greeting)
+        row.addStretch(1)
+
+        self.engine_pill = StatusPill("STOPPED", "idle", dot=True)
+        row.addWidget(self.engine_pill)
+
+        self.date_label = QLabel("")
+        self.date_label.setObjectName("headerChipSecondary")
+        row.addWidget(self.date_label)
+
+        self.clock_label = QLabel("")
+        self.clock_label.setObjectName("headerClock")
+        row.addWidget(self.clock_label)
+
+        self.notif_button = NotificationButton("bell")
+        self.notif_button.setToolTip("Notifications")
+        self.notif_button.clicked.connect(self._show_notifications)
+        row.addWidget(self.notif_button)
+
+        self.avatar = Avatar("Admin", size=36)
+        row.addWidget(self.avatar)
+        return header
+
+    def _build_sidebar(self):
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(SIDEBAR_WIDTH)
+
+        column = QVBoxLayout(sidebar)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+
+        # ── brand ───────────────────────────────────────────────────────
+        brand = QWidget()
+        brand_row = QHBoxLayout(brand)
+        brand_row.setContentsMargins(18, 20, 18, 14)
+        brand_row.setSpacing(12)
+        self.brand_tile = QFrame()
+        self.brand_tile.setObjectName("brandTile")
+        self.brand_tile.setFixedSize(42, 42)
+        tile_layout = QHBoxLayout(self.brand_tile)
+        tile_layout.setContentsMargins(0, 0, 0, 0)
+        self.brand_icon = IconLabel("face-id", 24, "#FFFFFF")
+        tile_layout.addWidget(self.brand_icon, 0, Qt.AlignmentFlag.AlignCenter)
+        brand_row.addWidget(self.brand_tile)
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(1)
+        brand_title = QLabel("Face ID\nAttendance")
+        brand_title.setObjectName("appTitle")
+        self._online_label = QLabel("\u25cf Offline")
+        self._online_label.setObjectName("onlineStatus")
+        self._online_label.setProperty("offline", True)
+        brand_text.addWidget(brand_title)
+        brand_text.addWidget(self._online_label)
+        brand_row.addLayout(brand_text)
+        brand_row.addStretch(1)
+        column.addWidget(brand)
+
+        # ── navigation ──────────────────────────────────────────────────
+        section = QLabel("MAIN MENU")
+        section.setObjectName("brandMark")
+        section.setContentsMargins(28, 8, 18, 6)
+        column.addWidget(section)
+
+        self.nav = QListWidget()
+        self.nav.setObjectName("nav")
+        self.nav.setFrameShape(QFrame.Shape.NoFrame)
+        self.nav.setIconSize(QSize(18, 18))
+        self.nav.setSpacing(2)
+        for icon_name, label in NAV:
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, icon_name)
+            self.nav.addItem(item)
+        column.addWidget(self.nav, 1)
+
+        # ── footer: system status + version ─────────────────────────────
+        footer = QFrame()
+        footer.setObjectName("sidebarFooter")
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(16, 14, 16, 16)
+        footer_layout.setSpacing(10)
+
+        status_card = QFrame()
+        status_card.setObjectName("subtlePanel")
+        status_layout = QHBoxLayout(status_card)
+        status_layout.setContentsMargins(12, 10, 12, 10)
+        status_layout.setSpacing(10)
+        self.sys_status_dot = IconLabel("dot", 12)
+        status_layout.addWidget(self.sys_status_dot)
+        status_text = QVBoxLayout()
+        status_text.setSpacing(0)
+        status_title = QLabel("System Status")
+        status_title.setObjectName("cardTitle")
+        self.sys_status_label = QLabel("All Systems Operational")
+        self.sys_status_label.setObjectName("emptyBody")
+        status_text.addWidget(status_title)
+        status_text.addWidget(self.sys_status_label)
+        status_layout.addLayout(status_text)
+        status_layout.addStretch(1)
+        footer_layout.addWidget(status_card)
+
+        version = QLabel(f"{APP_VERSION}\n\u00a9 2026 SV Technologies")
+        version.setObjectName("versionLabel")
+        version.setContentsMargins(4, 0, 0, 0)
+        footer_layout.addWidget(version)
+        tagline = QLabel("Secure \u2022 Accurate \u2022 Smarter")
+        tagline.setObjectName("legalLabel")
+        tagline.setContentsMargins(4, 0, 0, 0)
+        footer_layout.addWidget(tagline)
+        column.addWidget(footer)
+        return sidebar
+
     def _connect(self):
         self.engine.runningChanged.connect(self._engine_state)
-        settings_screen = self.screens[4]
-        settings_screen.settingsApplied.connect(
+        live = self.screens[0]
+        live.viewAllRequested.connect(lambda: self.nav.setCurrentRow(1))
+        live.settingsRequested.connect(lambda: self.nav.setCurrentRow(4))
+        ctx = self.screens[4]
+        ctx.settingsApplied.connect(
             lambda settings, restart: self._broadcast_settings(settings, restart))
+        self.nav.currentRowChanged.connect(lambda row: self._refresh_nav_icons())
         self.clock_timer = QTimer(self)
         self.clock_timer.setInterval(1000)
         self.clock_timer.timeout.connect(self._tick)
@@ -243,24 +369,60 @@ class MainWindow(QMainWindow):
     def _engine_state(self, running):
         self.engine_pill.set_status("RUNNING" if running else "STOPPED",
                                     "ok" if running else "idle")
+        colors = palette(self.settings.theme)
         if running:
-            self._online_label.setText("● Online")
-            self._online_label.setStyleSheet("color: #16A34A; font-size: 12px; font-weight: 600;")
-            self.sys_status_label.setText("✅ All Systems Operational")
+            self._online_label.setText("\u25cf Online")
+            self.sys_status_label.setText("All Systems Operational")
+            self.sys_status_dot.set_icon_color(colors["success"])
         else:
-            self._online_label.setText("● Offline")
-            self._online_label.setStyleSheet("color: #DC2626; font-size: 12px; font-weight: 600;")
-            self.sys_status_label.setText("⚠️ Engine Stopped")
+            self._online_label.setText("\u25cf Offline")
+            self.sys_status_label.setText("Engine Stopped")
+            self.sys_status_dot.set_icon_color(colors["muted"])
+        self._online_label.setProperty("offline", not running)
+        self._online_label.style().unpolish(self._online_label)
+        self._online_label.style().polish(self._online_label)
         self._refresh_header()
 
     def _refresh_header(self):
-        self.source_pill.set_status(describe_source(self.settings.source), "info")
         try:
             enrolled = self.engine.catalog.enrolled_count
         except Exception:
             enrolled = 0
         self.welcome_sub.setText(
-            f"{enrolled} employee(s) enrolled  •  Face ID Attendance System")
+            f"{enrolled} employee(s) enrolled  \u2022  {describe_source(self.settings.source)}")
+
+    def _refresh_nav_icons(self):
+        colors = palette(self.settings.theme)
+        current = self.nav.currentRow()
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            icon_name = item.data(Qt.ItemDataRole.UserRole) or "dot"
+            color = colors["nav_icon_active"] if row == current else colors["nav_icon"]
+            item.setIcon(make_icon(icon_name, 18, color, 1.7))
+
+    def _refresh_chrome(self):
+        """Re-tint every hand-painted glyph after a theme switch."""
+        colors = palette(self.settings.theme)
+        self.avatar.set_theme(self.settings.theme)
+        self.notif_button.set_icon_name("bell", colors["text_secondary"])
+        self.notif_button.badge.setStyleSheet(
+            f"background-color: {colors['badge_bg']}; color: {colors['badge_fg']};"
+            "border-radius: 8px; font-size: 10px; font-weight: 700;")
+        self._refresh_nav_icons()
+        self._engine_state(self.engine.running)
+
+    def notify(self, count=1):
+        """Bump the notification badge in the header."""
+        self._pending_notifications += count
+        self.notif_button.set_count(self._pending_notifications)
+
+    def _show_notifications(self):
+        if not self._pending_notifications:
+            self._note("No new notifications.")
+            return
+        self._note(f"{self._pending_notifications} new event(s) since the last check.")
+        self._pending_notifications = 0
+        self.notif_button.set_count(0)
 
     def _broadcast_settings(self, settings, restart):
         self.settings = settings
@@ -289,6 +451,8 @@ class MainWindow(QMainWindow):
             setter = getattr(screen, "set_theme", None)
             if callable(setter):
                 setter(theme)
+        if hasattr(self, "avatar"):
+            self._refresh_chrome()
 
     def _tick(self):
         now = datetime.now()
@@ -302,6 +466,7 @@ class MainWindow(QMainWindow):
     # --- telegram handlers ------------------------------------------------
     def _telegram_on_saved(self, result):
         job = result.job
+        self.notify(1)
         self.telegram.send_capture(
             employee_name=job.employee_name,
             employee_id=job.employee_id,
@@ -310,6 +475,7 @@ class MainWindow(QMainWindow):
         )
 
     def _telegram_on_unknown(self, info):
+        self.notify(1)
         self.telegram.send_unknown_alert(
             track_id=info["track_id"],
             age=info["age"],
@@ -368,3 +534,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
