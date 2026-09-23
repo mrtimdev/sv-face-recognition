@@ -8,12 +8,14 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, QTime, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                             QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                             QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                              QPushButton, QScrollArea, QSpinBox, QTimeEdit, QVBoxLayout,
                              QWidget)
 
 from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source, hash_pin
-from ..widgets import ToastBar
+from ..icons import apply_button_icon
+from ..theme import palette
+from ..widgets import Card, PageHeader, ToastBar
 
 
 class SettingsScreen(QWidget):
@@ -24,6 +26,8 @@ class SettingsScreen(QWidget):
         self.engine = engine
         self.settings = settings
         self.fields = {}
+        self._theme = settings.theme if hasattr(settings, "theme") else "dark"
+        self._cards = []
         self._build()
         self._connect()
         self.load_settings(settings)
@@ -31,20 +35,32 @@ class SettingsScreen(QWidget):
     # --- construction -----------------------------------------------------
     def _build(self):
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 16, 18, 16)
-        outer.setSpacing(12)
-        title = QLabel("Settings")
-        title.setObjectName("screenTitle")
+        outer.setContentsMargins(20, 18, 20, 18)
+        outer.setSpacing(16)
+
+        self.header = PageHeader("Settings", "Configure camera, recognition, storage and appearance.")
+        self.header.layout().setStretch(0, 1)
+        self.apply_button = QPushButton("Save")
+        self.apply_restart_button = QPushButton("Save & restart")
+        self.apply_restart_button.setObjectName("primary")
+        self.reset_button = QPushButton("Reset defaults")
+        self.reset_button.setObjectName("danger")
+        self.header.add_action(self.apply_button)
+        self.header.add_action(self.apply_restart_button)
+        self.header.add_action(self.reset_button)
+        outer.addWidget(self.header)
+
         self.subtitle = QLabel("")
         self.subtitle.setObjectName("screenSubtitle")
         self.subtitle.setWordWrap(True)
-        outer.addWidget(title)
         outer.addWidget(self.subtitle)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
         holder = QWidget()
         column = QVBoxLayout(holder)
+        column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(14)
         column.addWidget(self._build_camera_group())
         column.addWidget(self._build_recognition_group())
@@ -56,28 +72,20 @@ class SettingsScreen(QWidget):
         scroll.setWidget(holder)
         outer.addWidget(scroll, 1)
 
-        buttons = QHBoxLayout()
-        self.apply_button = QPushButton("Save settings")
-        self.apply_restart_button = QPushButton("Save & restart engine")
-        self.apply_restart_button.setObjectName("primary")
-        self.reset_button = QPushButton("Reset to defaults")
-        self.reset_button.setObjectName("danger")
-        buttons.addWidget(self.apply_button)
-        buttons.addWidget(self.apply_restart_button)
-        buttons.addWidget(self.reset_button)
-        buttons.addStretch(1)
-        outer.addLayout(buttons)
-
-        self.toast = ToastBar()
+        self.toast = ToastBar(theme=self._theme)
         outer.addWidget(self.toast)
 
-    def _form(self, title):
-        group = QGroupBox(title)
-        form = QFormLayout(group)
+        self._apply_icons()
+
+    def _card_form(self, title, subtitle="", icon=""):
+        card = Card(title, subtitle, icon=icon, theme=self._theme)
+        self._cards.append(card)
+        form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
         form.setSpacing(8)
-        return group, form
+        card.add_layout(form)
+        return card, form
 
     def _register(self, form, key, label, widget, hint=""):
         form.addRow(label, widget)
@@ -90,7 +98,7 @@ class SettingsScreen(QWidget):
         return widget
 
     def _build_camera_group(self):
-        group, form = self._form("Camera")
+        card, form = self._card_form("Camera", "Video source and frame capture settings.", icon="camera")
         self.source_type = QComboBox()
         self.source_type.addItem("Webcam / device index", "device")
         self.source_type.addItem("Network URL (RTSP/HTTP)", "url")
@@ -128,10 +136,11 @@ class SettingsScreen(QWidget):
             if decimals:
                 box.setDecimals(decimals)
             self._register(form, key, label, box, hint)
-        return group
+        return card
 
     def _build_recognition_group(self):
-        group, form = self._form("Recognition and attendance")
+        card, form = self._card_form("Recognition and attendance",
+                                     "Face matching thresholds and check-in timing.", icon="face-id")
         for key, label, low, high, step, decimals, hint in (
                 ("max_detect_faces", "Max faces to detect", 1, 20, 1, 0,
                  "Upper limit on simultaneous faces the engine will process per frame. "
@@ -156,10 +165,10 @@ class SettingsScreen(QWidget):
             if decimals:
                 box.setDecimals(decimals)
             self._register(form, key, label, box, hint)
-        return group
+        return card
 
     def _build_storage_group(self):
-        group, form = self._form("Storage")
+        card, form = self._card_form("Storage", "File paths for data, evidence and logs.", icon="database")
         for key, label, caption in (
                 ("db_path", "Attendance database", "SQLite authority for attendance"),
                 ("capture_dir", "Evidence images", "Clean JPEG snapshots per check-in"),
@@ -179,10 +188,11 @@ class SettingsScreen(QWidget):
             self.fields[key] = edit
         self._register(form, "persistence_queue_size", "Evidence queue size",
                        self._spin(1, 64))
-        return group
+        return card
 
     def _build_report_group(self):
-        group, form = self._form("Appearance and reporting")
+        card, form = self._card_form("Appearance and reporting",
+                                     "Theme, export options and punctuality rules.", icon="sliders")
         theme = QComboBox()
         for name in THEMES:
             theme.addItem(name.capitalize(), name)
@@ -200,10 +210,11 @@ class SettingsScreen(QWidget):
                        "Off by default: the database has no late/absent policy, so this label is "
                        "computed at export time only.")
         self.fields["report_work_start"] = work
-        return group
+        return card
 
     def _build_telegram_group(self):
-        group, form = self._form("Telegram Notifications")
+        card, form = self._card_form("Telegram Notifications",
+                                     "Real-time alerts for attendance and unknown faces.", icon="send")
         token_edit = QLineEdit()
         token_edit.setPlaceholderText("123456789:ABCdefGHIjklMNOpqrSTUvwxYZ")
         token_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -222,8 +233,8 @@ class SettingsScreen(QWidget):
         self.tg_unknown_check.setChecked(True)
         form.addRow("On unknown face", self.tg_unknown_check)
         self.fields["telegram_notify_unknown"] = self.tg_unknown_check
-        self.tg_test_button = QPushButton("Verify Bot & Send Test Message")
-        self.tg_test_button.setObjectName("primary")
+        self.tg_test_button = QPushButton("Verify Bot & Send Test")
+        self.tg_test_button.setObjectName("softButton")
         self.tg_test_result = QLabel("")
         self.tg_test_result.setObjectName("screenSubtitle")
         self.tg_test_result.setWordWrap(True)
@@ -234,10 +245,11 @@ class SettingsScreen(QWidget):
         container.setLayout(row)
         form.addRow("", container)
         self.tg_test_button.clicked.connect(self._test_telegram)
-        return group
+        return card
 
     def _build_security_group(self):
-        group, form = self._form("Security")
+        card, form = self._card_form("Security",
+                                     "Dashboard access PIN and authentication.", icon="shield")
         self.pin_edit = QLineEdit()
         self.pin_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.pin_edit.setPlaceholderText("Enter new PIN (leave empty to disable)")
@@ -245,6 +257,7 @@ class SettingsScreen(QWidget):
         self.pin_confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.pin_confirm_edit.setPlaceholderText("Confirm PIN")
         self.pin_set_button = QPushButton("Set PIN")
+        self.pin_set_button.setObjectName("softButton")
         self.pin_clear_button = QPushButton("Remove PIN")
         self.pin_clear_button.setObjectName("danger")
         self.pin_status = QLabel(
@@ -267,7 +280,7 @@ class SettingsScreen(QWidget):
         form.addRow("", note)
         self.pin_set_button.clicked.connect(self._set_pin)
         self.pin_clear_button.clicked.connect(self._clear_pin)
-        return group
+        return card
 
     def _set_pin(self):
         pin = self.pin_edit.text()
@@ -470,7 +483,17 @@ class SettingsScreen(QWidget):
         self.load_settings(settings)
 
     def set_theme(self, theme):
-        return None  # Colours come from the application stylesheet.
+        self._theme = theme
+        self.toast.set_theme(theme)
+        for card in self._cards:
+            card.set_theme(theme)
+        self._apply_icons()
+
+    def _apply_icons(self):
+        colors = palette(self._theme)
+        apply_button_icon(self.apply_button, "check", colors["muted"])
+        apply_button_icon(self.apply_restart_button, "restart", "#FFFFFF")
+        apply_button_icon(self.reset_button, "refresh", colors["danger"])
 
 
 class _TelegramTestWorker(QThread):
