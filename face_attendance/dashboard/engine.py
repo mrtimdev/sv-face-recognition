@@ -27,14 +27,16 @@ from ..ui import UIRenderer
 from .lock import EngineLock
 
 
-PUBLISH_INTERVAL = 0.1  # Statistics/track updates; frames still follow target_fps.
+PUBLISH_INTERVAL = 0.066  # ~15 Hz stats/track updates; frames still follow target_fps.
 JOIN_TIMEOUT = 3.0
 MAX_RESTART_BACKOFF = 60.0
 UNKNOWN_ALERT_EXPIRY = 3600.0
 
 
-def track_snapshot(track, now):
+def track_snapshot(track, now, tracker=None):
     """Plain data for Qt widgets; the live FaceTrack stays engine-owned."""
+    liveness = tracker.liveness if tracker else None
+    blinks = liveness.blink_count(track.track_id) if liveness else 0
     return {"track_id": track.track_id,
             "employee_id": track.employee_id or "",
             "name": track.employee_name if track.employee_id else "UNKNOWN",
@@ -46,6 +48,7 @@ def track_snapshot(track, now):
             "ambiguous": bool(track.ambiguous),
             "identity_valid": bool(track.identity_valid),
             "liveness_ok": bool(track.liveness_ok),
+            "liveness_blinks": blinks,
             "distance": None if track.recognition_distance is None else round(track.recognition_distance, 3),
             "age": round(now - track.first_seen, 1),
             "error": track.error}
@@ -273,7 +276,7 @@ class AttendanceEngine(QObject):
             self.frameReady.emit(image)
             if now - published >= PUBLISH_INTERVAL:
                 published = now
-                self.tracksReady.emit([track_snapshot(track, now)
+                self.tracksReady.emit([track_snapshot(track, now, self.tracker)
                                        for track in self.tracker.tracks.values()])
                 self._stats = self._statistics(status, preview_fps, recognition_error)
                 self.statsReady.emit(self._stats)

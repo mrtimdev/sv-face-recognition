@@ -47,7 +47,6 @@ class RecognitionService:
             boxes = self.backend.face_locations(rgb, model="hog")
         sx, sy = width / small.shape[1], height / small.shape[0]
         full_boxes = [(t * sy, r * sx, b * sy, l * sx) for t, r, b, l in boxes]
-        # Limit to max_detect_faces, keeping the largest faces first.
         max_faces = getattr(cfg, "max_detect_faces", 5)
         if len(full_boxes) > max_faces:
             sized = sorted(enumerate(full_boxes),
@@ -72,7 +71,6 @@ class RecognitionService:
             hints[index] = hint
             due = (hint is None or not hint.stable
                    or packet.captured_at - hint.last_recognized >= cfg.stable_recheck_sec)
-            # Unconfirmed faces are retried at a bounded rate; new/ambiguous faces always encode.
             if hint is not None and not hint.stable:
                 due = packet.sequence - hint.last_encoded_sequence >= cfg.recognition_interval
             if due:
@@ -83,13 +81,21 @@ class RecognitionService:
             encode_boxes = [boxes[i] for i in encode_indices]
             with FACE_BACKEND_LOCK:
                 encodings = self.backend.face_encodings(rgb, encode_boxes)
-                if hasattr(self.backend, "face_landmarks"):
-                    try:
+            if hasattr(self.backend, "face_landmarks"):
+                try:
+                    with FACE_BACKEND_LOCK:
                         landmarks_list = self.backend.face_landmarks(rgb, encode_boxes)
-                        for idx, lm in zip(encode_indices, landmarks_list):
-                            landmarks_map[idx] = lm
-                    except Exception:
-                        pass
+                    for idx, lm in zip(encode_indices, landmarks_list):
+                        landmarks_map[idx] = lm
+                except Exception:
+                    pass
+        roi_map = {}
+        for i in encode_indices:
+            t, r, b, l = full_boxes[i]
+            t, b = int(max(0, t)), int(min(height, b))
+            l, r = int(max(0, l)), int(min(width, r))
+            if b - t >= 20 and r - l >= 20:
+                roi_map[i] = packet.frame[t:b, l:r].copy()
         matches = {}
         for index, encoding in zip(encode_indices, encodings):
             matches[index] = self.match(encoding)
@@ -98,8 +104,9 @@ class RecognitionService:
             employee, distance = matches.get(index, (None, None))
             hint = hints[index]
             lm = landmarks_map.get(index)
+            roi = roi_map.get(index)
             detections.append(Detection(box, employee, distance, index in encode_indices,
-                                        hint.track_id if hint else None, lm))
+                                        hint.track_id if hint else None, lm, roi))
         return RecognitionResult(packet, tuple(detections), time.monotonic() - started)
 
 

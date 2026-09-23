@@ -205,7 +205,9 @@ class UIRenderer:
         text(image, name, (x + pad, y + line), color, scale, max_width=panel_w - pad * 2)
         status_color = AMBER if state in (State.VERIFYING, State.RECOGNIZING, State.CAPTURING) else color
         text(image, label, (x + pad, y + line * 2), status_color, scale, max_width=panel_w - pad * 2)
-        text(image, f"LIVE {duration(now - track.first_seen)}", (x + pad, y + line * 3), GRAY,
+        liveness_label = "LIVE" if track.liveness_ok else "CHECKING"
+        liveness_color = GRAY if track.liveness_ok else AMBER
+        text(image, f"{liveness_label} {duration(now - track.first_seen)}", (x + pad, y + line * 3), liveness_color,
              layout.font(0.40), max_width=panel_w - pad * 2)
         if state == State.VERIFYING:
             bar_y = y + panel_h - layout.px(3)

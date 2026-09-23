@@ -55,12 +55,12 @@ class Settings:
     camera_height: int = 720
     target_fps: float = 30.0
     detection_scale: float = 0.25
-    detection_interval: int = 3
-    recognition_interval: int = 5
-    stable_recheck_sec: float = 0.75
+    detection_interval: int = 2
+    recognition_interval: int = 3
+    stable_recheck_sec: float = 0.5
     face_tolerance: float = 0.5
     identity_margin: float = 0.035
-    min_confirmation_frames: int = 3
+    min_confirmation_frames: int = 2
     capture_after_sec: float = 3.0
     cooldown_sec: float = 30.0
     opencv_threads: int = 1

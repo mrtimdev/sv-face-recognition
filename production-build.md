@@ -10,7 +10,7 @@ To make a DMG installer:
 
 
 hdiutil create -volname 'SV Face ID' -srcfolder 'dist/SV Face ID.app' \
-  -ov -format UDZO 'dist/SV-Face-ID-1.0.0.dmg'
+  -ov -format UDZO 'dist/SV-Face-ID-2.0.0.dmg'
 To sign for distribution (requires Apple Developer ID):
 
 

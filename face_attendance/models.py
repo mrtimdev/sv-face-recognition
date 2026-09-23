@@ -60,6 +60,7 @@ class Detection:
     encoded: bool = False
     hint_id: Optional[int] = None
     landmarks: Any = None
+    face_roi: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

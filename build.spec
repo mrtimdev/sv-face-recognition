@@ -15,7 +15,7 @@ import platform
 # ── Options ──────────────────────────────────────────────────────────
 APP_NAME = "SV Face ID"
 BUNDLE_ID = "com.svtechnologies.faceid"
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 onefile = False          # True → single exe (slower startup); False → folder
 bundle = True            # macOS only: True → .app bundle
 console = False          # True → show terminal window (useful for debugging)
@@ -91,6 +91,12 @@ hiddenimports = [
     "face_attendance.repository",
     "face_attendance.liveness",
     "face_attendance.geometry",
+    "face_attendance.channels",
+    "face_attendance.catalog",
+    "face_attendance.enrollment",
+    "face_attendance.ui",
+    "face_attendance.runtime",
+    "face_attendance.main",
     "face_attendance.report",
 ]
 

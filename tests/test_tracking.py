@@ -56,7 +56,7 @@ class TrackingTests(unittest.TestCase):
         self.confirm_two()
         packet = self.packet(3, 1.2)
         self.assertFalse(self.tracker.apply(RecognitionResult(packet, (), 0.01), 1.5))
-        packet = self.packet(30, 1.8)
+        packet = self.packet(30, 1.0)
         self.assertFalse(self.tracker.apply(RecognitionResult(packet, (), 0.01), 3.0))
         self.assertEqual(len(self.tracker.tracks), 2)
 
@@ -84,13 +84,13 @@ class TrackingTests(unittest.TestCase):
         self.assertTrue(all(t.ambiguous for t in self.tracker.tracks.values()))
         self.assertTrue(all(not t.identity_valid for t in self.tracker.tracks.values()))
 
-    def test_tracking_loss_breaks_verification(self):
+    def test_tracking_loss_decays_verification(self):
         self.confirm_two()
         for track in self.tracker.tracks.values():
             track.points = None
             track.verified_presence = 2.9
         self.tracker.advance(self.packet(15, 1.45, frame=np.zeros_like(self.frame)))
-        self.assertTrue(all(t.verified_presence == 0 for t in self.tracker.tracks.values()))
+        self.assertTrue(all(t.verified_presence < 2.9 for t in self.tracker.tracks.values()))
 
     def test_unencoded_detection_cannot_inherit_unrelated_identity(self):
         self.confirm_two()

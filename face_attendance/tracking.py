@@ -81,10 +81,10 @@ class FaceTracker:
                                     (box[0] + dy, box[1] + dx, box[2] + dy, box[3] + dx), width, height)
                                 track.points = moved[good].reshape(-1, 1, 2)
                                 track.flow_ok, track.last_flow_at = True, packet.captured_at
+                                flow_var = float(np.var(delta, axis=0).sum())
+                                self.liveness.update_motion(track.track_id, flow_var)
             if not track.flow_ok:
-                # A loss of motion correspondence breaks continuous presence. Keep the
-                # name while re-acquiring, but require a new verification interval.
-                track.reset_verification()
+                track.verified_presence = max(0.0, track.verified_presence - 0.3)
                 track.points = self._features(gray, track.bounding_box)
             # Store positions by source sequence to compensate for worker latency.
             track.box_history.append((packet.sequence, track.bounding_box))
@@ -166,7 +166,7 @@ class FaceTracker:
                 # Carry forward motion since the observation, then smooth detector jitter.
                 adjusted = tuple(d + current - old for d, current, old in
                                  zip(detection.bounding_box, track.bounding_box, historic))
-                track.bounding_box = tuple(0.4 * d + 0.6 * old for d, old in
+                track.bounding_box = tuple(0.55 * d + 0.45 * old for d, old in
                                            zip(adjusted, track.bounding_box))
             track.visible, track.last_seen = True, packet.captured_at
             # A skipped encoding can only reuse the exact track that authorized the skip.
@@ -189,8 +189,9 @@ class FaceTracker:
         if detection.landmarks:
             _blinks, passed = self.liveness.update(track.track_id, detection.landmarks)
             track.liveness_ok = passed
-        elif not self.liveness.active(track.track_id):
-            track.liveness_ok = True
+        if detection.face_roi is not None:
+            self.liveness.update_texture(track.track_id, detection.face_roi)
+            track.liveness_ok = self.liveness.is_live(track.track_id)
         if employee is None:
             track.invalidate_identity()
             if track.pending_event_id is None:
