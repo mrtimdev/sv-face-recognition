@@ -1,45 +1,44 @@
-"""Multi-layered anti-spoofing: blink detection, texture analysis, color
-consistency, focus variation, moiré detection, and micro-motion tracking.
+"""Single adaptive blink OR smile verification for an ordinary RGB camera.
 
-A printed photo or screen replay cannot produce natural blinks, has flat
-texture (uniform LBP), screen-like color artifacts, and no natural
-micro-motion.  Requiring evidence from multiple independent signals blocks
-the most common presentation attacks.
+A brief neutral baseline distinguishes expression changes from a static photo.
+This convenience check is not validated PAD: recorded blinks or smiles can
+satisfy it, so it must not be advertised as video-replay protection.
 """
 import math
-from collections import defaultdict, deque
+import time
+from collections import deque
 
 import cv2
 import numpy as np
 
 
-EAR_BLINK_THRESHOLD = 0.21
-EAR_OPEN_THRESHOLD = 0.26
-MIN_BLINKS = 1
+MAX_SAMPLE_GAP = 0.75
+CHALLENGE_TIMEOUT = 25.0
+PASS_VALID_SEC = 10.0
+MIN_EYE_WIDTH = 12.0
+CALIBRATION_SEC = 0.35
+MIN_BLINK_SEC = 0.04
+MAX_BLINK_SEC = 0.80
+SMILE_HOLD_SEC = 0.25
 
 TEXTURE_SCORE_THRESHOLD = 0.45
-COLOR_SCORE_THRESHOLD = 0.35
 MIN_TEXTURE_SAMPLES = 3
-MIN_COLOR_SAMPLES = 3
-MIN_MOTION_SAMPLES = 5
-MOTION_VARIANCE_THRESHOLD = 0.5
 
 
 def _ear(eye_points):
     if len(eye_points) != 6:
-        return 1.0
+        return None
     p1, p2, p3, p4, p5, p6 = eye_points
     vertical_a = math.dist(p2, p6)
     vertical_b = math.dist(p3, p5)
     horizontal = math.dist(p1, p4)
-    if horizontal < 1e-6:
-        return 1.0
+    if horizontal < MIN_EYE_WIDTH:
+        return None
     return (vertical_a + vertical_b) / (2.0 * horizontal)
 
 
 def texture_score(face_bgr):
-    """LBP entropy of the face region.  Real skin has diverse micro-texture
-    (high entropy); photos and screens produce more uniform patterns."""
+    """LBP entropy heuristic. Detailed photos can also score highly."""
     if face_bgr is None or face_bgr.size < 100:
         return 0.0
     gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
@@ -63,9 +62,7 @@ def texture_score(face_bgr):
 
 
 def color_score(face_bgr):
-    """Skin-colour naturalness in YCrCb.  Real skin sits in a specific
-    chrominance range with natural variance; screens and prints often fall
-    outside or show unnaturally uniform distributions."""
+    """Legacy YCrCb colour diagnostic, never used to authorize liveness."""
     if face_bgr is None or face_bgr.size < 100:
         return 0.0
     ycrcb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2YCrCb)
@@ -84,8 +81,7 @@ def color_score(face_bgr):
 
 
 def focus_variance(face_bgr):
-    """Laplacian variance across face sub-regions.  Real faces show depth-
-    dependent focus variation; flat photos are uniformly sharp or blurry."""
+    """Regional sharpness diagnostic; this is not a depth measurement."""
     if face_bgr is None or face_bgr.size < 100:
         return 0.0
     gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
@@ -124,112 +120,215 @@ def moire_score(face_bgr):
     return 1.0
 
 
+def _measure(landmarks):
+    """Eye ratios plus optional scale/roll-invariant smile measurements."""
+    try:
+        left, right = landmarks["left_eye"], landmarks["right_eye"]
+        eyes = (_ear(left), _ear(right))
+        if any(ear is None or not math.isfinite(ear) or not 0 <= ear <= .8 for ear in eyes):
+            return None
+        left = np.mean(np.asarray(left, dtype=float), axis=0)
+        right = np.mean(np.asarray(right, dtype=float), axis=0)
+        if left[0] > right[0]:
+            left, right = right, left
+        axis = right - left
+        span = float(np.linalg.norm(axis))
+        if span < 25:
+            return None
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    smile = None
+    try:
+        nose = np.asarray(landmarks["nose_bridge"][-1], dtype=float)
+        top, bottom = landmarks["top_lip"], landmarks["bottom_lip"]
+        corners = np.asarray([top[0], top[6]], dtype=float)
+        center = (np.asarray(top[9], dtype=float) + np.asarray(bottom[9], dtype=float)) / 2
+        down = np.array([-axis[1], axis[0]]) / span
+        yaw = float(np.dot(nose - (left + right) / 2, axis)) / (span * span)
+        width = float(np.linalg.norm(corners[1] - corners[0])) / span
+        lift = float(np.dot(center - np.mean(corners, axis=0), down)) / span
+        opening = math.dist(top[9], bottom[9]) / span
+        if all(math.isfinite(v) for v in (yaw, width, lift, opening)) and .15 < width < 1.5:
+            smile = (yaw, width, lift, opening)
+    except (KeyError, IndexError, TypeError, ValueError):
+        pass  # Lips are optional for the blink route.
+    return eyes, smile
+
+
 class LivenessChecker:
-    """Multi-signal anti-spoofing combining blink detection, texture analysis,
-    colour consistency, focus variation, moiré detection, and micro-motion."""
+    """One open/closed/open blink or a sustained smile relative to baseline."""
 
-    def __init__(self, blink_threshold=EAR_BLINK_THRESHOLD,
-                 open_threshold=EAR_OPEN_THRESHOLD,
-                 min_blinks=MIN_BLINKS):
-        self.blink_threshold = blink_threshold
-        self.open_threshold = open_threshold
-        self.min_blinks = min_blinks
-        self._state = defaultdict(lambda: {
-            "blinks": 0, "closed": False,
-            "ear_history": deque(maxlen=30),
-            "texture_scores": deque(maxlen=10),
-            "color_scores": deque(maxlen=10),
-            "focus_scores": deque(maxlen=10),
-            "moire_scores": deque(maxlen=5),
-            "motion_variances": deque(maxlen=15),
-            "passed": False,
-        })
+    def __init__(self):
+        self._state = {}
 
-    def update(self, track_id, landmarks):
-        left_eye = landmarks.get("left_eye", [])
-        right_eye = landmarks.get("right_eye", [])
-        if not left_eye or not right_eye:
-            return self._blink_result(track_id)
-        ear = (_ear(left_eye) + _ear(right_eye)) / 2.0
-        state = self._state[track_id]
-        state["ear_history"].append(ear)
-        if ear < self.blink_threshold:
-            state["closed"] = True
-        elif ear > self.open_threshold and state["closed"]:
-            state["closed"] = False
-            state["blinks"] += 1
-        return self._blink_result(track_id)
+    @staticmethod
+    def _new(now):
+        return {
+            "phase": "calibrate", "started": now,
+            "last_sample": None, "last_input": None, "valid": False,
+            "calibration": [], "baseline_eyes": None, "baseline_smile": None,
+            "open_since": None, "closed_since": None,
+            "smile_since": None, "smile_samples": 0,
+            "passed_at": None, "method": None,
+            "texture_scores": deque(maxlen=5), "moire_scores": deque(maxlen=5),
+            "image_valid": False, "last_texture": None,
+        }
 
-    def update_texture(self, track_id, face_roi):
-        """Feed a BGR face ROI for texture, colour, focus and moiré analysis."""
+    @staticmethod
+    def _break_hold(state):
+        state["open_since"] = state["closed_since"] = None
+        state["smile_since"] = None
+        state["smile_samples"] = 0
+        state["calibration"].clear()
+
+    def update(self, track_id, landmarks, now=None):
+        now = time.monotonic() if now is None else now
+        state = self._state.get(track_id)
+        if state is not None:
+            if state["last_input"] is not None and now <= state["last_input"]:
+                return int(state["phase"] == "complete"), False
+            last = state["last_sample"]
+            if ((last is not None and now - last > MAX_SAMPLE_GAP)
+                    or (state["passed_at"] is None and now - state["started"] > CHALLENGE_TIMEOUT)
+                    or (state["passed_at"] is not None and now - state["passed_at"] > PASS_VALID_SEC)):
+                self.reset(track_id)
+                state = None
+        if state is None:
+            state = self._state[track_id] = self._new(now)
+        state["last_input"] = now
+        measured = _measure(landmarks or {})
+        if measured is None:
+            if state["passed_at"] is not None:
+                self.reset(track_id)
+                return 0, False
+            state["valid"] = False
+            self._break_hold(state)
+            return 0, False
+        state["valid"] = True
+        state["last_sample"] = now
+        eyes, smile = measured
+        if state["phase"] == "calibrate":
+            # No universal 0.26 open-eye threshold: learn each eye separately.
+            if min(eyes) < .10:
+                self._break_hold(state)
+                return 0, False
+            state["calibration"].append((now, eyes, smile))
+            samples = state["calibration"]
+            if len(samples) >= 3 and now - samples[0][0] >= CALIBRATION_SEC:
+                state["baseline_eyes"] = tuple(np.percentile([s[1] for s in samples], 90, axis=0))
+                mouths = [s[2] for s in samples if s[2] is not None]
+                state["baseline_smile"] = tuple(np.median(mouths, axis=0)) if len(mouths) >= 3 else None
+                state["phase"] = "ready"
+                self._break_hold(state)
+                state["open_since"] = now - CALIBRATION_SEC
+        elif state["phase"] == "ready":
+            baseline = state["baseline_eyes"]
+            closed = all(ear <= base * .65 and base - ear >= .035 for ear, base in zip(eyes, baseline))
+            opened = all(ear >= base * .85 for ear, base in zip(eyes, baseline))
+            if closed:
+                if (state["closed_since"] is None and state["open_since"] is not None
+                        and now - state["open_since"] >= .08):
+                    state["closed_since"] = now
+                state["open_since"] = None
+            elif opened:
+                if state["closed_since"] is not None:
+                    duration = now - state["closed_since"]
+                    if MIN_BLINK_SEC <= duration <= MAX_BLINK_SEC:
+                        state["phase"], state["method"] = "complete", "blink"
+                    state["closed_since"] = None
+                if state["open_since"] is None:
+                    state["open_since"] = now
+                state["baseline_eyes"] = tuple(max(base, ear) for base, ear in zip(baseline, eyes))
+            elif any(ear >= base * .85 for ear, base in zip(eyes, baseline)):
+                # A wink or tracking mismatch is not a bilateral blink.
+                state["open_since"] = state["closed_since"] = None
+            base = state["baseline_smile"]
+            smiling = (smile is not None and base is not None
+                       and abs(smile[0] - base[0]) <= .10
+                       and smile[1] - base[1] >= max(.06, base[1] * .10)
+                       and smile[2] - base[2] >= .025
+                       # Mouth opening alone must not masquerade as a smile.
+                       and smile[3] - base[3] <= .12)
+            if smiling:
+                if state["smile_since"] is None:
+                    state["smile_since"] = now
+                state["smile_samples"] += 1
+                if state["smile_samples"] >= 3 and now - state["smile_since"] >= SMILE_HOLD_SEC:
+                    state["phase"], state["method"] = "complete", "smile"
+            else:
+                state["smile_since"] = None
+                state["smile_samples"] = 0
+        return int(state["phase"] == "complete"), self.is_live(track_id, now)
+
+    def update_texture(self, track_id, face_roi, now=None):
+        state = self._state.get(track_id)
+        if state is None:
+            return
         if face_roi is None or face_roi.size < 100:
+            state["image_valid"] = False
+            if state["passed_at"] is not None:
+                self.reset(track_id)
             return
-        state = self._state[track_id]
-        if state["passed"]:
+        now = time.monotonic() if now is None else now
+        state["image_valid"] = True
+        # Avoid unused colour/focus/optical-flow diagnostics on every frame.
+        if state["last_texture"] is not None and now - state["last_texture"] < .25:
             return
+        state["last_texture"] = now
         state["texture_scores"].append(texture_score(face_roi))
-        state["color_scores"].append(color_score(face_roi))
-        state["focus_scores"].append(focus_variance(face_roi))
         state["moire_scores"].append(moire_score(face_roi))
 
-    def update_motion(self, track_id, flow_variance):
-        """Feed optical-flow variance within the face bounding box."""
-        state = self._state[track_id]
-        if not state["passed"]:
-            state["motion_variances"].append(flow_variance)
+    def is_live(self, track_id, now=None):
+        now = time.monotonic() if now is None else now
+        state = self._state.get(track_id)
+        if state is None or state["last_sample"] is None:
+            return False
+        if now - state["last_sample"] > MAX_SAMPLE_GAP:
+            self.reset(track_id)
+            return False
+        if state["passed_at"] is not None and now - state["passed_at"] > PASS_VALID_SEC:
+            self.reset(track_id)
+            return False
+        if (now < state["last_sample"] or not state["valid"] or not state["image_valid"]
+                or state["phase"] != "complete"):
+            return False
+        tex, moire = state["texture_scores"], state["moire_scores"]
+        if not (len(tex) >= MIN_TEXTURE_SAMPLES and np.median(tex) >= TEXTURE_SCORE_THRESHOLD
+                and len(moire) >= MIN_TEXTURE_SAMPLES and np.median(moire) >= .4):
+            return False
+        if state["passed_at"] is None:
+            state["passed_at"] = now
+        return True
 
-    def _blink_result(self, track_id):
-        state = self._state[track_id]
-        return state["blinks"], self.is_live(track_id)
+    def passed(self, track_id, now=None):
+        return self.is_live(track_id, now)
 
-    def is_live(self, track_id):
-        """Combined liveness decision from all accumulated signals."""
-        state = self._state[track_id]
-        if state["passed"]:
-            return True
+    def progress(self, track_id):
+        state = self._state.get(track_id)
+        if not state:
+            return 0.0
+        return 1.0 if state["phase"] == "complete" else .25 if state["phase"] == "ready" else 0.0
 
-        blink_ok = state["blinks"] >= self.min_blinks
-        has_landmarks = len(state["ear_history"]) > 0
+    def prompt(self, track_id):
+        state = self._state.get(track_id)
+        if not state or not state["valid"]:
+            return "Look at the camera - keep eyes visible"
+        if state["phase"] == "calibrate":
+            return "Look at the camera"
+        if state["phase"] == "complete":
+            return "Hold still - checking"
+        return "Blink once or smile"
 
-        ear_history = state["ear_history"]
-        ear_var_ok = True
-        if len(ear_history) >= 10:
-            ear_var_ok = float(np.std(list(ear_history))) > 0.008
-
-        tex = state["texture_scores"]
-        texture_ok = (len(tex) >= MIN_TEXTURE_SAMPLES
-                      and float(np.median(list(tex))) >= TEXTURE_SCORE_THRESHOLD)
-
-        col = state["color_scores"]
-        color_ok = (len(col) >= MIN_COLOR_SAMPLES
-                    and float(np.median(list(col))) >= COLOR_SCORE_THRESHOLD)
-
-        foc = state["focus_scores"]
-        focus_ok = len(foc) < 3 or float(np.median(list(foc))) >= 0.4
-
-        moire = state["moire_scores"]
-        moire_ok = len(moire) < 2 or float(np.median(list(moire))) >= 0.4
-
-        motion = state["motion_variances"]
-        motion_ok = (len(motion) < MIN_MOTION_SAMPLES
-                     or float(np.median(list(motion))) >= MOTION_VARIANCE_THRESHOLD)
-
-        if has_landmarks:
-            hard_pass = blink_ok and texture_ok and color_ok
-            soft_score = sum([ear_var_ok, focus_ok, moire_ok, motion_ok])
+    def pause(self, track_id):
+        """A missing detection blocks capture; only unfinished verification may resume."""
+        state = self._state.get(track_id)
+        if state is None:
+            return
+        if state["passed_at"] is not None:
+            self.reset(track_id)
         else:
-            hard_pass = texture_ok and color_ok
-            soft_score = sum([focus_ok, moire_ok, motion_ok])
-        if hard_pass and soft_score >= 2:
-            state["passed"] = True
-            return True
-        return False
-
-    def passed(self, track_id):
-        return self._state.get(track_id, {}).get("passed", False)
-
-    def blink_count(self, track_id):
-        return self._state.get(track_id, {}).get("blinks", 0)
+            state["valid"] = False
+            self._break_hold(state)
 
     def active(self, track_id):
         return track_id in self._state

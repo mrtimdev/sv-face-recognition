@@ -21,6 +21,8 @@ wheels/
 
 # Generated project data
 encodings.pickle
+*_sface.pickle
+*_sface_migration.json
 attendance_log.csv
 alert.wav
 attendance.db

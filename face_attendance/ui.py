@@ -164,7 +164,7 @@ class UIRenderer:
             return
         known = bool(track.employee_id) and track.state != State.UNKNOWN
         color = GREEN if known else RED if track.state == State.UNKNOWN else AMBER
-        if track.state == State.ERROR:
+        if track.state == State.ERROR or (known and track.spoof_score is not None and not track.spoof_ok):
             color = RED
         fade = 1.0 if track.visible else max(0, 1 - (now - track.last_seen) / self.config.session_timeout)
         color = tuple(int(channel * fade) for channel in color)
@@ -173,8 +173,12 @@ class UIRenderer:
         state = track.state
         if not track.visible:
             label = "AUTO RESET" if state == State.UNKNOWN else "REACQUIRING..."
+        elif track.identity_valid and not track.spoof_ok and state != State.CAPTURING:
+            label = "REAL FACE REQUIRED"
         elif state == State.VERIFYING:
-            label = f"VERIFYING  {track.verification_progress * 100:.0f}%"
+            label = (f"VERIFYING  {track.verification_progress * 100:.0f}%"
+                     if track.liveness_ok and track.spoof_ok else
+                     "REAL FACE REQUIRED" if not track.spoof_ok else "LIVENESS CHECK")
         elif state == State.SUCCESS:
             label = f"RECORDED  |  {math.ceil(track.cooldown_remaining)}s"
         elif state == State.COOLDOWN:
@@ -193,9 +197,14 @@ class UIRenderer:
         else:
             label = "RECOGNIZING..."
         name = track.employee_name.upper() if known else "UNKNOWN" if state == State.UNKNOWN else "FACE DETECTED"
+        liveness_label = (track.spoof_prompt if not track.spoof_ok else
+                          "VERIFIED" if track.liveness_ok else track.liveness_prompt)
+        if (track.spoof_ok and state in (State.SUCCESS, State.COOLDOWN)) or state == State.CAPTURING:
+            liveness_label = "Attendance recorded" if state != State.CAPTURING else "Saving attendance"
         scale = layout.font(0.49)
         pad, line = layout.px(8), layout.px(22)
         panel_w = min(w - 4, max(r - l, text_size(label, scale, 1)[0] + pad * 2,
+                                  text_size(liveness_label, layout.font(0.40), 1)[0] + pad * 2,
                                   min(text_size(name, scale, 1)[0] + pad * 2, layout.px(260))))
         x = max(2, min(l, w - panel_w - 2))
         panel_h = line * 3 + pad
@@ -205,14 +214,15 @@ class UIRenderer:
         text(image, name, (x + pad, y + line), color, scale, max_width=panel_w - pad * 2)
         status_color = AMBER if state in (State.VERIFYING, State.RECOGNIZING, State.CAPTURING) else color
         text(image, label, (x + pad, y + line * 2), status_color, scale, max_width=panel_w - pad * 2)
-        liveness_label = "LIVE" if track.liveness_ok else "CHECKING"
-        liveness_color = GRAY if track.liveness_ok else AMBER
-        text(image, f"{liveness_label} {duration(now - track.first_seen)}", (x + pad, y + line * 3), liveness_color,
+        liveness_color = GRAY if track.liveness_ok and track.spoof_ok else AMBER
+        text(image, liveness_label, (x + pad, y + line * 3), liveness_color,
              layout.font(0.40), max_width=panel_w - pad * 2)
         if state == State.VERIFYING:
             bar_y = y + panel_h - layout.px(3)
             cv2.line(image, (x, bar_y), (x + panel_w, bar_y), LINE, layout.px(3))
-            cv2.line(image, (x, bar_y), (x + int(panel_w * track.verification_progress), bar_y), AMBER, layout.px(3))
+            progress = (track.verification_progress if track.liveness_ok and track.spoof_ok
+                        else track.liveness_progress if track.spoof_ok else 0)
+            cv2.line(image, (x, bar_y), (x + int(panel_w * progress), bar_y), AMBER, layout.px(3))
 
     def _hud(self, image, layout, tracks, now, wall_time, status, camera_fps, preview_fps, enrolled, attendance):
         x0, h = layout.feed_width, layout.height

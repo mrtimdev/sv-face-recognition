@@ -1,12 +1,12 @@
-"""Backward-compatible enrollment loading and stable employee identifiers."""
+"""Versioned SFace enrollment loading and stable employee identifiers."""
 import json
-import pickle
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
 
 from .models import Employee
+from .template_store import read_templates
 
 
 def legacy_employee_id(name):
@@ -40,10 +40,7 @@ class FaceCatalog:
                 self.enrolled_count = 0
                 return
             raise FileNotFoundError(f"{path} not found. Run enroll_faces.py first.")
-        with path.open("rb") as handle:
-            data = pickle.load(handle)
-        if not isinstance(data, dict):
-            raise ValueError("Encodings must contain a name -> samples dictionary")
+        data = read_templates(path)
         employees, encodings = [], []
         for name, samples in data.items():
             employee = self.employee_map.get(name, Employee(legacy_employee_id(name), name))

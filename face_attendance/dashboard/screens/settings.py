@@ -136,10 +136,10 @@ class SettingsScreen(QWidget):
                 ("max_detect_faces", "Max faces to detect", 1, 20, 1, 0,
                  "Upper limit on simultaneous faces the engine will process per frame. "
                  "Higher values use more CPU; 5 is a sensible default for most setups."),
-                ("face_tolerance", "Face tolerance", 0.3, 0.9, 0.01, 2,
+                ("face_tolerance", "SFace cosine distance", 0.3, 0.9, 0.01, 2,
                  "Lower is stricter. Loosening this never fixes duplicate enrollment data."),
                 ("identity_margin", "Identity margin", 0.0, 0.3, 0.005, 3,
-                 "Minimum separation from a competing employee."),
+                 "Minimum cosine-distance separation from a competing employee."),
                 ("min_confirmation_frames", "Confirmation frames", 1, 20, 1, 0,
                  "Matching encodings required before an identity is trusted."),
                 ("stable_recheck_sec", "Stable recheck", 0.1, 5, 0.05, 2,
@@ -163,7 +163,7 @@ class SettingsScreen(QWidget):
         for key, label, caption in (
                 ("db_path", "Attendance database", "SQLite authority for attendance"),
                 ("capture_dir", "Evidence images", "Clean JPEG snapshots per check-in"),
-                ("encodings_path", "Face encodings", "encodings.pickle used by the engine"),
+                ("encodings_path", "Face encodings", "Versioned SFace templates used by the engine"),
                 ("employees_path", "Employee map", "employees.json label to HRM ID"),
                 ("log_path", "Observation log", "Throttled CSV of recognition observations"),
                 ("alert_path", "Alert sound", "Optional WAV played on a check-in")):

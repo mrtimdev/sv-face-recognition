@@ -90,7 +90,7 @@ class LiveScreen(QWidget):
         root.setContentsMargins(20, 14, 20, 14)
         root.setSpacing(12)
 
-        self.header = PageHeader("Live Monitor", "")
+        self.header = PageHeader("Live Monitor", "Look at the camera, then blink once or smile. Keep your whole face visible.")
         self.engine_pill = StatusPill("ENGINE STOPPED", "idle", dot=True)
         self.header.add_action(self.engine_pill)
         root.addWidget(self.header)

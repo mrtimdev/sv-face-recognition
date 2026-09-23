@@ -22,34 +22,12 @@ console = False          # True → show terminal window (useful for debugging)
 
 # ── Paths ────────────────────────────────────────────────────────────
 here = os.path.abspath(SPECPATH)
-venv = os.path.join(here, "venv", "lib")
-
-# Find site-packages dynamically
-site_packages = None
-for root, dirs, files in os.walk(venv):
-    if root.endswith("site-packages"):
-        site_packages = root
-        break
-if site_packages is None:
-    raise FileNotFoundError("Cannot find site-packages under venv/")
-
-face_models_dir = os.path.join(site_packages, "face_recognition_models", "models")
-
-# ── Data files to bundle ─────────────────────────────────────────────
-datas = [
-    # face_recognition dlib models (≈100 MB total)
-    (face_models_dir, os.path.join("face_recognition_models", "models")),
-]
-
-# Include the face_recognition_models __init__.py so pkg_resources can find it
-fr_models_init = os.path.join(site_packages, "face_recognition_models")
-datas.append((fr_models_init, "face_recognition_models"))
+# Model assets and their licenses are available relative to package __file__.
+datas = [(os.path.join(here, "face_attendance", "assets"),
+          os.path.join("face_attendance", "assets"))]
 
 # ── Hidden imports ───────────────────────────────────────────────────
 hiddenimports = [
-    "face_recognition",
-    "face_recognition_models",
-    "dlib",
     "cv2",
     "numpy",
     "PyQt6",
@@ -106,6 +84,7 @@ if platform.system() == "Windows":
 
 # ── Excludes (trim size) ─────────────────────────────────────────────
 excludes = [
+    "dlib", "face_recognition", "face_recognition_models",
     "tkinter", "_tkinter", "matplotlib", "scipy", "pandas",
     "IPython", "jupyter", "notebook", "pytest",
     "pip", "wheel",

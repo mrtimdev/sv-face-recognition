@@ -1,8 +1,11 @@
 # Face ID attendance terminal
 
-The existing `face_recognition`/HOG pipeline and enrollment format now run in a
-modular attendance terminal. The live camera keeps moving during recognition,
-snapshot writing, SQLite commits and audio playback.
+A local OpenCV attendance terminal using **YuNet** face detection, **SFace**
+identity matching, **MediaPipe Face Mesh** eye/mouth tracking, and mandatory
+**MiniFASNet** presentation checks. The live camera keeps moving during
+recognition, snapshot writing, SQLite commits and audio playback. Neither dlib
+nor the `face_recognition` package is required. Models and licenses are bundled
+in `face_attendance/assets`; inference does not upload faces or download models.
 
 The UI retains green/red L-shaped brackets, live duration, an animated scan
 line, FPS, employee/active-face counts and a live clock. Verification progress
@@ -70,9 +73,15 @@ Screens:
   thumbnails, per-face verification state/progress and unknown-face alerts.
 - **Attendance Report** - date presets/custom range, employee search, paging,
   summary cards, outbox pending/synced counts and CSV export (UTF-8 BOM).
-- **Employees** - enroll by **live capture** (countdown, quality coaching,
-  multiple samples) or **photo upload** (drag & drop, single-face validation),
-  with display name and optional employee ID; manage/delete samples and aliases.
+- **Enrolled Employees** - a searchable photo table with enrollment-status
+  filtering and row actions: **Edit**, **Update photo**, and **Delete**.
+  **Add employee** opens a focused live-capture/photo-upload form with fixed
+  Save/Close controls. Name edits keep permanent IDs and historical attendance;
+  aliases for the same ID share the updated display name. Photo updates add face
+  samples and replace the directory image. Deletion requires confirmation and
+  removes the selected enrollment and its saved photo, keeping attendance history.
+  Missing enrollment photos use initials; attendance captures are never presented
+  as enrollment photos. Double-click a row for its profile and capture gallery.
 - **Settings** - camera source (webcam index, IP/RTSP URL with masked password,
   video file), resolution/FPS, recognition tuning, storage paths and dark/light
   theme. Changes are saved to `settings.json` and applied when the engine
@@ -84,9 +93,37 @@ Behavior notes:
   terminal instance refuses to run against the same data.
 - Reports read through a separate read-only SQLite connection; they can never
   record or modify attendance.
-- No anti-spoofing/liveness detection. The report can optionally label rows
-  Late/On time against a configured work start time (computed, never stored);
-  no shift/absent policy exists.
+- For attendance, look at the camera briefly, then **blink once or smile**.
+  Either expression is sufficient; there are no head turns or action sequences.
+  Eye thresholds adapt separately to each eye's normal opening. A smile must
+  widen and lift the mouth corners relative to the initial expression for a
+  short hold; simply opening the mouth or showing a static smiling photo is
+  insufficient. If already smiling on arrival, relax briefly and smile again,
+  or use the blink option.
+- Full-resolution landmarks are sampled on every detection. Brief optical-flow
+  failures preserve verification progress; short missing-landmark gaps retain
+  calibration but break an incomplete blink/smile. Identity changes, overlap,
+  disconnects and sampling gaps over 0.75 seconds reset verification. Completed
+  passes expire after 10 seconds and missing face evidence revokes them.
+- A **separate mandatory anti-spoof check** now runs before recording. Two
+  bundled MiniFASNet models inspect the face and its surrounding image, even
+  when identity encoding is reused. Both must meet the live-score threshold for
+  three consecutive samples spanning at least 0.35 seconds. A blink/smile
+  cannot override a rejection. Missing/corrupt models, inference failures,
+  small/clipped faces and stale results block attendance and known-person logs.
+  Model failures never fall back to expression-only recording. Models run
+  locally through existing OpenCV; no images are uploaded or downloaded at runtime.
+- The UI shows **Photo/video suspected** or a model/quality error when blocked.
+  The models are bundled in source and packaged builds, with hashes and license
+  in `face_attendance/assets/anti_spoof/NOTICE.md`. Rebuild an existing packaged
+  app to include the new code and model assets.
+- This is probabilistic RGB presentation-attack detection, not a guarantee or
+  certification. Replays can still evade it and real faces can be rejected.
+  Test real users and actual phone/paper presentations using the deployment
+  camera; an original selfie file is not a test of camera-captured phone replay.
+  A video injected directly into the camera feed is outside this check's scope.
+- The report can optionally label rows Late/On time against a configured work
+  start time (computed, never stored); no shift/absent policy exists.
 - RTSP passwords are masked on screen and never logged. `settings.json` and
   `attendance.lock` are gitignored local state.
 - macOS shows a camera-permission prompt on first run.
@@ -94,8 +131,35 @@ Behavior notes:
 
 ## Enrollment and employee IDs
 
-Existing `encodings.pickle` files work unchanged. The file still stores
-`{enrollment_name: [128-dimensional encoding, ...]}`.
+The default catalog is now `encodings_sface.pickle`, with a schema version and
+SFace model identifier around the sample dictionary. **Old dlib embeddings are
+incompatible**, despite also having 128 values, and are rejected at load time.
+They cannot be converted mathematically: re-encode the original enrollment
+photos or re-enroll the employee. Keep `encodings.pickle` as a backup.
+
+For an existing installation, stop the app and run this once before restarting:
+
+```bash
+python scripts/migrate_sface.py
+# Custom paths:
+python scripts/migrate_sface.py --legacy staff.pickle --output staff_sface.pickle --employees employees.json
+```
+
+Migration uses only exact, uniquely named `enrollment_photos/{safe_label}.jpg`
+files saved by the dashboard. Missing, ambiguous, multiple-face or low-quality
+photos produce an empty label that requires re-enrollment. It refuses to replace
+an existing destination. It never guesses identities from attendance captures
+and never changes employee mappings or attendance history. Review its report,
+then re-enroll labels with zero samples in Enrolled Employees. If this installation has
+already been migrated, do not rerun the command against the same output file.
+
+Legacy dashboard settings automatically select the corresponding `_sface`
+catalog and reset distance settings for the new model; saving Settings persists
+the backend marker. Custom CLI paths must point to the new catalog.
+`--tolerance` now means **cosine distance** (`1 - cosine similarity`), default
+0.50 with a 0.035 margin over a competing employee. Lower is stricter. These
+are conservative application defaults, not measured accuracy guarantees; validate
+with enrolled users and lookalikes on the deployment camera.
 
 ```bash
 python enroll_faces.py --name "Tim Dev" --image faces/tim-dev.png
@@ -165,7 +229,7 @@ references. Only the persistence thread owns its SQLite connection.
 | `config.py` | Defaults, validation and data paths |
 | `models.py` | Face tracks, explicit states and thread messages |
 | `camera.py`, `channels.py` | Capture/reconnects and one-slot frame mailboxes |
-| `catalog.py`, `recognition.py` | Enrollment IDs, HOG, selective encoding and matching |
+| `catalog.py`, `recognition.py` | Versioned enrollment IDs, YuNet, SFace and selective matching |
 | `tracking.py`, `geometry.py` | Sparse optical flow and one-to-one detection association |
 | `attendance.py` | Freshness, verification, pending jobs and in-memory cooldowns |
 | `repository.py`, `storage.py`, `persistence.py` | Transactions, clean evidence, CSV and audio |
@@ -261,7 +325,7 @@ separately.
 | --- | --- | --- |
 | `camera_width / camera_height` | 1280 / 720 | Requested camera resolution |
 | `target_fps` | 30 | Camera request and maximum UI refresh rate |
-| `detection_scale` | 0.25 | HOG input size relative to camera frame |
+| `detection_scale` | 0.25 | YuNet input size relative to camera frame |
 | `detection_interval` | 3 | Minimum source-frame gap between detections |
 | `recognition_interval` | 5 | Minimum frame gap for unconfirmed/final verification encodings |
 | `stable_recheck_sec` | 0.75 | Periodic re-encoding of stable tracks |
@@ -316,7 +380,26 @@ recognition observations and synthetic frames. They cover:
 - Existing enrollment format and safe single-face enrollment.
 
 A real webcam/RTSP soak test is still needed to measure sustained FPS and
-reconnect behavior on the target camera. Face matching/continuous presence
-does not implement anti-spoofing or liveness detection. The OpenCV font used
+reconnect behavior and blink/smile detection on the target camera. Test a live person,
+a static paper photo, a phone photo (stationary and moving), a blinking video,
+a video with head/mouth movements, covered eyes,
+leaving/re-entering, identity swaps, and disconnect/reconnect. Static photos and missing evidence must create no attendance rows.
+Blink/smile alone must never override a failing anti-spoof result. Synthetic tests verify the
+software gates; they do not measure real-world spoof rejection. For broader
+attack coverage, use independently evaluated PAD/depth/IR equipment; see
+[NIST's PAD evaluation](https://www.nist.gov/news-events/news/2023/09/whats-wrong-picture-nist-face-analysis-program-helps-find-answers).
+The OpenCV font used
 by the existing app renders ASCII labels; full Unicode display names require
 a font-rendering extension.
+
+### Checking a recorded presentation without writing attendance
+
+```bash
+venv/bin/python scripts/check_anti_spoof.py /path/to/camera-recording.mov
+```
+
+This local diagnostic samples frames, detects faces and prints PAD scores as
+JSON. It never opens the attendance database, enrolls faces, saves images or
+sends notifications. Use a recording of the **attendance camera seeing the
+phone playing a video**, plus a separate genuine-person recording. A source
+selfie clip lacks the display artifacts this model needs to evaluate a replay.

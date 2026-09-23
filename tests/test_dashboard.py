@@ -33,12 +33,11 @@ def _app():
 
 def temp_settings(root):
     """Settings pointing at a temp dir, with a minimal seeded enrollment catalog."""
-    import pickle
+    from face_attendance.enrollment import write_encodings
     root = Path(root)
     if not (root / "faces.pickle").exists():
         (root / "employees.json").write_text("{}", encoding="utf-8")
-        with (root / "faces.pickle").open("wb") as handle:
-            pickle.dump({"Seed": [np.zeros(128)]}, handle)
+        write_encodings(root / "faces.pickle", {"Seed": [np.ones(128)]})
     from face_attendance.settings import Settings
     return replace(Settings(),
                    db_path=str(root / "attendance.db"),
@@ -259,6 +258,102 @@ class EmployeesScreenTests(unittest.TestCase):
                 return True
             time.sleep(0.01)
         return condition()
+
+    def test_directory_shows_saved_photo_and_filters_status(self):
+        from face_attendance.enrollment import write_encodings
+        application = _app()
+        with tempfile.TemporaryDirectory() as directory:
+            screen = self._screen(directory)
+            try:
+                write_encodings(screen.settings.encodings_path, {"Seed": [np.ones(128)], "Waiting": []})
+                screen._save_enrollment_photo("Seed", [np.full((120, 120, 3), (30, 100, 220), np.uint8)])
+                screen.reload()
+                self.assertEqual(screen.employee_table.rowCount(), 2)
+                self.assertEqual(screen.employee_table.item(0, 0).toolTip(), "Saved enrollment photo")
+                self.assertFalse(screen.employee_table.item(0, 0).icon().isNull())
+                screen.status_filter.setCurrentIndex(2)
+                self.assertTrue(screen.employee_table.isRowHidden(0))
+                self.assertFalse(screen.employee_table.isRowHidden(1))
+                screen.search_edit.setText("missing")
+                self.assertTrue(screen.employee_table.isRowHidden(1))
+                self.assertFalse(screen.empty_label.isHidden())
+            finally:
+                screen.close()
+
+    def test_edit_and_photo_update_keep_original_label_and_employee_id(self):
+        from unittest.mock import patch
+        from face_attendance.enrollment import read_encodings
+        application = _app()
+        with tempfile.TemporaryDirectory() as directory:
+            screen = self._screen(directory)
+            try:
+                original_id = screen.rows[0]["employee_id"]
+                screen.employee_table.selectRow(0)
+                with patch('face_attendance.dashboard.screens.employees.QInputDialog.getText',
+                           return_value=("Edited employee", True)):
+                    screen._edit_selected()
+                screen.employee_table.selectRow(0)
+                screen._use_selected()
+                self.assertEqual(screen.name_edit.text(), "Edited employee")
+                self.assertTrue(screen.name_edit.isReadOnly())
+                screen.pending = [np.full((240, 320, 3), 128, np.uint8)]
+                screen._save()
+                self.assertTrue(self._wait_for(application, lambda: not screen.saving))
+                self.assertEqual(list(read_encodings(screen.settings.encodings_path)), ["Seed"])
+                self.assertEqual(screen.rows[0]["employee_id"], original_id)
+                self.assertEqual(screen.rows[0]["employee_name"], "Edited employee")
+                self.assertEqual(screen.rows[0]["samples"], 2)
+                self.assertTrue(screen._enrollment_photo_path("Seed").exists())
+                self.assertFalse(screen.editor.isVisible())
+                screen._switch_to_wizard()
+                self.assertEqual(screen.name_edit.text(), "")
+                self.assertEqual(screen.id_edit.text(), "")
+                self.assertFalse(screen.name_edit.isReadOnly())
+            finally:
+                screen.close()
+
+    def test_delete_cancellation_and_confirmation_preserve_attendance_history(self):
+        from unittest.mock import patch
+        from PyQt6.QtWidgets import QMessageBox
+        application = _app()
+        with tempfile.TemporaryDirectory() as directory:
+            screen = self._screen(directory)
+            try:
+                history = Path(screen.settings.db_path)
+                history.write_bytes(b'attendance history sentinel')
+                screen._save_enrollment_photo("Seed", [np.ones((100, 100, 3), np.uint8)])
+                photo = screen._enrollment_photo_path("Seed")
+                screen.employee_table.selectRow(0)
+                with patch('face_attendance.dashboard.screens.employees.QMessageBox.question',
+                           return_value=QMessageBox.StandardButton.No):
+                    screen._remove_employee()
+                self.assertEqual(len(screen.rows), 1)
+                self.assertTrue(photo.exists())
+                with patch('face_attendance.dashboard.screens.employees.QMessageBox.question',
+                           return_value=QMessageBox.StandardButton.Yes):
+                    screen._remove_employee()
+                self.assertEqual(screen.rows, [])
+                self.assertFalse(photo.exists())
+                self.assertEqual(history.read_bytes(), b'attendance history sentinel')
+            finally:
+                screen.close()
+
+    def test_photo_filenames_do_not_mix_colliding_employee_labels(self):
+        from face_attendance.enrollment import write_encodings
+        application = _app()
+        with tempfile.TemporaryDirectory() as directory:
+            screen = self._screen(directory)
+            try:
+                write_encodings(screen.settings.encodings_path, {"A B": [], "A_B": []})
+                screen.reload()
+                first = screen._enrollment_photo_path("A B")
+                second = screen._enrollment_photo_path("A_B")
+                self.assertNotEqual(first, second)
+                screen._save_enrollment_photo("A B", [np.ones((100, 100, 3), np.uint8)])
+                self.assertEqual(screen._find_enrollment_photo("A B", "A B"), first)
+                self.assertIsNone(screen._find_enrollment_photo("A_B", "A_B"))
+            finally:
+                screen.close()
 
     def test_manual_capture_completes_off_thread(self):
         from PyQt6.QtWidgets import QApplication

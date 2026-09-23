@@ -96,3 +96,90 @@ class TrackingTests(unittest.TestCase):
         self.confirm_two()
         self.detect(20, 1.6, [Detection(self.box_a, encoded=False, hint_id=999)])
         self.assertFalse(self.tracker.tracks[1].identity_valid)
+
+    def verify_liveness(self):
+        from tests.test_liveness import landmarks, complete_challenge
+        for track in self.tracker.tracks.values():
+            self.tracker.liveness.reset(track.track_id)
+            at = complete_challenge(self.tracker.liveness, track.track_id, start=-5)
+            while at < 1.4:
+                at = min(1.4, at + .1)
+                self.tracker.liveness.update(track.track_id, landmarks(), at)
+            track.liveness_ok = self.tracker.liveness.is_live(track.track_id, 1.4)
+            track.last_liveness_at = 1.4
+            self.assertTrue(track.liveness_ok)
+
+    def test_identity_loss_and_swap_clear_liveness(self):
+        from tests.test_liveness import landmarks, _real_face_roi
+        for employee in (self.b, None):
+            with self.subTest(employee=employee):
+                self.tracker.clear()
+                self.tracker.next_id = 1
+                self.confirm_two()
+                self.verify_liveness()
+                self.detect(20, 1.6, [Detection(self.box_a, employee, .3, True,
+                                              landmarks=landmarks(), face_roi=_real_face_roi())])
+                for track in self.tracker.tracks.values():
+                    self.assertFalse(track.liveness_ok)
+                    self.assertEqual(self.tracker.liveness.progress(track.track_id), 0)
+
+    def test_suspend_and_overlap_clear_liveness(self):
+        for reason in ("suspend", "overlap"):
+            with self.subTest(reason=reason):
+                self.tracker.clear()
+                self.tracker.next_id = 1
+                self.confirm_two()
+                self.verify_liveness()
+                if reason == "suspend":
+                    self.tracker.suspend()
+                elif reason == "overlap":
+                    self.tracker.tracks[2].bounding_box = self.box_a
+                    self.tracker._mark_overlaps()
+                self.assertTrue(all(not t.liveness_ok for t in self.tracker.tracks.values()))
+                self.assertTrue(all(not self.tracker.liveness.active(t.track_id)
+                                    for t in self.tracker.tracks.values()))
+
+    def test_liveness_updates_when_identity_encoding_is_skipped(self):
+        from tests.test_liveness import landmarks, CLOSED_EYE, _real_face_roi
+        self.confirm_two()
+        self.verify_liveness()
+        self.detect(20, 1.6, [Detection(self.box_a, encoded=False, hint_id=1,
+                                      landmarks=landmarks(CLOSED_EYE), face_roi=_real_face_roi())])
+        self.assertTrue(self.tracker.tracks[1].liveness_ok)
+        self.assertEqual(self.tracker.tracks[1].last_liveness_at, 1.6)
+        self.detect(22, 1.7, [Detection(self.box_a, encoded=False, hint_id=1)])
+        self.assertFalse(self.tracker.tracks[1].liveness_ok)
+
+    def test_expired_track_removes_liveness_state(self):
+        self.confirm_two()
+        self.verify_liveness()
+        self.tracker.advance(self.packet(100, 10))
+        self.assertEqual(self.tracker.tracks, {})
+        self.assertFalse(self.tracker.liveness.active(1))
+        self.assertFalse(self.tracker.liveness.active(2))
+
+    def test_brief_optical_flow_loss_does_not_erase_expression_progress(self):
+        from tests.test_liveness import response_for, _real_face_roi
+        self.confirm_two()
+        track = self.tracker.tracks[1]
+        now = 1.5
+        # Force transient loss before every fresh, identity-matched detection.
+        for sequence in range(20, 250, 4):
+            track.points = None
+            self.detect(sequence, now, [Detection(self.box_a, self.a, .3, True,
+                                                 landmarks=response_for(self.tracker.liveness),
+                                                 face_roi=_real_face_roi())])
+            if track.liveness_ok:
+                break
+            now += .1
+        self.assertTrue(track.liveness_ok, "Flow resets prevented a single blink")
+
+    def test_waiting_for_expression_does_not_force_frequent_encoding(self):
+        self.confirm_two()
+        track = self.tracker.tracks[1]
+        track.verified_presence = 30
+        track.liveness_ok = False
+        self.assertTrue(self.tracker.hints()[0].stable)
+        track.liveness_ok = True
+        track.spoof_ok = True
+        self.assertFalse(self.tracker.hints()[0].stable)

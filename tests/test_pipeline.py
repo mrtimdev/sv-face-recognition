@@ -70,6 +70,27 @@ class RecognitionTests(unittest.TestCase):
         self.assertTrue(result.detections[0].encoded)
         self.assertAlmostEqual(result.detections[0].bounding_box[1], 50 * 641 / 160)
 
+    def test_full_resolution_landmarks_on_skipped_encoding(self):
+        calls = []
+        def face_landmarks(image, boxes, model):
+            calls.append((image.shape, boxes, model))
+            return [{"left_eye": [], "right_eye": []}]
+        self.backend.face_landmarks = face_landmarks
+        hint = TrackHint(1, (40, 200, 200, 40), "A", 9.8, 94, True)
+        result = self.service.process(RecognitionRequest(self.packet, (hint,)))
+        self.assertFalse(result.detections[0].encoded)
+        self.assertEqual(calls, [((240, 320, 3), [(40, 200, 200, 40)], "large")])
+        self.assertIsNotNone(result.detections[0].landmarks)
+        self.assertIsNotNone(result.detections[0].face_roi)
+
+    def test_landmark_failure_returns_no_eye_evidence(self):
+        def failing(*args, **kwargs):
+            raise RuntimeError("landmark failure")
+        self.backend.face_landmarks = failing
+        result = self.service.process(RecognitionRequest(self.packet, ()))
+        self.assertIsNone(result.detections[0].landmarks)
+        self.assertEqual(result.detections[0].employee, self.a)
+
     def test_latest_request_replaces_backlog(self):
         entered, release, latest_done = threading.Event(), threading.Event(), threading.Event()
         processed = []

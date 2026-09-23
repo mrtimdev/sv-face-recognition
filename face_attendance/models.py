@@ -61,6 +61,8 @@ class Detection:
     hint_id: Optional[int] = None
     landmarks: Any = None
     face_roi: Any = field(default=None, repr=False, compare=False)
+    spoof_score: Optional[float] = None
+    spoof_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -94,7 +96,14 @@ class FaceTrack:
     visible: bool = True
     ambiguous: bool = False
     flow_ok: bool = False
+    spoof_ok: bool = False
+    spoof_score: Optional[float] = None
+    spoof_prompt: str = "Checking real face..."
+    last_spoof_at: float = float("-inf")
     liveness_ok: bool = False
+    liveness_prompt: str = "Look straight at the camera"
+    liveness_progress: float = 0.0
+    last_liveness_at: float = float("-inf")
     last_flow_at: float = float("-inf")
     state_since: float = 0.0
     retry_at: float = 0.0
@@ -114,6 +123,11 @@ class FaceTrack:
 
     def invalidate_identity(self):
         # Keep the displayed name during brief uncertainty, but revoke capture eligibility.
+        self.spoof_ok = False
+        self.spoof_score = None
+        self.last_spoof_at = float("-inf")
+        self.liveness_ok = False
+        self.last_liveness_at = float("-inf")
         self.identity_valid = False
         self.confirmation_count = 0
         self.candidate_id = None

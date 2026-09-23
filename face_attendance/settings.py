@@ -50,6 +50,7 @@ def describe_source(value):
 class Settings:
     """Everything the dashboard can change; one flat, JSON-friendly record."""
 
+    recognition_backend: str = "opencv-sface-2021dec-v1"
     source: str = "0"
     camera_width: int = 1280
     camera_height: int = 720
@@ -137,6 +138,15 @@ class Settings:
         if not isinstance(data, dict):
             raise ValueError("settings.json must contain a JSON object")
         settings = cls()
+        # Old distances and vectors belong to dlib, even though both embeddings
+        # have 128 values. Redirect old settings without modifying the old file.
+        if data.get("recognition_backend") != settings.recognition_backend:
+            old = Path(str(data.get("encodings_path", Config().encodings_path)))
+            if old.name != "encodings_sface.pickle":
+                data["encodings_path"] = str(old.with_name(old.stem + "_sface" + old.suffix))
+            data["face_tolerance"] = .5
+            data["identity_margin"] = .035
+            data["recognition_backend"] = settings.recognition_backend
         settings.update({key: value for key, value in data.items()
                          if key in settings.to_dict()})  # Unknown keys are ignored.
         return settings

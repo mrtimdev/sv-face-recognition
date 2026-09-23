@@ -31,7 +31,7 @@ def verified(track_id=1, employee_id="E001", now=10.0):
                      employee_id=employee_id, employee_name="Employee " + employee_id,
                      last_recognized=now, identity_valid=True, confirmation_count=4,
                      verified_presence=3.1, last_evidence_at=now,
-                     flow_ok=True, liveness_ok=True, last_flow_at=now, state=State.VERIFYING)
+                     flow_ok=True, spoof_ok=True, last_spoof_at=now, liveness_ok=True, last_liveness_at=now, last_flow_at=now, state=State.VERIFYING)
 
 
 class AttendanceTests(unittest.TestCase):
@@ -86,7 +86,9 @@ class AttendanceTests(unittest.TestCase):
     def test_blocked_capture_conditions(self):
         for changes in ({"visible": False}, {"ambiguous": True}, {"identity_valid": False},
                         {"last_seen": 8}, {"last_recognized": 8}, {"flow_ok": False},
-                        {"liveness_ok": False}, {"confirmation_count": 1},
+                        {"spoof_ok": False}, {"last_spoof_at": 9}, {"last_spoof_at": 11},
+                        {"liveness_ok": False}, {"last_liveness_at": 9},
+                        {"last_liveness_at": 11}, {"confirmation_count": 1},
                         {"verified_presence": 2.9}):
             with self.subTest(changes=changes):
                 track = verified()
@@ -143,3 +145,12 @@ class AttendanceTests(unittest.TestCase):
         self.assertEqual(parse_source("rtsp://camera"), "rtsp://camera")
         with self.assertRaises(ValueError):
             replace(self.config, detection_interval=0)
+
+    def test_known_photo_is_not_written_to_observation_log(self):
+        track = verified()
+        track.liveness_ok = False
+        self.service.observe({1: track}, 10, 1000)
+        self.assertEqual(self.worker.events, [])
+        track.liveness_ok = True
+        self.service.observe({1: track}, 10, 1000)
+        self.assertEqual(len(self.worker.events), 1)

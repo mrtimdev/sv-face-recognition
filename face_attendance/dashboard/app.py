@@ -31,7 +31,7 @@ NAV = (
     ("monitor", "Live Monitor"),
     ("list", "Real-time Attendance"),
     ("chart", "Attendance Report"),
-    ("users", "Employees"),
+    ("users", "Enrolled Employees"),
     ("gear", "Settings"),
 )
 
@@ -216,8 +216,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage(
-            "Blink-based liveness detection is active.  "
-            "Attendance is persisted to SQLite with WAL journaling.")
+            "Look at the camera, then blink once or smile.  "
+            "Keep your whole face visible.")
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
         self._refresh_header()
@@ -534,4 +534,3 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -2,6 +2,8 @@
 import queue
 import uuid
 
+from .anti_spoof import SAMPLE_MAX_AGE
+from .liveness import MAX_SAMPLE_GAP
 from .models import CaptureJob, ObservationEvent, State
 
 
@@ -68,6 +70,10 @@ class AttendanceService:
         for track in tracks.values():
             if not track.visible:
                 continue
+            if track.identity_valid and not (
+                    track.liveness_ok and 0 <= now - track.last_liveness_at <= MAX_SAMPLE_GAP
+                    and track.spoof_ok and 0 <= now - track.last_spoof_at <= SAMPLE_MAX_AGE):
+                continue
             name = track.employee_name if track.identity_valid else "UNKNOWN"
             if not track.identity_valid and track.state != State.UNKNOWN:
                 continue
@@ -121,7 +127,10 @@ class AttendanceService:
             eligible = (measured >= 1 and track.confirmation_count >= cfg.min_confirmation_frames
                         and track.flow_ok and now - track.last_flow_at <= cfg.detection_fresh_sec
                         and now - track.last_recognized <= cfg.detection_fresh_sec
+                        and track.spoof_ok
+                        and 0 <= now - track.last_spoof_at <= SAMPLE_MAX_AGE
                         and track.liveness_ok
+                        and 0 <= now - track.last_liveness_at <= MAX_SAMPLE_GAP
                         and self.ready)
             if not eligible:
                 continue

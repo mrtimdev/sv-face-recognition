@@ -35,8 +35,6 @@ UNKNOWN_ALERT_EXPIRY = 3600.0
 
 def track_snapshot(track, now, tracker=None):
     """Plain data for Qt widgets; the live FaceTrack stays engine-owned."""
-    liveness = tracker.liveness if tracker else None
-    blinks = liveness.blink_count(track.track_id) if liveness else 0
     return {"track_id": track.track_id,
             "employee_id": track.employee_id or "",
             "name": track.employee_name if track.employee_id else "UNKNOWN",
@@ -47,8 +45,12 @@ def track_snapshot(track, now, tracker=None):
             "visible": bool(track.visible),
             "ambiguous": bool(track.ambiguous),
             "identity_valid": bool(track.identity_valid),
+            "spoof_ok": bool(track.spoof_ok),
+            "spoof_score": track.spoof_score,
+            "spoof_prompt": track.spoof_prompt,
             "liveness_ok": bool(track.liveness_ok),
-            "liveness_blinks": blinks,
+            "liveness_progress": track.liveness_progress,
+            "liveness_prompt": track.liveness_prompt,
             "distance": None if track.recognition_distance is None else round(track.recognition_distance, 3),
             "age": round(now - track.first_seen, 1),
             "error": track.error}

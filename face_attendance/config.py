@@ -58,7 +58,7 @@ class Config:
     max_detect_faces: int = 5
     alert_cooldown_sec: float = 3.0
     log_cooldown_sec: float = 10.0
-    encodings_path: Path = ROOT / "encodings.pickle"
+    encodings_path: Path = ROOT / "encodings_sface.pickle"
     employees_path: Path = ROOT / "employees.json"
     db_path: Path = ROOT / "attendance.db"
     capture_dir: Path = ROOT / "captures"

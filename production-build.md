@@ -19,7 +19,7 @@ Windows
 Prerequisites (one-time setup on Windows machine):
 
 Python 3.9+
-Visual Studio Build Tools (for dlib/CMake compilation)
+OpenCV, NumPy and PyQt6 wheels (no dlib/CMake compilation needed)
 pip install -r requirements.txt in a venv
 Build:
 
@@ -32,3 +32,8 @@ To make an installer — install Inno Setup, then:
 
 iscc scripts\installer.iss
 Produces dist\SV-Face-ID-Setup-1.0.0.exe — a standard Windows installer with desktop shortcut.
+
+Recognition and PAD ONNX assets plus licenses are bundled by `build.spec`.
+Rebuild an existing app bundle to include the new backend. An older bundle
+continues to use its old code until replaced. Preserve the user-data directory;
+old dlib templates require photo migration or re-enrollment (see README).

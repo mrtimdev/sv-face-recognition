@@ -10,8 +10,7 @@ Usage:
 If --image is not provided, it opens your webcam and lets you capture
 a photo by pressing SPACE (press Q to cancel).
 
-Encodings are stored in encodings.pickle as:
-    { "John Doe": [encoding1, encoding2, ...], ... }
+Encodings are stored in encodings_sface.pickle with a versioned SFace model tag.
 
 You can enroll the same person multiple times (different angles/lighting)
 to improve recognition accuracy -- each new encoding is appended.
@@ -24,7 +23,7 @@ points write identical formats.
 import argparse
 
 import cv2
-import face_recognition
+from face_attendance.face_backend import get_backend
 
 from face_attendance import enrollment
 from face_attendance.catalog import load_employee_map
@@ -38,7 +37,7 @@ EMPLOYEES_PATH = Config().employees_path
 
 
 def load_encodings():
-    """The existing local format: {enrollment_name: [encoding, ...]}."""
+    """Read the sample dictionary from the versioned SFace catalog."""
     return enrollment.read_encodings(ENCODINGS_PATH)
 
 
@@ -95,7 +94,9 @@ def enroll(name: str, image_path: str = None, employee_id=None, source=0, check_
             return
 
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    boxes = face_recognition.face_locations(rgb, model="hog")
+    backend = get_backend()
+    with enrollment.FACE_BACKEND_LOCK:
+        boxes = backend.face_locations(rgb)
 
     if len(boxes) == 0:
         print("No face detected in the image. Try again with better lighting/angle.")
@@ -110,7 +111,8 @@ def enroll(name: str, image_path: str = None, employee_id=None, source=0, check_
             print("Sample rejected: " + "; ".join(issues))
             return
 
-    encodings = face_recognition.face_encodings(rgb, boxes)
+    with enrollment.FACE_BACKEND_LOCK:
+        encodings = backend.face_encodings(rgb, boxes)
     new_encoding = encodings[0]
 
     data = load_encodings()

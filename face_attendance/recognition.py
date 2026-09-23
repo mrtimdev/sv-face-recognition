@@ -1,4 +1,4 @@
-"""HOG detection and face encoding run only on the recognition worker."""
+"""YuNet detection and SFace encoding run only on the recognition worker."""
 import logging
 import threading
 import time
@@ -6,17 +6,20 @@ import time
 import cv2
 import numpy as np
 
+from .anti_spoof import AntiSpoofService
 from .channels import LatestValue
 from .enrollment import FACE_BACKEND_LOCK
+from .face_backend import OpenCVFaceBackend
 from .geometry import association_cost, iou
 from .models import Detection, RecognitionResult
 
 
 class RecognitionService:
-    def __init__(self, config, catalog, backend=None):
+    def __init__(self, config, catalog, backend=None, anti_spoof=None):
         if backend is None:
-            import face_recognition as backend
+            backend = OpenCVFaceBackend()
         self.backend, self.config, self.catalog = backend, config, catalog
+        self.anti_spoof = AntiSpoofService() if anti_spoof is None else anti_spoof
         self.employee_indices = {}
         for index, employee in enumerate(catalog.employees):
             self.employee_indices.setdefault(employee.employee_id, []).append(index)
@@ -44,7 +47,7 @@ class RecognitionService:
                            interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
         with FACE_BACKEND_LOCK:
-            boxes = self.backend.face_locations(rgb, model="hog")
+            boxes = self.backend.face_locations(rgb, model="yunet")
         sx, sy = width / small.shape[1], height / small.shape[0]
         full_boxes = [(t * sy, r * sx, b * sy, l * sx) for t, r, b, l in boxes]
         max_faces = getattr(cfg, "max_detect_faces", 5)
@@ -55,6 +58,11 @@ class RecognitionService:
             keep = {item[0] for item in sized[:max_faces]}
             boxes = [boxes[i] for i in sorted(keep)]
             full_boxes = [full_boxes[i] for i in sorted(keep)]
+        full_rgb = None
+        if isinstance(self.backend, OpenCVFaceBackend):
+            full_rgb = cv2.cvtColor(packet.frame, cv2.COLOR_BGR2RGB)
+            with FACE_BACKEND_LOCK:
+                self.backend.promote(full_rgb, sx, sy)
         hints, encode_indices, used_hints = {}, [], set()
         for index, box in enumerate(full_boxes):
             candidates = sorted((association_cost(box, hint.bounding_box), hint.track_id, hint)
@@ -78,19 +86,27 @@ class RecognitionService:
         encodings = []
         landmarks_map = {}
         if encode_indices:
-            encode_boxes = [boxes[i] for i in encode_indices]
+            encode_boxes = [(full_boxes if full_rgb is not None else boxes)[i] for i in encode_indices]
             with FACE_BACKEND_LOCK:
-                encodings = self.backend.face_encodings(rgb, encode_boxes)
-            if hasattr(self.backend, "face_landmarks"):
-                try:
-                    with FACE_BACKEND_LOCK:
-                        landmarks_list = self.backend.face_landmarks(rgb, encode_boxes)
-                    for idx, lm in zip(encode_indices, landmarks_list):
-                        landmarks_map[idx] = lm
-                except Exception:
-                    pass
+                encodings = self.backend.face_encodings(full_rgb if full_rgb is not None else rgb, encode_boxes)
+        # Sample eyes on every detection, independently of expensive encodings.
+        # Quarter-size detection images do not preserve enough eye detail.
+        if full_boxes and hasattr(self.backend, "face_landmarks"):
+            if full_rgb is None:
+                full_rgb = cv2.cvtColor(packet.frame, cv2.COLOR_BGR2RGB)
+            landmark_boxes = [(max(0, int(t)), min(width, int(r)),
+                               min(height, int(b)), max(0, int(l)))
+                              for t, r, b, l in full_boxes]
+            try:
+                with FACE_BACKEND_LOCK:
+                    landmarks_list = self.backend.face_landmarks(
+                        full_rgb, landmark_boxes, model="large")
+                landmarks_map = dict(enumerate(landmarks_list))
+            except Exception:
+                # Empty evidence is intentionally rejected by the liveness gate.
+                logging.debug("Eye landmark extraction failed", exc_info=True)
         roi_map = {}
-        for i in encode_indices:
+        for i in range(len(full_boxes)):
             t, r, b, l = full_boxes[i]
             t, b = int(max(0, t)), int(min(height, b))
             l, r = int(max(0, l)), int(min(width, r))
@@ -105,8 +121,11 @@ class RecognitionService:
             hint = hints[index]
             lm = landmarks_map.get(index)
             roi = roi_map.get(index)
+            # Always inspect the current presentation, even when identity is reused.
+            spoof_score, spoof_error = self.anti_spoof.evaluate(packet.frame, box)
             detections.append(Detection(box, employee, distance, index in encode_indices,
-                                        hint.track_id if hint else None, lm, roi))
+                                        hint.track_id if hint else None, lm, roi,
+                                        spoof_score, spoof_error))
         return RecognitionResult(packet, tuple(detections), time.monotonic() - started)
 
 

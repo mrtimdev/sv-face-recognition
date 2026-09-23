@@ -1,7 +1,7 @@
 """Enrollment shared by the command line and the dashboard.
 
 Both entry points reject the same invalid input and write the same on-disk
-formats: ``encodings.pickle`` (``{enrollment_name: [128-dim, ...]}``) and the
+formats: a versioned SFace sample dictionary and the
 optional ``employees.json`` (``{enrollment_name: {employee_id, name}}``).
 
 Nothing here touches the camera, the Qt widgets or the attendance database.
@@ -17,14 +17,11 @@ from pathlib import Path
 import cv2
 
 from .catalog import legacy_employee_id, load_employee_map
+from .template_store import read_templates, template_payload
 
 
-# ``face_recognition`` hands out ONE global dlib detector/encoder
-# (face_recognition/api.py: ``face_detector = dlib.get_frontal_face_detector()``)
-# and dlib objects are not thread-safe. The recognition worker, the enrollment
-# probe and a capture validation all run in separate threads, so every backend
-# call must be serialized with this process-wide lock: concurrent use
-# segfaults the whole process.
+# Serialize model calls shared by enrollment workers and live recognition.
+# OpenCV DNN networks mutate internal input/output buffers during inference.
 FACE_BACKEND_LOCK = threading.Lock()
 
 
@@ -76,19 +73,12 @@ def _atomic_write(path, writer, binary=True):
 
 
 def read_encodings(path):
-    """Read the existing local pickle format; only trustworthy files are loaded."""
-    path = Path(path)
-    if not path.exists():
-        return {}
-    with path.open("rb") as handle:
-        data = pickle.load(handle)
-    if not isinstance(data, dict):
-        raise ValueError("Encodings must contain a name -> samples dictionary")
-    return data
+    """Read only explicitly versioned SFace templates, never legacy dlib vectors."""
+    return read_templates(path)
 
 
 def write_encodings(path, data):
-    _atomic_write(path, lambda handle: pickle.dump(data, handle))
+    _atomic_write(path, lambda handle: pickle.dump(template_payload(data), handle))
 
 
 def write_employee(path, name, employee_id):
@@ -108,10 +98,10 @@ def write_employee(path, name, employee_id):
 
 
 def detect_faces(backend, image):
-    """HOG locations for a BGR frame; the backend is injected for testing."""
+    """Face locations for a BGR frame; the backend is injected for testing."""
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     with FACE_BACKEND_LOCK:
-        return list(backend.face_locations(rgb, model="hog"))
+        return list(backend.face_locations(rgb, model="yunet"))
 
 
 def encode_faces(backend, image, boxes):
@@ -171,8 +161,8 @@ class EnrollmentService:
 
     def _detector(self):
         if self.backend is None:
-            import face_recognition
-            self.backend = face_recognition
+            from .face_backend import OpenCVFaceBackend
+            self.backend = OpenCVFaceBackend()
         return self.backend
 
     def _prepare(self, image, check_quality):
@@ -263,6 +253,29 @@ class EnrollmentService:
                                  employee_name=canonical, samples_added=len(encodings),
                                  total_samples=len(data[name]), total_people=len(data),
                                  issues=tuple(rejected))
+
+    def update_employee(self, name, display_name):
+        """Edit the display name while retaining enrollment labels and permanent IDs.
+
+        Aliases for the same ID receive the same display name. Historical
+        attendance rows are never rewritten.
+        """
+        display_name = str(display_name or "").strip()
+        if not display_name:
+            raise ValueError("Enter the employee display name")
+        data = read_encodings(self.encodings_path)
+        if name not in data:
+            raise ValueError("Employee enrollment no longer exists; refresh the list")
+        records = load_employee_map(self.employees_path)
+        employee_id = records[name].employee_id if name in records else legacy_employee_id(name)
+        updated = {key: {"employee_id": record.employee_id,
+                         "name": display_name if record.employee_id == employee_id else record.name}
+                   for key, record in records.items()}
+        updated[name] = {"employee_id": employee_id, "name": display_name}
+        _atomic_write(self.employees_path,
+                      lambda handle: json.dump(updated, handle, ensure_ascii=False, indent=2),
+                      binary=False)
+        return employee_id
 
     def delete_employee(self, name):
         """Remove a label from the pickle and the mapping; attendance history is kept."""

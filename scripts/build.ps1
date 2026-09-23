@@ -5,7 +5,7 @@
 #
 # Prerequisites:
 #   - Python 3.9+ with venv
-#   - Visual Studio Build Tools (for dlib compilation)
+#   - OpenCV, NumPy and PyQt6 wheels (installed from requirements.txt)
 #   - CMake
 #
 # Output: dist\SV Face ID\  (folder with SV Face ID.exe)

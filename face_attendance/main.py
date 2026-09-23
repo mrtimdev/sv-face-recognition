@@ -10,7 +10,7 @@ from .config import Config, parse_source
 def parser():
     p = argparse.ArgumentParser(description="Face ID attendance terminal with automatic verification and capture")
     p.add_argument("--source", default="0", help="Webcam index (0, 1, ...) or an IP/RTSP URL")
-    p.add_argument("--tolerance", type=float, help="Lower is stricter; default 0.5")
+    p.add_argument("--tolerance", type=float, help="SFace cosine distance: lower is stricter; default 0.5")
     p.add_argument("--process-every", "--detection-interval", dest="detection_interval", type=int,
                    help="Minimum camera frames between detections; default 3")
     p.add_argument("--recognition-interval", type=int, help="Minimum frames between unconfirmed encodings; default 5")
