@@ -1,2 +1,2 @@
-# Optional sound support; the terminal works without it.
+# Optional fallback. macOS uses afplay; Windows uses built-in winsound.
 simpleaudio==1.0.4

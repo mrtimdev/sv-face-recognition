@@ -1,4 +1,4 @@
-"""Single adaptive blink OR smile verification for an ordinary RGB camera.
+"""Configurable adaptive expression verification for an ordinary RGB camera.
 
 A brief neutral baseline distinguishes expression changes from a static photo.
 This convenience check is not validated PAD: recorded blinks or smiles can
@@ -10,6 +10,8 @@ from collections import deque
 
 import cv2
 import numpy as np
+
+from .config import ATTENDANCE_MODES
 
 
 MAX_SAMPLE_GAP = 0.75
@@ -156,9 +158,13 @@ def _measure(landmarks):
 
 
 class LivenessChecker:
-    """One open/closed/open blink or a sustained smile relative to baseline."""
+    """Fresh face evidence with the configured expression requirement."""
 
-    def __init__(self):
+    def __init__(self, mode="blink_or_smile"):
+        # Keep the legacy either-expression API for standalone callers.
+        if mode not in (*ATTENDANCE_MODES, "blink_or_smile"):
+            raise ValueError("Invalid attendance requirement")
+        self.mode = mode
         self._state = {}
 
     @staticmethod
@@ -170,6 +176,7 @@ class LivenessChecker:
             "open_since": None, "closed_since": None,
             "smile_since": None, "smile_samples": 0,
             "passed_at": None, "method": None,
+            "blink_done": False, "smile_done": False,
             "texture_scores": deque(maxlen=5), "moire_scores": deque(maxlen=5),
             "image_valid": False, "last_texture": None,
         }
@@ -196,9 +203,16 @@ class LivenessChecker:
         if state is None:
             state = self._state[track_id] = self._new(now)
         state["last_input"] = now
+        if self.mode == "face":
+            # Current face image + identity + presentation checks are still
+            # required by the tracker and attendance service; no expression.
+            state["valid"] = True
+            state["last_sample"] = now
+            state["phase"], state["method"] = "complete", "face"
+            return 1, self.is_live(track_id, now)
         measured = _measure(landmarks or {})
         if measured is None:
-            if state["passed_at"] is not None:
+            if state["phase"] == "complete":
                 self.reset(track_id)
                 return 0, False
             state["valid"] = False
@@ -207,6 +221,13 @@ class LivenessChecker:
         state["valid"] = True
         state["last_sample"] = now
         eyes, smile = measured
+        if smile is None and self.mode in ("smile", "blink_and_smile"):
+            if state["phase"] == "complete":
+                self.reset(track_id)
+                return 0, False
+            state["valid"] = False
+            self._break_hold(state)
+            return 0, False
         if state["phase"] == "calibrate":
             # No universal 0.26 open-eye threshold: learn each eye separately.
             if min(eyes) < .10:
@@ -215,7 +236,9 @@ class LivenessChecker:
             state["calibration"].append((now, eyes, smile))
             samples = state["calibration"]
             if len(samples) >= 3 and now - samples[0][0] >= CALIBRATION_SEC:
-                state["baseline_eyes"] = tuple(np.percentile([s[1] for s in samples], 90, axis=0))
+                # A single enlarged eyelid estimate must not make normal open
+                # eyes look closed for the rest of the challenge.
+                state["baseline_eyes"] = tuple(np.median([s[1] for s in samples], axis=0))
                 mouths = [s[2] for s in samples if s[2] is not None]
                 state["baseline_smile"] = tuple(np.median(mouths, axis=0)) if len(mouths) >= 3 else None
                 state["phase"] = "ready"
@@ -234,11 +257,12 @@ class LivenessChecker:
                 if state["closed_since"] is not None:
                     duration = now - state["closed_since"]
                     if MIN_BLINK_SEC <= duration <= MAX_BLINK_SEC:
-                        state["phase"], state["method"] = "complete", "blink"
+                        state["blink_done"] = True
                     state["closed_since"] = None
                 if state["open_since"] is None:
                     state["open_since"] = now
-                state["baseline_eyes"] = tuple(max(base, ear) for base, ear in zip(baseline, eyes))
+                # Keep the calibrated baseline: a single landmark outlier
+                # must not permanently raise the open-eye threshold.
             elif any(ear >= base * .85 for ear, base in zip(eyes, baseline)):
                 # A wink or tracking mismatch is not a bilateral blink.
                 state["open_since"] = state["closed_since"] = None
@@ -254,10 +278,18 @@ class LivenessChecker:
                     state["smile_since"] = now
                 state["smile_samples"] += 1
                 if state["smile_samples"] >= 3 and now - state["smile_since"] >= SMILE_HOLD_SEC:
-                    state["phase"], state["method"] = "complete", "smile"
+                    state["smile_done"] = True
             else:
                 state["smile_since"] = None
                 state["smile_samples"] = 0
+            blink, smiled = state["blink_done"], state["smile_done"]
+            complete = {"blink": blink, "smile": smiled,
+                        "blink_and_smile": blink and smiled,
+                        "blink_or_smile": blink or smiled}[self.mode]
+            if complete:
+                state["phase"] = "complete"
+                state["method"] = ("blink_and_smile" if self.mode == "blink_and_smile"
+                                   else "smile" if self.mode == "smile" or not blink else "blink")
         return int(state["phase"] == "complete"), self.is_live(track_id, now)
 
     def update_texture(self, track_id, face_roi, now=None):
@@ -266,11 +298,13 @@ class LivenessChecker:
             return
         if face_roi is None or face_roi.size < 100:
             state["image_valid"] = False
-            if state["passed_at"] is not None:
+            if state["phase"] == "complete":
                 self.reset(track_id)
             return
         now = time.monotonic() if now is None else now
         state["image_valid"] = True
+        if self.mode == "face":
+            return
         # Avoid unused colour/focus/optical-flow diagnostics on every frame.
         if state["last_texture"] is not None and now - state["last_texture"] < .25:
             return
@@ -293,7 +327,8 @@ class LivenessChecker:
                 or state["phase"] != "complete"):
             return False
         tex, moire = state["texture_scores"], state["moire_scores"]
-        if not (len(tex) >= MIN_TEXTURE_SAMPLES and np.median(tex) >= TEXTURE_SCORE_THRESHOLD
+        if self.mode != "face" and not (
+                len(tex) >= MIN_TEXTURE_SAMPLES and np.median(tex) >= TEXTURE_SCORE_THRESHOLD
                 and len(moire) >= MIN_TEXTURE_SAMPLES and np.median(moire) >= .4):
             return False
         if state["passed_at"] is None:
@@ -307,24 +342,35 @@ class LivenessChecker:
         state = self._state.get(track_id)
         if not state:
             return 0.0
-        return 1.0 if state["phase"] == "complete" else .25 if state["phase"] == "ready" else 0.0
+        if state["phase"] == "complete":
+            return 1.0
+        if self.mode == "blink_and_smile" and (state["blink_done"] or state["smile_done"]):
+            return .65
+        return .25 if state["phase"] == "ready" else 0.0
 
     def prompt(self, track_id):
         state = self._state.get(track_id)
         if not state or not state["valid"]:
             return "Look at the camera - keep eyes visible"
         if state["phase"] == "calibrate":
-            return "Look at the camera"
+            return "Look at the camera - relax your face"
         if state["phase"] == "complete":
             return "Hold still - checking"
-        return "Blink once or smile"
+        if self.mode == "blink_and_smile":
+            if state["blink_done"]:
+                return "Blink done - now smile"
+            if state["smile_done"]:
+                return "Smile done - now blink once"
+            return "Blink once and smile (either order)"
+        return {"blink": "Blink once", "smile": "Smile and hold briefly",
+                "face": "Hold still - checking"}.get(self.mode, "Blink once or smile")
 
     def pause(self, track_id):
         """A missing detection blocks capture; only unfinished verification may resume."""
         state = self._state.get(track_id)
         if state is None:
             return
-        if state["passed_at"] is not None:
+        if state["phase"] == "complete":
             self.reset(track_id)
         else:
             state["valid"] = False

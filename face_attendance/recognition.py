@@ -91,7 +91,7 @@ class RecognitionService:
                 encodings = self.backend.face_encodings(full_rgb if full_rgb is not None else rgb, encode_boxes)
         # Sample eyes on every detection, independently of expensive encodings.
         # Quarter-size detection images do not preserve enough eye detail.
-        if full_boxes and hasattr(self.backend, "face_landmarks"):
+        if cfg.attendance_mode != "face" and full_boxes and hasattr(self.backend, "face_landmarks"):
             if full_rgb is None:
                 full_rgb = cv2.cvtColor(packet.frame, cv2.COLOR_BGR2RGB)
             landmark_boxes = [(max(0, int(t)), min(width, int(r)),
@@ -122,10 +122,17 @@ class RecognitionService:
             lm = landmarks_map.get(index)
             roi = roi_map.get(index)
             # Always inspect the current presentation, even when identity is reused.
-            spoof_score, spoof_error = self.anti_spoof.evaluate(packet.frame, box)
+            if hasattr(self.anti_spoof, "inspect"):
+                inspection = self.anti_spoof.inspect(packet.frame, box)
+                spoof_score, spoof_error = inspection["live_score"], inspection["error"]
+                model_scores = tuple(model["live"] for model in inspection["models"])
+            else:
+                # Keep injected/custom PAD backends compatible with evaluate().
+                spoof_score, spoof_error = self.anti_spoof.evaluate(packet.frame, box)
+                model_scores = ()
             detections.append(Detection(box, employee, distance, index in encode_indices,
                                         hint.track_id if hint else None, lm, roi,
-                                        spoof_score, spoof_error))
+                                        spoof_score, spoof_error, model_scores))
         return RecognitionResult(packet, tuple(detections), time.monotonic() - started)
 
 

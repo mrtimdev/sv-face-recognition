@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from .models import State
+from .anti_spoof import live_sample
 
 
 GREEN = (100, 225, 95)
@@ -97,8 +98,9 @@ class AnimationManager:
 
 
 class UIRenderer:
-    def __init__(self, config):
+    def __init__(self, config, capture_effects=True):
         self.config = config
+        self.capture_effects = capture_effects
         self.animations = AnimationManager(config)
         self.canvas = None
         self.overlay_canvas = None
@@ -164,7 +166,10 @@ class UIRenderer:
             return
         known = bool(track.employee_id) and track.state != State.UNKNOWN
         color = GREEN if known else RED if track.state == State.UNKNOWN else AMBER
-        if track.state == State.ERROR or (known and track.spoof_score is not None and not track.spoof_ok):
+        recorded = track.state in (State.SUCCESS, State.COOLDOWN)
+        if known and not recorded and track.state != State.CAPTURING:
+            color = GREEN if track.spoof_ok and track.liveness_ok else AMBER
+        if track.state == State.ERROR:
             color = RED
         fade = 1.0 if track.visible else max(0, 1 - (now - track.last_seen) / self.config.session_timeout)
         color = tuple(int(channel * fade) for channel in color)
@@ -173,12 +178,14 @@ class UIRenderer:
         state = track.state
         if not track.visible:
             label = "AUTO RESET" if state == State.UNKNOWN else "REACQUIRING..."
-        elif track.identity_valid and not track.spoof_ok and state != State.CAPTURING:
-            label = "REAL FACE REQUIRED"
+        elif state == State.ERROR:
+            label = "SAVE FAILED / RETRYING"
+        elif track.identity_valid and not track.spoof_ok and not recorded and state != State.CAPTURING:
+            label = "CHECKING LIVE FACE"
         elif state == State.VERIFYING:
             label = (f"VERIFYING  {track.verification_progress * 100:.0f}%"
                      if track.liveness_ok and track.spoof_ok else
-                     "REAL FACE REQUIRED" if not track.spoof_ok else "LIVENESS CHECK")
+                     "CHECKING LIVE FACE" if not track.spoof_ok else "LIVENESS CHECK")
         elif state == State.SUCCESS:
             label = f"RECORDED  |  {math.ceil(track.cooldown_remaining)}s"
         elif state == State.COOLDOWN:
@@ -188,8 +195,6 @@ class UIRenderer:
             label = "AUTO RESET" if phase > 2.4 else "NOT ENROLLED"
             if phase > 2.4:
                 tint(image, (l, t, r, b), RED, (3 - phase) * 0.15)
-        elif state == State.ERROR:
-            label = "SAVE FAILED / RETRYING"
         elif state == State.CAPTURING:
             label = "CAPTURED / SAVING..."
         elif state in (State.CONFIRMED, State.READY):
@@ -199,7 +204,11 @@ class UIRenderer:
         name = track.employee_name.upper() if known else "UNKNOWN" if state == State.UNKNOWN else "FACE DETECTED"
         liveness_label = (track.spoof_prompt if not track.spoof_ok else
                           "VERIFIED" if track.liveness_ok else track.liveness_prompt)
-        if (track.spoof_ok and state in (State.SUCCESS, State.COOLDOWN)) or state == State.CAPTURING:
+        # Expressions and PAD are collected together. Prompt the person now,
+        # rather than waiting for the full PAD dwell before asking for a blink.
+        if live_sample(track.spoof_score) and not track.liveness_ok:
+            liveness_label = track.liveness_prompt
+        if recorded or state == State.CAPTURING:
             liveness_label = "Attendance recorded" if state != State.CAPTURING else "Saving attendance"
         scale = layout.font(0.49)
         pad, line = layout.px(8), layout.px(22)
@@ -220,8 +229,8 @@ class UIRenderer:
         if state == State.VERIFYING:
             bar_y = y + panel_h - layout.px(3)
             cv2.line(image, (x, bar_y), (x + panel_w, bar_y), LINE, layout.px(3))
-            progress = (track.verification_progress if track.liveness_ok and track.spoof_ok
-                        else track.liveness_progress if track.spoof_ok else 0)
+            progress = (.45 * track.spoof_progress + .25 * track.liveness_progress
+                        + .30 * track.verification_progress) if live_sample(track.spoof_score) else 0.0
             cv2.line(image, (x, bar_y), (x + int(panel_w * progress), bar_y), AMBER, layout.px(3))
 
     def _hud(self, image, layout, tracks, now, wall_time, status, camera_fps, preview_fps, enrolled, attendance):
@@ -266,7 +275,7 @@ class UIRenderer:
         put("Q  EXIT", 0.975, GRAY, layout.font(0.38))
 
     def _capture(self, image, captures, now, layout):
-        if not captures:
+        if not captures or not self.capture_effects:
             return
         age = now - captures[-1][0]
         h, w = image.shape[:2]

@@ -19,19 +19,28 @@ Download URLs:
 
 Models are unmodified. The app's inference adapter uses existing OpenCV DNN
 with raw BGR float32 inputs (1,3,80,80), softmax logits and live class index 1.
-Crop expansion follows Minivision's original edge-shifting geometry. Both
-models must score at least 0.80; this is an application policy, not a calibrated
-probability or independently certified operating point. Three consecutive
-passing samples spanning at least 0.35 seconds are required; evidence expires
-in 0.75 seconds. Scores are never a substitute for the identity/expression gates.
+Crop expansion uses [Minivision's edge-shifting geometry](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing/blob/master/src/generate_patches.py),
+including integer xywh conversion. Near frame edges, the full expanded rectangle
+is shifted into the image. The previous centered/clipped implementation cut off
+context and changed the face scale/aspect ratio before resizing. Both models
+must score at least 0.90; this is an application
+policy, not a calibrated probability or independently certified operating
+point. At least six consecutive passing samples spanning the attendance dwell
+time (minimum 1.2 seconds, normally 3 seconds) are required. Evidence expires in
+0.75 seconds. A failed sample revokes expression and accumulated presence even
+when identity encoding was skipped. Faces too large to retain a 2x expansion
+are rejected with a move-back prompt. Scores never replace identity/expression gates.
 The model files are hash-checked before loading. No runtime download or upload.
 
 ## Validation and limits
 
-Local OpenCV 4.10.0 CPU smoke check, using the current YuNet face boxes:
-- Upstream image_T1.jpg: conservative live score 0.9998 (accepted).
-- Upstream image_F1.jpg: 0.0180 (rejected).
-- Upstream image_F2.jpg: 0.0005 (rejected).
+Local OpenCV 4.10.0 CPU regression, using YuNet at the dashboard's default 0.25
+detection scale with original-resolution inference and edge-shifting crops,
+checked 2026-09-25 (scores rounded):
+- Upstream image_T1.jpg: conservative live score 0.99996 (sample accepted).
+- Upstream image_F1.jpg (printed photo): 0.00456 (rejected).
+- Upstream image_F2.jpg (screen): 0.00034 (rejected).
+These fixtures are included under `tests/fixtures/anti_spoof` for offline tests.
 - Earlier dlib-detector check of the supplied original selfie MOV: seven sampled face frames scored above 0.9999.
   This file contains the source recording, not a camera recapture of a screen,
   and is NOT a successful replay-rejection test.

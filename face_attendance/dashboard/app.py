@@ -13,7 +13,9 @@ from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel,
                              QVBoxLayout, QWidget)
 
 from ..settings import SETTINGS_PATH, Settings, describe_source, hash_pin
+from ..config import ROOT
 from .engine import AttendanceEngine
+from .errors import DashboardErrorHandler
 from .icons import IconLabel, apply_button_icon, make_icon
 from .screens.employees import EmployeesScreen
 from .screens.live import LiveScreen
@@ -23,6 +25,7 @@ from .screens.settings import SettingsScreen
 from .telegram import TelegramService
 from .theme import palette, stylesheet
 from .widgets import Avatar, StatusPill
+from .widgets.capture_flash import CaptureFlash
 
 APP_VERSION = "v2.0.0"
 SIDEBAR_WIDTH = 244
@@ -176,6 +179,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 680)
         self._pending_notifications = 0
         self._build()
+        self.capture_flash = CaptureFlash(self.centralWidget())
         self._connect()
         self.apply_theme(settings.theme)
         self.engine.logMessage.connect(self._note)
@@ -216,7 +220,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage(
-            "Look at the camera, then blink once or smile.  "
+            "Follow the selected attendance requirement in Live Monitor.  "
             "Keep your whole face visible.")
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
@@ -352,9 +356,14 @@ class MainWindow(QMainWindow):
 
     def _connect(self):
         self.engine.runningChanged.connect(self._engine_state)
+        self.engine.captureTriggered.connect(lambda _: self.capture_flash.trigger())
+        self.engine.runningChanged.connect(lambda running: None if running else self.capture_flash.cancel())
+        self.engine.attendanceFailed.connect(lambda _: self.capture_flash.cancel())
         live = self.screens[0]
+        live.flashPreviewRequested.connect(lambda: self.capture_flash.trigger(preview=True))
         live.viewAllRequested.connect(lambda: self.nav.setCurrentRow(1))
         live.settingsRequested.connect(lambda: self.nav.setCurrentRow(4))
+        live.settingsApplied.connect(self._broadcast_settings)
         ctx = self.screens[4]
         ctx.settingsApplied.connect(
             lambda settings, restart: self._broadcast_settings(settings, restart))
@@ -490,7 +499,25 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(str(exc))
 
     # --- shutdown ---------------------------------------------------------
+    def on_unhandled_error(self, details):
+        """Leave the window available for diagnosis; pause new attendance."""
+        try:
+            self.capture_flash.cancel()
+            self.engine.set_paused(True)
+            self.screens[0]._update_pause_button()
+            self.statusBar().showMessage("Dashboard error — attendance paused. See error details.")
+            message = QMessageBox(QMessageBox.Icon.Warning, "Dashboard error",
+                                  "Attendance has been paused after an application error.\n"
+                                  "The window will remain open. Restart the dashboard before resuming.",
+                                  QMessageBox.StandardButton.Ok, self)
+            message.setDetailedText(details)
+            message.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            message.open()
+        except Exception:
+            logging.exception("Could not display dashboard error")
+
     def closeEvent(self, event):
+        self.capture_flash.cancel()
         self.clock_timer.stop()
         self.telegram.stop()
         self.engine.shutdown()
@@ -507,15 +534,21 @@ def run_dashboard(settings_path=None, autostart=False, argv=None):
     import sys
     application = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
     application.setApplicationName("Face ID Attendance Dashboard")
-    settings = Settings.load(settings_path)
-    if settings.dashboard_pin_hash:
-        dialog = LoginDialog(settings.dashboard_pin_hash)
-        application.setStyleSheet(stylesheet(settings.theme))
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return 1
-    window = MainWindow(settings, autostart=autostart)
-    window.show()
-    return application.exec()
+    errors = DashboardErrorHandler(ROOT / "logs" / "dashboard-errors.log", application)
+    errors.install()
+    try:
+        settings = Settings.load(settings_path)
+        if settings.dashboard_pin_hash:
+            dialog = LoginDialog(settings.dashboard_pin_hash)
+            application.setStyleSheet(stylesheet(settings.theme))
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return 1
+        window = MainWindow(settings, autostart=autostart)
+        errors.errorRaised.connect(window.on_unhandled_error)
+        window.show()
+        return application.exec()
+    finally:
+        errors.close()
 
 
 def main(argv=None):

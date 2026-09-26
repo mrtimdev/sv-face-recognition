@@ -25,9 +25,17 @@ def _app_root():
 
 ROOT = _app_root()
 
+ATTENDANCE_MODES = {
+    "face": "Only Face for attendance",
+    "blink": "Face with Blink",
+    "smile": "Face with Smile",
+    "blink_and_smile": "Face with Blink and Smile",
+}
+
 
 @dataclass(frozen=True)
 class Config:
+    attendance_mode: str = "blink"
     source: object = 0
     camera_width: int = 1280
     camera_height: int = 720
@@ -66,6 +74,8 @@ class Config:
     alert_path: Path = ROOT / "alert.wav"
 
     def __post_init__(self):
+        if self.attendance_mode not in ATTENDANCE_MODES:
+            raise ValueError("Invalid attendance requirement")
         for field in ("camera_width", "camera_height", "target_fps", "detection_interval",
                       "recognition_interval", "min_confirmation_frames", "capture_after_sec",
                       "cooldown_sec", "detection_fresh_sec", "identity_fresh_sec",

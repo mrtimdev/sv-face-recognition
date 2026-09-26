@@ -84,13 +84,29 @@ class TrackingTests(unittest.TestCase):
         self.assertTrue(all(t.ambiguous for t in self.tracker.tracks.values()))
         self.assertTrue(all(not t.identity_valid for t in self.tracker.tracks.values()))
 
-    def test_tracking_loss_decays_verification(self):
+    def test_brief_tracking_loss_freezes_verification_and_blocks_capture(self):
         self.confirm_two()
         for track in self.tracker.tracks.values():
             track.points = None
             track.verified_presence = 2.9
         self.tracker.advance(self.packet(15, 1.45, frame=np.zeros_like(self.frame)))
-        self.assertTrue(all(t.verified_presence < 2.9 for t in self.tracker.tracks.values()))
+        for track in self.tracker.tracks.values():
+            self.assertEqual(track.verified_presence, 2.9)
+            self.assertFalse(track.flow_ok)
+            self.assertIsNone(track.last_evidence_at)
+            self.assertIsNone(track.evidence_packet)
+
+    def test_persistent_tracking_loss_resets_presence_even_with_fresh_detections(self):
+        self.confirm_two()
+        track = self.tracker.tracks[1]
+        track.verified_presence = 2.9
+        for seq in range(20, 30):
+            track.points = None
+            self.detect(seq, 1.5 + (seq - 20) * .1, [Detection(
+                self.box_a, self.a, .3, True, spoof_score=.99)])
+            self.assertFalse(track.flow_ok)
+        self.assertEqual(track.verified_presence, 0)
+        self.assertIsNone(track.last_evidence_at)
 
     def test_unencoded_detection_cannot_inherit_unrelated_identity(self):
         self.confirm_two()
@@ -144,7 +160,7 @@ class TrackingTests(unittest.TestCase):
         self.confirm_two()
         self.verify_liveness()
         self.detect(20, 1.6, [Detection(self.box_a, encoded=False, hint_id=1,
-                                      landmarks=landmarks(CLOSED_EYE), face_roi=_real_face_roi())])
+                                      landmarks=landmarks(CLOSED_EYE), face_roi=_real_face_roi(), spoof_score=.99)])
         self.assertTrue(self.tracker.tracks[1].liveness_ok)
         self.assertEqual(self.tracker.tracks[1].last_liveness_at, 1.6)
         self.detect(22, 1.7, [Detection(self.box_a, encoded=False, hint_id=1)])
@@ -168,7 +184,7 @@ class TrackingTests(unittest.TestCase):
             track.points = None
             self.detect(sequence, now, [Detection(self.box_a, self.a, .3, True,
                                                  landmarks=response_for(self.tracker.liveness),
-                                                 face_roi=_real_face_roi())])
+                                                 face_roi=_real_face_roi(), spoof_score=.99)])
             if track.liveness_ok:
                 break
             now += .1

@@ -65,6 +65,7 @@ faces/
 # Dashboard local state (machine-specific settings and the engine lock)
 settings.json
 attendance.lock
+logs/
 
 # IDE / editor
 .vscode/
@@ -77,3 +78,8 @@ attendance.lock
 
 # Archives
 *.zip
+
+# Public upstream anti-spoof regression fixtures (not employee images)
+!tests/fixtures/anti_spoof/live.jpg
+!tests/fixtures/anti_spoof/print.jpg
+!tests/fixtures/anti_spoof/screen.jpg

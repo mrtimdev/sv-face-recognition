@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 
 from .geometry import association_cost, clamp_box, iou
-from .anti_spoof import LIVE_THRESHOLD, PresentationGuard
+from .anti_spoof import PresentationGuard, SAMPLE_MAX_AGE, live_sample
 from .liveness import LivenessChecker
 from .models import FaceTrack, State, TrackHint
 
@@ -19,8 +19,8 @@ class FaceTracker:
         self.scale = 1.0
         self.generation = None
         self.last_result_sequence = -1
-        self.liveness = LivenessChecker()
-        self.presentation = PresentationGuard()
+        self.liveness = LivenessChecker(config.attendance_mode)
+        self.presentation = PresentationGuard(min_span=config.capture_after_sec)
 
     def clear(self):
         self.tracks.clear()
@@ -75,6 +75,10 @@ class FaceTracker:
                 del self.tracks[track.track_id]
                 continue
             track.spoof_ok = self.presentation.passed(track.track_id, packet.captured_at)
+            track.spoof_progress = self.presentation.progress(track.track_id)
+            if packet.captured_at - track.last_seen > SAMPLE_MAX_AGE:
+                track.reset_verification()
+                self.liveness.reset(track.track_id)
             track.liveness_ok = self.liveness.is_live(track.track_id, packet.captured_at)
             track.liveness_progress = self.liveness.progress(track.track_id)
             track.liveness_prompt = self.liveness.prompt(track.track_id)
@@ -103,8 +107,17 @@ class FaceTracker:
                 # Keep expression progress while fresh identity/landmarks agree;
                 # attendance still requires recovered flow before capture.
                 track.liveness_ok = False
-                track.verified_presence = max(0.0, track.verified_presence - 0.3)
+                if track.flow_lost_at is None:
+                    track.flow_lost_at = packet.captured_at
+                # Freeze a brief interruption instead of subtracting 0.3s on
+                # every preview frame. Never count time across missing flow.
+                track.last_evidence_at = None
+                track.evidence_packet = None
+                if packet.captured_at - track.flow_lost_at > SAMPLE_MAX_AGE:
+                    track.reset_verification()
                 track.points = self._features(gray, track.bounding_box)
+            else:
+                track.flow_lost_at = None
             # Store positions by source sequence to compensate for worker latency.
             track.box_history.append((packet.sequence, track.bounding_box))
             if packet.captured_at - track.last_seen > self.config.detection_fresh_sec:
@@ -180,6 +193,7 @@ class FaceTracker:
                 self.liveness.pause(track.track_id)
                 self.presentation.reset(track.track_id)
                 track.spoof_ok = False
+                track.spoof_progress = 0.0
                 track.last_spoof_at = float("-inf")
         for index, detection in enumerate(result.detections):
             track = self.tracks.get(assignments.get(index))
@@ -207,13 +221,35 @@ class FaceTracker:
                 self.presentation.update(track.track_id, detection.spoof_score, packet.captured_at)
                 track.spoof_ok = self.presentation.passed(track.track_id, now)
                 track.spoof_score = detection.spoof_score
+                track.spoof_model_scores = detection.spoof_model_scores
+                track.spoof_progress = self.presentation.progress(track.track_id)
                 track.last_spoof_at = packet.captured_at if track.spoof_ok else float("-inf")
                 track.spoof_prompt = (detection.spoof_error or "Anti-spoof check unavailable"
                                       if detection.spoof_score is None else
-                                      "Photo/video suspected" if detection.spoof_score < LIVE_THRESHOLD else
-                                      "Checking real face...")
-                self.liveness.update(track.track_id, detection.landmarks, packet.captured_at)
-                self.liveness.update_texture(track.track_id, detection.face_roi, packet.captured_at)
+                                      "Face not verified - face camera in even light" if not live_sample(detection.spoof_score) else
+                                      f"Checking real face... {track.spoof_progress:.0%}")
+                if not live_sample(detection.spoof_score):
+                    # Recognition of the printed employee is not live presence.
+                    # Never bank a blink/smile collected during a rejected presentation.
+                    track.reset_verification()
+                    self.liveness.reset(track.track_id)
+                else:
+                    if (track.identity_valid and track.flow_ok
+                            and 0 <= packet.captured_at - track.last_recognized <= self.config.identity_fresh_sec):
+                        if track.last_evidence_at is not None:
+                            gap = packet.captured_at - track.last_evidence_at
+                            # Measure fresh identity-matched detections, even
+                            # between encodings. Flow loss and PAD rejection
+                            # break the interval instead of banking that time.
+                            if 0 < gap <= SAMPLE_MAX_AGE:
+                                track.verified_presence += gap
+                            else:
+                                track.reset_verification()
+                        track.last_evidence_at = packet.captured_at
+                    self.liveness.update(track.track_id, detection.landmarks, packet.captured_at)
+                    self.liveness.update_texture(track.track_id, detection.face_roi, packet.captured_at)
+                    # Keep the exact analyzed frame for the evidence image.
+                    track.evidence_packet = packet
                 track.liveness_ok = self.liveness.is_live(track.track_id, now)
                 track.last_liveness_at = packet.captured_at if track.liveness_ok else float("-inf")
                 track.liveness_prompt = self.liveness.prompt(track.track_id)
@@ -240,13 +276,6 @@ class FaceTracker:
             self._invalidate(track)
             track.candidate_id = employee.employee_id
         track.confirmation_count += 1
-        if track.last_evidence_at is not None:
-            gap = packet.captured_at - track.last_evidence_at
-            if 0 < gap <= cfg.identity_fresh_sec:
-                track.verified_presence += gap
-            else:
-                track.reset_verification()
-        track.last_evidence_at = packet.captured_at
         track.last_recognized = packet.captured_at
         if track.confirmation_count >= cfg.min_confirmation_frames:
             track.employee_id, track.employee_name = employee.employee_id, employee.name

@@ -75,6 +75,20 @@ class SettingsStoreTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_attendance_modes_roundtrip_and_reject_invalid(self):
+        from face_attendance.config import ATTENDANCE_MODES
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "custom.json"
+            for mode in ATTENDANCE_MODES:
+                Settings(attendance_mode=mode).save(path)
+                settings = Settings.load(path)
+                self.assertEqual(settings.to_config().attendance_mode, mode)
+                settings.theme = "light"
+                settings.save()  # Retains --settings location.
+                self.assertEqual(Settings.load(path).theme, "light")
+        with self.assertRaises(ValueError):
+            Settings(attendance_mode="invalid").to_config()
+
     def test_defaults_build_a_valid_config(self):
         config = Settings().to_config()
         self.assertIsInstance(config, Config)

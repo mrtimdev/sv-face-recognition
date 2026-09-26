@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 
 from .channels import LatestValue
+from .audio import SoundPlayer
 from .repository import AttendanceRepository
 from .storage import SnapshotService
 
@@ -23,8 +24,7 @@ class PersistenceWorker:
         self.startup = LatestValue()
         self.stop_event, self.wake = threading.Event(), threading.Event()
         self.thread = threading.Thread(target=self._run, name="persistence", daemon=True)
-        self.wave, self.playback = None, None
-        self.last_alert = float("-inf")
+        self.sound = None
 
     def start(self):
         self.thread.start()
@@ -54,22 +54,11 @@ class PersistenceWorker:
             pass
 
     def _init_audio(self):
-        if not self.config.alert_path.exists():
-            return
-        try:
-            import simpleaudio
-            self.wave = simpleaudio.WaveObject.from_wave_file(str(self.config.alert_path))
-        except Exception as exc:
-            logging.info("Optional audio unavailable: %s", exc)
+        self.sound = SoundPlayer(self.config.alert_path, self.config.alert_cooldown_sec)
 
     def _alert(self):
-        now = time.monotonic()
-        if self.wave is not None and now - self.last_alert >= self.config.alert_cooldown_sec:
-            try:
-                self.playback = self.wave.play()
-                self.last_alert = now
-            except Exception:
-                logging.exception("Optional audio playback failed")
+        if self.sound is not None:
+            self.sound.play()
 
     def _observe(self, event):
         try:
@@ -146,8 +135,8 @@ class PersistenceWorker:
         finally:
             if repository is not None:
                 repository.close()
-            if self.playback is not None:
-                self.playback.stop()
+            if self.sound is not None:
+                self.sound.stop()
 
     def close(self):
         self.stop_event.set()

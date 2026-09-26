@@ -44,15 +44,19 @@ The HUD is appended beside the full camera image, so employees at the right
 edge are still visible. Its width and typography scale with resolution.
 Camera sizes/FPS are requests to the driver, not guaranteed capabilities.
 
-Optional audio uses the existing `alert.wav`:
+Audio uses the existing `alert.wav`. macOS uses its native `afplay` and Windows
+uses built-in `winsound`; neither needs `simpleaudio`. On Linux, install the
+optional backend below or use a system `paplay`/`aplay` player:
 
 ```bash
 pip install -r requirements-audio.txt
 python generate_alert_sound.py
 ```
 
-The application works without audio. Sound is cached and played asynchronously
-from the persistence worker, with an alert cooldown.
+The application works without audio. Sound plays asynchronously with a cooldown
+and no overlapping playback from the same player. Use **Test alert sound** in
+Live Monitor to check playback. Unknown-face alerts use the same backend, and
+the dashboard's attendance sound plays after a successful save.
 
 
 ## Dashboard (PyQt6 admin UI)
@@ -64,6 +68,18 @@ python dashboard.py            # window opens with the engine stopped
 python dashboard.py --start    # open the camera and record attendance immediately
 python -m face_attendance.dashboard
 ```
+
+Uncaught dashboard callback errors are written to `logs/dashboard-errors.log`
+(rotated locally, with no upload). The window stays open, recording pauses,
+and an error dialog offers the details instead of PyQt aborting Python. Fully
+restart the dashboard after an application error. If it repeats, use the Python
+traceback in that log to diagnose the failing callback; macOS's native crash
+report alone does not include that traceback.
+
+Attendance capture triggers a 720ms cyan-white screen flash with expanding
+shutter corners and a fading capture badge. Simultaneous captures share one
+pulse; the overlay leaves controls clickable and does not alter saved photos.
+Try it without recording using **Live Monitor → More → Preview capture flash**.
 
 Screens:
 
@@ -93,24 +109,52 @@ Behavior notes:
   terminal instance refuses to run against the same data.
 - Reports read through a separate read-only SQLite connection; they can never
   record or modify attendance.
-- For attendance, look at the camera briefly, then **blink once or smile**.
-  Either expression is sufficient; there are no head turns or action sequences.
+- Live Monitor has four mutually exclusive attendance checkboxes: **Only Face
+  for attendance**, **Face with Blink**, **Face with Smile**, and **Face with
+  Blink and Smile**. Choose one and click **Apply requirements** to save it;
+  a running engine restarts and clears previous verification evidence. The
+  default is **Face with Blink**, including settings files without a mode.
+  Only Face skips expression/landmark processing; face recognition, verified
+  presence, cooldown and the separate anti-spoof checks still apply. Both-action
+  mode accepts either order and prompts for the remaining action.
+  A pending selection is labelled until applied, so it is clear which mode
+  the running engine is using.
+- For expression modes, look at the camera with a relaxed face briefly, then
+  follow the blink/smile prompt. No head turns are required.
   Eye thresholds adapt separately to each eye's normal opening. A smile must
   widen and lift the mouth corners relative to the initial expression for a
   short hold; simply opening the mouth or showing a static smiling photo is
   insufficient. If already smiling on arrival, relax briefly and smile again,
   or use the blink option.
 - Full-resolution landmarks are sampled on every detection. Brief optical-flow
-  failures preserve verification progress; short missing-landmark gaps retain
+  failures up to 0.75 seconds freeze attendance time without counting the
+  interruption; longer failures clear it. Capture requires recovered flow
+  and fresh verification evidence. Short missing-landmark gaps retain
   calibration but break an incomplete blink/smile. Identity changes, overlap,
   disconnects and sampling gaps over 0.75 seconds reset verification. Completed
   passes expire after 10 seconds and missing face evidence revokes them.
+  Blink calibration uses a median to resist single eyelid outliers. Expression
+  prompts appear while the anti-spoof dwell runs, and recorded/cooldown feedback
+  stays visible after a successful save. Low-confidence model results ask for
+  a front-facing view in even light; they still block attendance.
+  Anti-spoof crops keep the full available surrounding area at frame edges.
+  If a recognized face stays blocked, the Live Monitor warning identifies the
+  liveness gate; its tooltip and System Logs show both model scores. Camera
+  effects such as Portrait/background blur or beauty filters should be turned
+  off when diagnosing a rejection. A Snapshot preserves a clean frame for the
+  offline `scripts/check_anti_spoof.py` diagnostic.
 - A **separate mandatory anti-spoof check** now runs before recording. Two
   bundled MiniFASNet models inspect the face and its surrounding image, even
-  when identity encoding is reused. Both must meet the live-score threshold for
-  three consecutive samples spanning at least 0.35 seconds. A blink/smile
-  cannot override a rejection. Missing/corrupt models, inference failures,
-  small/clipped faces and stale results block attendance and known-person logs.
+  when identity encoding is reused. **Both must score at least 0.90 on every
+  sample**, with at least six consecutive samples spanning the full attendance
+  dwell time (minimum 1.2 seconds; normally 3 seconds). This stricter threshold
+  is an application policy, not a measured accuracy figure. Every rejection
+  clears accumulated presence and blink/smile evidence, including frames that
+  reuse an identity encoding. A blink/smile cannot override a rejection.
+  Missing/corrupt models, inference failures, small/clipped faces, close-ups
+  without enough surrounding context and stale results block attendance.
+  The saved snapshot is the actual frame checked by the models, rather than a
+  newer, unexamined preview frame.
   Model failures never fall back to expression-only recording. Models run
   locally through existing OpenCV; no images are uploaded or downloaded at runtime.
 - The UI shows **Photo/video suspected** or a model/quality error when blocked.
@@ -395,11 +439,25 @@ a font-rendering extension.
 ### Checking a recorded presentation without writing attendance
 
 ```bash
-venv/bin/python scripts/check_anti_spoof.py /path/to/camera-recording.mov
+venv/bin/python scripts/check_anti_spoof.py /path/to/printed-photo-test.mov --expected attack --report /tmp/print-report.json
+venv/bin/python scripts/check_anti_spoof.py /path/to/genuine-person.mov --expected live --report /tmp/live-report.json
 ```
 
-This local diagnostic samples frames, detects faces and prints PAD scores as
-JSON. It never opens the attendance database, enrolls faces, saves images or
-sends notifications. Use a recording of the **attendance camera seeing the
+This local diagnostic retains original camera pixels and matches the default
+dashboard detection scale. It prints each model's live/attack scores, rejected
+samples and sustained passing windows as JSON. Match customized settings with
+`--detection-scale` and `--presence-sec`. Images are evaluated once. For an
+attack recording, any passing sample fails the expected check (exit code 2);
+missing detections or model errors must be reviewed as inconclusive evidence.
+For a live video, at least one sustained passing window is required.
+It never opens the attendance database, enrolls faces, saves images or sends
+notifications. Record the **attendance camera seeing the printed photo or
 phone playing a video**, plus a separate genuine-person recording. A source
-selfie clip lacks the display artifacts this model needs to evaluate a replay.
+selfie clip lacks the print/display artifacts needed to evaluate a replay.
+
+The real-model regression tests include the upstream live, printed-photo and
+screen examples, with provenance in `tests/fixtures/anti_spoof/NOTICE.md`.
+Passing these three examples does not validate arbitrary prints, video replays,
+paper masks or 3D masks. The implementation follows [UniFace's MiniFASNet
+documentation](https://yakhyo.github.io/uniface/modules/spoofing/) and centered,
+clipped crops; it retains the existing local OpenCV runtime and bundled weights.

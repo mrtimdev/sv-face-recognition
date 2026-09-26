@@ -65,6 +65,104 @@ class ExpressionBackend(Backend):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_brief_flow_interruptions_resume_and_capture_once(self):
+        frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
+        catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.zeros((1, 128)))
+        config = Config()
+        tracker, backend, worker = FaceTracker(config), ExpressionBackend(), FakePersistence()
+        backend.faces, backend.checker = 1, tracker.liveness
+        recognition = RecognitionService(config, catalog, backend, anti_spoof=FakeAntiSpoof())
+        service = AttendanceService(config, worker)
+        worker.startup.put(({}, ""))
+        saved_at = []
+        for seq in range(210):
+            now = 10 + seq / 30
+            interrupted = seq > 15 and seq % 15 == 7
+            if interrupted:
+                tracker.tracks[1].points = None
+                before = tracker.tracks[1].verified_presence
+            packet = FramePacket(seq, now, 1000 + now, 1, frame)
+            tracker.advance(packet)
+            if seq % config.detection_interval == 0:
+                tracker.apply(recognition.process(RecognitionRequest(packet, tracker.hints())), now)
+            service.poll(tracker.tracks, now, packet.wall_time)
+            if interrupted and not saved_at:
+                self.assertEqual(tracker.tracks[1].verified_presence, before)
+            jobs = service.update(tracker.tracks, packet, now, True)
+            if interrupted:
+                self.assertEqual(jobs, [])
+            for job in jobs:
+                saved_at.append(now)
+                worker.results.put(SaveResult(job, "saved", job.captured_at))
+        self.assertEqual(len(saved_at), 1)
+        self.assertGreaterEqual(worker.jobs[0].duration, config.capture_after_sec)
+        self.assertLess(saved_at[0], 16, "Brief tracking interruptions stalled check-in")
+
+    def test_intermittent_false_live_bursts_cannot_bank_attendance(self):
+        frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
+        catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.zeros((1, 128)))
+        for mode in ("face", "blink"):
+            with self.subTest(mode=mode):
+                config = replace(Config(), attendance_mode=mode, stable_recheck_sec=1.0)
+                tracker, backend, worker, pad = FaceTracker(config), ExpressionBackend(), FakePersistence(), FakeAntiSpoof()
+                backend.faces, backend.checker = 1, tracker.liveness
+                recognition = RecognitionService(config, catalog, backend, anti_spoof=pad)
+                service = AttendanceService(config, worker)
+                worker.startup.put(({}, ""))
+                for seq in range(150):
+                    now = 10 + seq * .1
+                    # Up to 0.9 seconds of false-live scores after every rejection.
+                    # After eight seconds, simulate a genuinely sustained live face.
+                    pad.score = .01 if seq <= 80 and seq % 10 == 0 else .99
+                    packet = FramePacket(seq * 3, now, 1000 + now, 1, frame)
+                    tracker.advance(packet)
+                    tracker.apply(recognition.process(RecognitionRequest(packet, tracker.hints())), now)
+                    service.poll(tracker.tracks, now, packet.wall_time)
+                    service.update(tracker.tracks, packet, now, True)
+                    if seq < 80:
+                        self.assertEqual(worker.jobs, [])
+                self.assertEqual(len(worker.jobs), 1)
+                self.assertGreaterEqual(worker.jobs[0].captured_at, 1021.1)
+
+    def test_selected_requirements_gate_actual_capture_jobs(self):
+        frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
+        catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.zeros((1, 128)))
+        cases = (("face", "none", .99, True), ("face", "none", .01, False),
+                 ("blink", "smile", .99, False), ("smile", "blink", .99, False),
+                 ("blink_and_smile", "blink", .99, False),
+                 ("blink_and_smile", "smile", .99, False),
+                 ("blink", "blink", .99, True), ("smile", "smile", .99, True),
+                 ("blink_and_smile", "both", .99, True))
+        for mode, action, score, expected in cases:
+            with self.subTest(mode=mode, action=action, score=score):
+                config = replace(Config(), attendance_mode=mode, capture_after_sec=.5)
+                tracker, backend, worker = FaceTracker(config), Backend(), FakePersistence()
+                backend.faces = 1
+                landmark_calls = []
+
+                def expressions(image, boxes, model):
+                    landmark_calls.append(True)
+                    state = tracker.liveness._state.get(1, {})
+                    ready = state.get("phase") == "ready"
+                    if action in ("blink", "both") and not state.get("blink_done"):
+                        return [response_for(tracker.liveness)]
+                    return [landmarks(smile=ready and action in ("smile", "both"))]
+
+                backend.face_landmarks = expressions
+                recognition = RecognitionService(config, catalog, backend, anti_spoof=FakeAntiSpoof(score))
+                service = AttendanceService(config, worker)
+                worker.startup.put(({}, ""))
+                for seq in range(45):
+                    now = 10 + seq * .1
+                    packet = FramePacket(seq * 3, now, 1000 + now, 1, frame)
+                    tracker.advance(packet)
+                    tracker.apply(recognition.process(RecognitionRequest(packet, tracker.hints())), now)
+                    service.poll(tracker.tracks, now, packet.wall_time)
+                    service.update(tracker.tracks, packet, now, True)
+                self.assertEqual(len(worker.jobs), int(expected))
+                if mode == "face":
+                    self.assertEqual(landmark_calls, [])
+
     def test_main_loop_without_landmarks_blocks_records_and_releases_workers(self):
         frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
         employees = (Employee("A", "Alice"), Employee("B", "Bob"))

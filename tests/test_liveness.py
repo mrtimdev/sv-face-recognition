@@ -271,3 +271,87 @@ class LivenessCheckerTests(unittest.TestCase):
         self.calibrate()
         self.sample(.6, landmarks(CLOSED_EYE))
         self.assertTrue(self.sample(.8))
+
+
+class AttendanceModeTests(unittest.TestCase):
+    """Mode authorization and noisy-input regressions."""
+    setUp = LivenessCheckerTests.setUp
+    sample = LivenessCheckerTests.sample
+    calibrate = LivenessCheckerTests.calibrate
+
+    def test_only_requested_expression_authorizes(self):
+        for mode in ("blink", "smile", "blink_and_smile"):
+            for action in ("blink", "smile"):
+                with self.subTest(mode=mode, action=action):
+                    self.checker = LivenessChecker(mode)
+                    self.calibrate()
+                    for i in range(5, 13):
+                        self.sample(i * .1, landmarks(
+                            CLOSED_EYE if action == "blink" and i == 6 else OPEN_EYE,
+                            smile=action == "smile"))
+                    self.assertEqual(self.checker.is_live(1, 12 * .1), mode == action)
+
+    def test_both_actions_can_complete_in_either_order(self):
+        for first in ("blink", "smile"):
+            self.checker = LivenessChecker("blink_and_smile")
+            self.calibrate()
+            for i in range(5, 11):
+                self.sample(i * .1, landmarks(
+                    CLOSED_EYE if first == "blink" and i == 6 else OPEN_EYE,
+                    smile=first == "smile"))
+            self.assertFalse(self.checker.is_live(1, 1.0))
+            self.assertAlmostEqual(self.checker.progress(1), .65)
+            self.assertIn("now smile" if first == "blink" else "now blink", self.checker.prompt(1))
+            for i in range(11, 18):
+                self.sample(i * .1, landmarks(
+                    CLOSED_EYE if first == "smile" and i == 13 else OPEN_EYE,
+                    smile=first == "blink"))
+            self.assertTrue(self.checker.is_live(1, 17 * .1))
+            self.assertEqual(self.checker._state[1]["method"], "blink_and_smile")
+
+    def test_only_face_needs_fresh_image_but_no_landmarks(self):
+        self.checker = LivenessChecker("face")
+        self.checker.update(1, None, 0)
+        self.assertFalse(self.checker.is_live(1, 0))
+        self.checker.update_texture(1, self.roi, 0)
+        self.assertTrue(self.checker.is_live(1, 0))
+        self.assertFalse(self.checker.is_live(1, MAX_SAMPLE_GAP + .01))
+        self.sample(2, {})
+        self.checker.update_texture(1, None, 2)
+        self.assertFalse(self.checker.is_live(1, 2))
+
+    def test_partial_both_evidence_expires_across_gap(self):
+        self.checker = LivenessChecker("blink_and_smile")
+        self.calibrate()
+        self.sample(.6, landmarks(CLOSED_EYE))
+        self.sample(.7)
+        self.assertTrue(self.checker._state[1]["blink_done"])
+        self.sample(2)
+        self.assertFalse(self.checker._state[1]["blink_done"])
+
+    def test_one_eye_outlier_does_not_poison_calibration(self):
+        self.checker = LivenessChecker("blink")
+        self.calibrate()
+        self.sample(.5, landmarks([(x, y * 1.8) for x, y in OPEN_EYE]))
+        self.sample(.6)
+        self.sample(.7, landmarks(CLOSED_EYE))
+        self.assertTrue(self.sample(.8))
+
+    def test_outlier_during_initial_calibration_does_not_block_normal_blink(self):
+        self.checker = LivenessChecker("blink")
+        for i in range(5):
+            eye = [(x, y * 1.8) for x, y in OPEN_EYE] if i == 2 else OPEN_EYE
+            self.sample(i * .1, landmarks(eye))
+        self.sample(.5)
+        self.sample(.6, landmarks(CLOSED_EYE))
+        self.assertTrue(self.sample(.7))
+
+    def test_smile_mode_recovers_when_lips_arrive_after_eyes(self):
+        self.checker = LivenessChecker("smile")
+        pose = landmarks()
+        pose.pop("top_lip")
+        for i in range(6):
+            self.assertFalse(self.sample(i * .1, pose))
+        for i in range(6, 20):
+            self.sample(i * .1, landmarks(smile=i >= 12))
+        self.assertTrue(self.checker.is_live(1, 19 * .1))

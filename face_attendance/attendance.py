@@ -118,8 +118,10 @@ class AttendanceService:
             if track.state in (State.COOLDOWN, State.SUCCESS):
                 track.reset_verification()
                 track.transition(State.READY, now)
-            # Interpolate feedback, but only measured, encoded presence authorizes saving.
-            extra = min(max(0.0, now - (track.last_evidence_at or now)), cfg.stable_recheck_sec)
+            # Interpolate feedback; only measured, identity-matched presence
+            # and a recent encoding authorize saving.
+            extra = (min(max(0.0, now - track.last_evidence_at), cfg.stable_recheck_sec)
+                     if track.last_evidence_at is not None and track.flow_ok else 0.0)
             measured = track.verified_presence / cfg.capture_after_sec
             track.verification_progress = min(1.0 if measured >= 1 else 0.99,
                                                (track.verified_presence + extra) / cfg.capture_after_sec)
@@ -132,11 +134,17 @@ class AttendanceService:
                         and track.liveness_ok
                         and 0 <= now - track.last_liveness_at <= MAX_SAMPLE_GAP
                         and self.ready)
+            evidence = track.evidence_packet
+            eligible = (eligible and evidence is not None and packet is not None
+                        and evidence.generation == packet.generation
+                        and evidence.sequence <= packet.sequence
+                        and 0 <= now - evidence.captured_at <= SAMPLE_MAX_AGE
+                        and evidence.captured_at == track.last_spoof_at)
             if not eligible:
                 continue
             track.transition(State.CONFIRMED, now)
             job = CaptureJob(str(uuid.uuid4()), track.track_id, track.employee_id, track.employee_name,
-                             packet.wall_time, track.verified_presence, packet.frame.copy())
+                             evidence.wall_time, track.verified_presence, evidence.frame.copy())
             if self.persistence.submit(job):
                 self.pending[job.employee_id] = job.event_id
                 track.pending_event_id = job.event_id

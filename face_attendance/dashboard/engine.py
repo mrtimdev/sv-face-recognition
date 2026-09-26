@@ -15,6 +15,7 @@ import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..attendance import AttendanceService
+from ..anti_spoof import LIVE_THRESHOLD, live_sample
 from ..camera import CameraManager
 from ..catalog import FaceCatalog
 from ..enrollment import employee_rows as load_employee_rows
@@ -47,6 +48,8 @@ def track_snapshot(track, now, tracker=None):
             "identity_valid": bool(track.identity_valid),
             "spoof_ok": bool(track.spoof_ok),
             "spoof_score": track.spoof_score,
+            "spoof_model_scores": track.spoof_model_scores,
+            "spoof_progress": track.spoof_progress,
             "spoof_prompt": track.spoof_prompt,
             "liveness_ok": bool(track.liveness_ok),
             "liveness_progress": track.liveness_progress,
@@ -102,7 +105,8 @@ class AttendanceEngine(QObject):
         self.persistence = PersistenceWorker(self.config, self.catalog.employee_map)
         self.tracker = FaceTracker(self.config)
         self.attendance = AttendanceService(self.config, self.persistence)
-        self.renderer = UIRenderer(self.config)
+        # Qt paints the dashboard-wide flash without altering camera pixels.
+        self.renderer = UIRenderer(self.config, capture_effects=False)
 
     @property
     def running(self):
@@ -228,7 +232,7 @@ class AttendanceEngine(QObject):
         frame = np.full((cfg.camera_height, cfg.camera_width, 3), (32, 29, 25), np.uint8)
         sequence, submitted, generation = -1, -cfg.detection_interval, None
         preview_fps, count, fps_since = 0.0, 0, time.monotonic()
-        recognition_error, published = "", 0.0
+        recognition_error, published, last_liveness_log = "", 0.0, float("-inf")
         while not self._stop.is_set():
             started = now = time.monotonic()
             wall_time = time.time()
@@ -282,6 +286,10 @@ class AttendanceEngine(QObject):
                                        for track in self.tracker.tracks.values()])
                 self._stats = self._statistics(status, preview_fps, recognition_error)
                 self.statsReady.emit(self._stats)
+                if self._stats["liveness_blocked"] and now - last_liveness_log >= 5.0:
+                    last_liveness_log = now
+                    self.logMessage.emit("Attendance blocked by liveness: " +
+                                         self._stats["liveness_details"].replace("\n", "; "))
                 self._expire_unknown_alerts(now)
                 for track in self.tracker.tracks.values():
                     if (track.visible and not track.employee_id
@@ -311,6 +319,14 @@ class AttendanceEngine(QObject):
         tracks = self.tracker.tracks
         visible = [track for track in tracks.values() if track.visible]
         known = [track for track in visible if track.employee_id and track.identity_valid]
+        blocked = [track for track in known if not live_sample(track.spoof_score)
+                   and track.state.value not in ("SUCCESS", "COOLDOWN", "CAPTURING")]
+        details = []
+        for track in blocked:
+            scores = ", ".join(f"{name}: {score:.3f}" for name, score in
+                               zip(("V2", "V1SE"), track.spoof_model_scores))
+            details.append(f"Track {track.track_id}: {track.spoof_prompt}" +
+                           (f" ({scores}; required >= {LIVE_THRESHOLD:.2f})" if scores else ""))
         return {"status": status,
                 "paused": self._paused,
                 "source": describe_source(self.settings.source),
@@ -325,6 +341,8 @@ class AttendanceEngine(QObject):
                 "presence": round(max((track.verified_presence for track in visible), default=0.0), 1),
                 "capture_after": cfg.capture_after_sec,
                 "latency_ms": round(self._last_elapsed * 1000, 1),
+                "liveness_blocked": bool(blocked),
+                "liveness_details": "\n".join(details),
                 "storage_ready": self.attendance.ready,
                 "storage_error": self.attendance.storage_error,
                 "recognition_error": recognition_error,

@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -10,6 +11,28 @@ from tests.test_attendance import verified
 
 
 class RendererTests(unittest.TestCase):
+    def test_expression_prompt_is_visible_during_pad_warmup(self):
+        track = verified()
+        track.spoof_ok, track.spoof_score = False, .99
+        track.liveness_ok, track.liveness_prompt = False, "Blink once"
+        with patch("face_attendance.ui.text") as draw:
+            UIRenderer(Config())._face(np.zeros((480, 640, 3), np.uint8), track, 10, Layout(640, 480))
+        labels = [call.args[1] for call in draw.call_args_list]
+        self.assertIn("Blink once", labels)
+        self.assertNotIn("REAL FACE REQUIRED", labels)
+
+    def test_recorded_feedback_survives_later_pad_rejection(self):
+        track = verified()
+        track.spoof_ok, track.spoof_score = False, .02
+        track.cooldown_remaining = 20
+        for state in (State.SUCCESS, State.COOLDOWN):
+            track.state = state
+            with patch("face_attendance.ui.text") as draw:
+                UIRenderer(Config())._face(np.zeros((480, 640, 3), np.uint8), track, 10, Layout(640, 480))
+            labels = [call.args[1] for call in draw.call_args_list]
+            self.assertIn("Attendance recorded", labels)
+            self.assertNotIn("CHECKING LIVE FACE", labels)
+
     def test_all_resolutions_states_and_animations_preserve_clean_input(self):
         for width, height in ((640, 480), (1280, 720), (1920, 1080)):
             with self.subTest(resolution=(width, height)):

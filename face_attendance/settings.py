@@ -51,6 +51,7 @@ class Settings:
     """Everything the dashboard can change; one flat, JSON-friendly record."""
 
     recognition_backend: str = "opencv-sface-2021dec-v1"
+    attendance_mode: str = "blink"
     source: str = "0"
     camera_width: int = 1280
     camera_height: int = 720
@@ -132,12 +133,15 @@ class Settings:
     def load(cls, path=None):
         path = Path(path or SETTINGS_PATH)
         if not path.exists():
-            return cls()
+            settings = cls()
+            settings._path = path
+            return settings
         with path.open(encoding="utf-8") as handle:
             data = json.load(handle)
         if not isinstance(data, dict):
             raise ValueError("settings.json must contain a JSON object")
         settings = cls()
+        settings._path = path
         # Old distances and vectors belong to dlib, even though both embeddings
         # have 128 values. Redirect old settings without modifying the old file.
         if data.get("recognition_backend") != settings.recognition_backend:
@@ -153,7 +157,7 @@ class Settings:
 
     def save(self, path=None):
         """Atomic write, so a crash cannot leave a half-saved configuration."""
-        path = Path(path or SETTINGS_PATH)
+        path = Path(path or getattr(self, "_path", SETTINGS_PATH))
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False,
                                              encoding="utf-8")

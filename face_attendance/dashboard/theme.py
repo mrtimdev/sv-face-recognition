@@ -181,13 +181,19 @@ STAT_TONES = ("blue", "green", "orange", "purple", "red")
 
 
 def stylesheet(theme="light"):
+    from PyQt6.QtGui import QFontDatabase
     c = palette(theme)
+    font_family = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
+    available = set(QFontDatabase.families())
+    if font_family not in available:
+        font_family = next((name for name in ("Helvetica Neue", "Segoe UI", "DejaVu Sans", "Arial")
+                            if name in available), sorted(available)[0] if available else font_family)
     return f"""
 /* === Base =============================================================== */
 QWidget {{
     background-color: {c['bg']};
     color: {c['text']};
-    font-family: "Inter", "SF Pro Display", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-family: "{font_family}";
     font-size: 13px;
 }}
 QDialog, QMainWindow, QScrollArea, QStackedWidget, QSplitter {{
@@ -806,4 +812,3 @@ def stat_tile_colors(theme, key):
     """Foreground/background pair for a stat card icon tile."""
     c = palette(theme)
     return c.get(f"stat_icon_{key}", c["primary"]), c.get(f"stat_icon_{key}_bg", c["primary_soft"])
-

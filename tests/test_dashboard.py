@@ -65,6 +65,81 @@ class BridgeTests(unittest.TestCase):
 
 
 class WindowTests(unittest.TestCase):
+    def test_capture_flash_preview_finishes_and_does_not_record_attendance(self):
+        from PyQt6.QtCore import QAbstractAnimation, QEventLoop, QTimer, Qt
+        from face_attendance.dashboard.app import MainWindow
+        from face_attendance.models import CaptureJob
+        application = _app()
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(temp_settings(directory), use_lock=False)
+            window.show()
+            application.processEvents()
+            try:
+                flash = window.capture_flash
+                menu = window.screens[0].more_button.menu()
+                next(action for action in menu.actions()
+                     if action.text() == "Preview capture flash").trigger()
+                self.assertTrue(flash.isVisible())
+                self.assertTrue(flash.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+                # Multiple captures in one camera frame must not restart the pulse.
+                flash.animation.setCurrentTime(200)
+                flash.trigger()
+                self.assertGreaterEqual(flash.animation.currentTime(), 200)
+                window.resize(1500, 950)
+                application.processEvents()
+                self.assertEqual(flash.geometry(), window.centralWidget().rect())
+                loop = QEventLoop()
+                QTimer.singleShot(flash.DURATION_MS + 100, loop.quit)
+                loop.exec()
+                self.assertFalse(flash.isVisible())
+                self.assertEqual(flash.animation.state(), QAbstractAnimation.State.Stopped)
+                self.assertEqual(window.engine.persistence.jobs.qsize(), 0)
+                self.assertFalse(window.engine.running)
+                # The real capture signal uses the same effect; stopping cancels it.
+                frame = np.full((240, 320, 3), 57, np.uint8)
+                window.engine.captureTriggered.emit(CaptureJob("preview-test", 1, "E1", "Test", 1000, 3, frame))
+                self.assertTrue(flash.isVisible())
+                self.assertTrue(np.all(frame == 57))
+                window.engine.runningChanged.emit(False)
+                self.assertFalse(flash.isVisible())
+            finally:
+                window.close()
+                application.processEvents()
+
+    def test_attendance_checkboxes_are_exclusive_and_apply_saved_mode(self):
+        from unittest.mock import patch, PropertyMock
+        from face_attendance.dashboard.app import MainWindow
+        from face_attendance.settings import Settings
+        application = _app()
+        with tempfile.TemporaryDirectory() as directory:
+            settings = temp_settings(directory)
+            settings._path = Path(directory) / "custom.json"
+            window = MainWindow(settings, use_lock=False)
+            try:
+                live = window.screens[0]
+                for mode, checkbox in live.requirement_boxes.items():
+                    checkbox.click()
+                    self.assertEqual(sum(box.isChecked() for box in live.requirement_boxes.values()), 1)
+                    if mode != window.settings.attendance_mode:
+                        self.assertIn("Click Apply requirements to activate", live.requirement_note.text())
+                    live.apply_requirements_button.click()
+                    self.assertNotIn("Selected:", live.requirement_note.text())
+                    self.assertEqual(Settings.load(settings._path).attendance_mode, mode)
+                    self.assertEqual(window.engine.settings.attendance_mode, mode)
+                    self.assertEqual(window.settings.attendance_mode, mode)
+                with patch.object(Settings, "save", side_effect=OSError("read-only")):
+                    live.requirement_boxes["face"].click()
+                    live.apply_requirements_button.click()
+                    self.assertEqual(window.engine.settings.attendance_mode, "blink_and_smile")
+                with patch.object(type(window.engine), "running", new_callable=PropertyMock, return_value=True), \
+                        patch.object(window.engine, "restart") as restart:
+                    live.apply_requirements_button.click()
+                    restart.assert_called_once()
+                    self.assertEqual(restart.call_args.args[0].attendance_mode, "face")
+            finally:
+                window.close()
+                application.processEvents()
+
     def test_all_five_screens_build_and_switch(self):
         from PyQt6.QtCore import QTimer
         from face_attendance.dashboard.app import MainWindow
@@ -110,6 +185,26 @@ class WindowTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
+    def test_liveness_blocker_identifies_models_and_clears_after_recovery(self):
+        from face_attendance.dashboard.engine import AttendanceEngine
+        from tests.test_attendance import verified
+        from face_attendance.models import State
+        _app()
+        with tempfile.TemporaryDirectory() as directory:
+            engine = AttendanceEngine(temp_settings(directory), backend=FakeBackend(), use_lock=False)
+            track = verified()
+            track.spoof_ok, track.spoof_score = False, .2
+            track.spoof_model_scores = (.2, .97)
+            engine.tracker.tracks[1] = track
+            stats = engine._statistics("CONNECTED", 30, "")
+            self.assertTrue(stats["liveness_blocked"])
+            self.assertIn("V2: 0.200, V1SE: 0.970", stats["liveness_details"])
+            self.assertIn("required >= 0.90", stats["liveness_details"])
+            track.spoof_ok, track.spoof_score = True, .99
+            self.assertFalse(engine._statistics("CONNECTED", 30, "")["liveness_blocked"])
+            track.spoof_ok, track.spoof_score, track.state = False, .2, State.COOLDOWN
+            self.assertFalse(engine._statistics("CONNECTED", 30, "")["liveness_blocked"])
+
     class Capture:
         def isOpened(self):
             return True

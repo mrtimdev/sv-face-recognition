@@ -63,6 +63,7 @@ class Detection:
     face_roi: Any = field(default=None, repr=False, compare=False)
     spoof_score: Optional[float] = None
     spoof_error: str = ""
+    spoof_model_scores: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -98,13 +99,17 @@ class FaceTrack:
     flow_ok: bool = False
     spoof_ok: bool = False
     spoof_score: Optional[float] = None
+    spoof_model_scores: tuple = ()
     spoof_prompt: str = "Checking real face..."
     last_spoof_at: float = float("-inf")
+    spoof_progress: float = 0.0
+    evidence_packet: Any = field(default=None, repr=False, compare=False)
     liveness_ok: bool = False
     liveness_prompt: str = "Look straight at the camera"
     liveness_progress: float = 0.0
     last_liveness_at: float = float("-inf")
     last_flow_at: float = float("-inf")
+    flow_lost_at: Optional[float] = None
     state_since: float = 0.0
     retry_at: float = 0.0
     error: str = ""
@@ -120,11 +125,14 @@ class FaceTrack:
     def reset_verification(self):
         self.verified_presence = self.verification_progress = 0.0
         self.last_evidence_at = None
+        self.evidence_packet = None
 
     def invalidate_identity(self):
         # Keep the displayed name during brief uncertainty, but revoke capture eligibility.
         self.spoof_ok = False
         self.spoof_score = None
+        self.spoof_model_scores = ()
+        self.spoof_progress = 0.0
         self.last_spoof_at = float("-inf")
         self.liveness_ok = False
         self.last_liveness_at = float("-inf")

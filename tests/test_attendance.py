@@ -31,7 +31,8 @@ def verified(track_id=1, employee_id="E001", now=10.0):
                      employee_id=employee_id, employee_name="Employee " + employee_id,
                      last_recognized=now, identity_valid=True, confirmation_count=4,
                      verified_presence=3.1, last_evidence_at=now,
-                     flow_ok=True, spoof_ok=True, last_spoof_at=now, liveness_ok=True, last_liveness_at=now, last_flow_at=now, state=State.VERIFYING)
+                     flow_ok=True, spoof_ok=True, last_spoof_at=now, liveness_ok=True, last_liveness_at=now, last_flow_at=now, state=State.VERIFYING,
+                     evidence_packet=FramePacket(100, now, 1000, 1, np.full((240, 320, 3), 57, np.uint8)))
 
 
 class AttendanceTests(unittest.TestCase):
@@ -60,6 +61,31 @@ class AttendanceTests(unittest.TestCase):
         self.service.update(tracks, self.packet, 10.2, True)
         self.assertEqual(track.state, State.SUCCESS)
         self.assertAlmostEqual(track.cooldown_remaining, 29.8)
+
+    def test_feedback_does_not_advance_while_flow_is_lost(self):
+        track = verified()
+        track.flow_ok = False
+        track.verified_presence = 1.5
+        track.last_evidence_at = 9.9
+        self.assertEqual(self.service.update({1: track}, self.packet, 10.1, True), [])
+        self.assertEqual(track.verification_progress, .5)
+
+    def test_evidence_is_the_analyzed_frame_not_a_newer_camera_frame(self):
+        track = verified()
+        self.frame[:] = 255
+        newer = replace(self.packet, sequence=101, captured_at=10.1, wall_time=1000.1)
+        job = self.service.update({1: track}, newer, 10.1, True)[0]
+        self.assertTrue(np.all(job.frame == 57))
+        self.assertEqual(job.captured_at, 1000)
+
+    def test_missing_stale_wrong_generation_or_mismatched_evidence_blocks_capture(self):
+        original = verified().evidence_packet
+        for evidence in (None, replace(original, captured_at=9),
+                         replace(original, generation=2), replace(original, sequence=101),
+                         replace(original, captured_at=9.9)):
+            track = verified()
+            track.evidence_packet = evidence
+            self.assertEqual(self.service.update({1: track}, self.packet, 10, True), [])
 
     def test_employees_independent_and_same_employee_deduplicated(self):
         tracks = {1: verified(1, "A"), 2: verified(2, "B"), 3: verified(3, "A")}

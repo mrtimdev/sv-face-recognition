@@ -1,15 +1,17 @@
 """Live Monitor: preview, engine control, live statistics, status and logs."""
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import (QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
                              QListWidget, QListWidgetItem, QMenu, QPushButton,
                              QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from ...settings import describe_source
+from ...config import ATTENDANCE_MODES
 from ..icons import IconLabel, apply_button_icon, make_icon
 from ..sound import SoundPlayer
 from ..theme import palette, tone_color
@@ -55,8 +57,10 @@ class LogRow(QWidget):
 
 
 class LiveScreen(QWidget):
+    flashPreviewRequested = pyqtSignal()
     viewAllRequested = pyqtSignal()
     settingsRequested = pyqtSignal()
+    settingsApplied = pyqtSignal(object, bool)
 
     def __init__(self, engine, settings, parent=None):
         super().__init__(parent)
@@ -90,7 +94,7 @@ class LiveScreen(QWidget):
         root.setContentsMargins(20, 14, 20, 14)
         root.setSpacing(12)
 
-        self.header = PageHeader("Live Monitor", "Look at the camera, then blink once or smile. Keep your whole face visible.")
+        self.header = PageHeader("Live Monitor", "Keep your whole face visible and follow the camera prompts.")
         self.engine_pill = StatusPill("ENGINE STOPPED", "idle", dot=True)
         self.header.add_action(self.engine_pill)
         root.addWidget(self.header)
@@ -116,12 +120,13 @@ class LiveScreen(QWidget):
 
         left = QVBoxLayout()
         left.setSpacing(10)
-        left.addWidget(self._build_camera_card(), 1)
         left.addLayout(self._build_controls_row())
+        left.addWidget(self._build_camera_card(), 1)
         body.addLayout(left, 3)
 
         right = QVBoxLayout()
         right.setSpacing(10)
+        right.addWidget(self._build_requirements_card())
         right.addWidget(self._build_status_card())
         right.addWidget(self._build_activity_card(), 1)
         body.addLayout(right, 2)
@@ -140,6 +145,79 @@ class LiveScreen(QWidget):
 
         scroll.setWidget(container)
         outer.addWidget(scroll, 1)
+
+    def _build_requirements_card(self):
+        card = Card("Attendance requirements", "Choose one option", icon="shield", theme=self._theme)
+        self.requirements_card = card
+        self.requirement_group = QButtonGroup(self)
+        self.requirement_group.setExclusive(True)
+        self.requirement_boxes = {}
+        for mode, label in ATTENDANCE_MODES.items():
+            checkbox = QCheckBox(label)
+            checkbox.setProperty("attendance_mode", mode)
+            checkbox.setChecked(mode == self.settings.attendance_mode)
+            self.requirement_group.addButton(checkbox)
+            self.requirement_boxes[mode] = checkbox
+            card.add(checkbox)
+        self.requirement_note = QLabel()
+        self.requirement_note.setWordWrap(True)
+        card.add(self.requirement_note)
+        self.apply_requirements_button = QPushButton("Apply requirements")
+        self.apply_requirements_button.setToolTip("Save this option and restart a running engine to clear old verification evidence")
+        self.apply_requirements_button.clicked.connect(self._apply_requirements)
+        actions = QHBoxLayout()
+        actions.addWidget(self.apply_requirements_button)
+        self.test_sound_button = QPushButton("Test alert sound")
+        self.test_sound_button.clicked.connect(self._test_sound)
+        actions.addWidget(self.test_sound_button)
+        card.add_layout(actions)
+        self.requirement_group.buttonToggled.connect(lambda *_: self._update_requirements_note())
+        self._sync_requirements()
+        return card
+
+    def _sync_requirements(self):
+        self.requirement_boxes[self.settings.attendance_mode].setChecked(True)
+        self._update_requirements_note()
+
+    def _update_requirements_note(self):
+        active = getattr(self.engine, "config", None)
+        mode = active.attendance_mode if self.engine.running and active else self.settings.attendance_mode
+        selected = self.requirement_group.checkedButton()
+        pending = selected.property("attendance_mode") if selected else mode
+        note = (f"Selected: {ATTENDANCE_MODES[pending]}. Click Apply requirements to activate. "
+                if pending != mode else "")
+        self.requirement_note.setText(
+            note + f"{'Active' if self.engine.running else 'On next start'}: {ATTENDANCE_MODES[mode]}. "
+            "Face recognition and anti-spoof checks remain required.")
+
+    def _apply_requirements(self):
+        mode = self.requirement_group.checkedButton().property("attendance_mode")
+        candidate = replace(self.settings, attendance_mode=mode)
+        try:
+            candidate.to_config()
+            candidate._path = candidate.save(getattr(self.settings, "_path", None))
+        except (OSError, ValueError) as exc:
+            self.toast.show_message(f"Could not save attendance requirements: {exc}", "bad")
+            return
+        running = self.engine.running
+        self.settings = candidate
+        self.engine.settings = candidate
+        try:
+            if running:
+                self.engine.restart(candidate)
+            self.settingsApplied.emit(candidate, running)
+            self._sync_requirements()
+            self.toast.show_message(f"Saved: {ATTENDANCE_MODES[mode]}", "ok")
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.settingsApplied.emit(candidate, False)
+            self._sync_requirements()
+            self.toast.show_message(f"Requirements saved; engine restart failed: {exc}", "bad")
+
+    def _test_sound(self):
+        if not self._sound.available:
+            self.toast.show_message("Alert sound unavailable. Check the WAV path in Settings.", "bad")
+        elif not self._sound.play():
+            self.toast.show_message("Sound is busy or playback failed; try again shortly.", "warn")
 
     def _build_camera_card(self):
         card = Card("Camera Preview", "", icon="camera", theme=self._theme)
@@ -218,6 +296,7 @@ class LiveScreen(QWidget):
         menu.addAction("Open captures folder", self._open_captures)
         menu.addAction("Restart the engine", self._restart)
         menu.addAction("Camera settings", self.settingsRequested.emit)
+        menu.addAction("Preview capture flash", self.flashPreviewRequested.emit)
         self.more_button.setMenu(menu)
         for button in (self.start_button, self.pause_button, self.restart_button,
                        self.snapshot_button, self.captures_button, self.more_button):
@@ -447,6 +526,14 @@ class LiveScreen(QWidget):
         # Problems
         problems = [t for t in (stats.get("storage_error", ""),
                                 stats.get("recognition_error", "")) if t]
+        if self.engine.running:
+            self.engine_status_detail.setText(
+                "Face recognized; liveness not verified" if stats.get("liveness_blocked")
+                else "Engine is active and ready to detect")
+        self.engine_status_detail.setToolTip(
+            ("Turn off Portrait/background blur or beauty filters if enabled. "
+             "Keep your whole face visible in even light.\n" + stats.get("liveness_details", ""))
+            if stats.get("liveness_blocked") else "")
         if not stats.get("storage_ready", False):
             problems.insert(0, "Attendance storage is not ready; recording is disabled.")
         if problems:
@@ -469,9 +556,9 @@ class LiveScreen(QWidget):
                   f"{job.duration:.1f}s verified")
         self.toast.show_message(
             f"Captured {job.employee_name} \u2014 saving attendance...", "warn")
-        self._sound.play()
 
     def on_saved(self, result):
+        self._sound.play()
         recorded = datetime.fromtimestamp(result.recorded_at or 0).strftime("%H:%M:%S")
         self._log("INFO", f"{result.job.employee_name} ({result.job.employee_id}) "
                   f"recorded at {recorded}, {result.job.duration:.1f}s verified")
@@ -494,6 +581,7 @@ class LiveScreen(QWidget):
     # ── state sync ───────────────────────────────────────────────────────
 
     def _sync_running(self, running):
+        self._sync_requirements()
         self.engine_pill.set_status("ENGINE RUNNING" if running else "ENGINE STOPPED",
                                     "ok" if running else "idle")
         self.pause_button.setEnabled(bool(running))
@@ -606,7 +694,9 @@ class LiveScreen(QWidget):
 
     def on_settings_changed(self, settings):
         self.settings = settings
+        self._sound.stop()
         self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
+        self._sync_requirements()
         if self.camera_box.count():
             self.camera_box.setItemText(0, describe_source(settings.source))
         self._update_subtitle()
@@ -619,7 +709,8 @@ class LiveScreen(QWidget):
         self.activity.set_theme(theme)
         for card in self.cards.values():
             card.set_theme(theme)
-        for panel in (self.camera_card, self.log_card, self.status_card, self.activity_card):
+        for panel in (self.camera_card, self.log_card, self.status_card, self.activity_card,
+                      self.requirements_card):
             panel.set_theme(theme)
         self.engine_pill.set_status(self.engine_pill.label.text(),
                                     self.engine_pill.property("tone") or "idle")
