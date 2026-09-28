@@ -4,6 +4,7 @@
 ; Compile: iscc scripts\installer.iss
 
 [Setup]
+SourceDir=..
 AppName=SV Face ID
 AppVersion=1.0.3
 AppPublisher=SV Technologies
