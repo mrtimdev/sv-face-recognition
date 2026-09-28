@@ -10,7 +10,7 @@ To make a DMG installer:
 
 
 hdiutil create -volname 'SV Face ID' -srcfolder 'dist/SV Face ID.app' \
-  -ov -format UDZO 'dist/SV-Face-ID-2.0.0.dmg'
+  -ov -format UDZO 'dist/SV-Face-ID-1.0.3.dmg'
 To sign for distribution (requires Apple Developer ID):
 
 
@@ -31,9 +31,21 @@ To make an installer — install Inno Setup, then:
 
 
 iscc scripts\installer.iss
-Produces dist\SV-Face-ID-Setup-1.0.0.exe — a standard Windows installer with desktop shortcut.
+Produces dist\SV-Face-ID-Setup-1.0.3.exe — a standard Windows installer with desktop shortcut.
 
 Recognition and PAD ONNX assets plus licenses are bundled by `build.spec`.
 Rebuild an existing app bundle to include the new backend. An older bundle
 continues to use its old code until replaced. Preserve the user-data directory;
 old dlib templates require photo migration or re-enrollment (see README).
+
+## CI/CD (GitHub Actions)
+
+Push a version tag to automatically build both platforms and create a GitHub Release:
+
+    git tag v1.0.3
+    git push origin v1.0.3
+
+This triggers `.github/workflows/build-release.yml` which:
+- Builds macOS `.app` and packages it as a `.dmg`
+- Builds Windows `.exe` and creates an Inno Setup installer
+- Creates a GitHub Release with both artifacts attached

@@ -15,7 +15,7 @@ import platform
 # ── Options ──────────────────────────────────────────────────────────
 APP_NAME = "SV Face ID"
 BUNDLE_ID = "com.svtechnologies.faceid"
-VERSION = "2.0.0"
+VERSION = "1.0.3"
 onefile = False          # True → single exe (slower startup); False → folder
 bundle = True            # macOS only: True → .app bundle
 console = False          # True → show terminal window (useful for debugging)
@@ -87,7 +87,7 @@ excludes = [
     "dlib", "face_recognition", "face_recognition_models",
     "tkinter", "_tkinter", "matplotlib", "scipy", "pandas",
     "IPython", "jupyter", "notebook", "pytest",
-    "pip", "wheel",
+    "pip",
 ]
 
 # ── Analysis ─────────────────────────────────────────────────────────

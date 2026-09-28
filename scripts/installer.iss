@@ -5,12 +5,12 @@
 
 [Setup]
 AppName=SV Face ID
-AppVersion=1.0.0
+AppVersion=1.0.3
 AppPublisher=SV Technologies
 DefaultDirName={autopf}\SV Face ID
 DefaultGroupName=SV Face ID
 OutputDir=dist
-OutputBaseFilename=SV-Face-ID-Setup-1.0.0
+OutputBaseFilename=SV-Face-ID-Setup-1.0.3
 Compression=lzma2
 SolidCompression=yes
 SetupIconFile=icon.ico
