@@ -219,12 +219,14 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._build_header())
+        self.header = self._build_header()
+        root.addWidget(self.header)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
-        body.addWidget(self._build_sidebar())
+        self.sidebar = self._build_sidebar()
+        body.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
         self.screens = [

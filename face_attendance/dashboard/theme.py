@@ -606,6 +606,7 @@ QFrame#activityRow:hover {{ background-color: {c['hover']}; }}
 QLabel#activityName {{ font-size: 13px; font-weight: 600; color: {c['text']}; }}
 QLabel#activityDetail {{ font-size: 11px; color: {c['muted']}; }}
 QLabel#activityTime {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#activitySection {{ font-size: 10px; font-weight: 600; color: {c['muted']}; padding: 2px 0; }}
 QFrame#activityAvatar {{ background-color: {c['avatar_bg']}; border-radius: 18px; }}
 QLabel#activityAvatarText {{ color: {c['avatar_fg']}; font-size: 12px; font-weight: 700; }}
 

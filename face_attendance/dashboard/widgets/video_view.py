@@ -35,6 +35,7 @@ class VideoView(QWidget):
         self._faces = None
         self._guide = True
         self._radius = 12
+        self.hud = None
         self.setMinimumSize(320, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAutoFillBackground(False)
@@ -51,17 +52,36 @@ class VideoView(QWidget):
         if qimage.isNull():
             return
         self._pending_qimage = qimage
+        if self.hud is not None:
+            self.hud.sample_frame(frame)
         self.update()
+
+    def enable_controls(self):
+        from .preview_hud import PreviewHUD
+        if self.hud is None:
+            self.hud = PreviewHUD(self)
+            self.hud.setGeometry(self.rect())
+            self.hud.show()
+        return self.hud
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.hud is not None:
+            self.hud.setGeometry(self.rect())
 
     def show_message(self, title, subtitle=""):
         self._pixmap = None
         self._pending_qimage = None
+        if self.hud is not None:
+            self.hud.reset_contrast()
         self._title, self._subtitle = title, subtitle
         self.update()
 
     def clear_frame(self):
         self._pixmap = None
         self._pending_qimage = None
+        if self.hud is not None:
+            self.hud.reset_contrast()
         self.update()
 
     def set_overlay(self, resolution=None, fps=None, faces=None):
@@ -102,10 +122,15 @@ class VideoView(QWidget):
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             painter.drawPixmap(self._target(self._pixmap.size()), self._pixmap)
         elif self._guide:
+            painter.save()
+            if self.hud is not None:
+                painter.translate(0, 66)
             self._paint_guide(painter, colors)
+            painter.restore()
         else:
             self._draw_message(painter, colors)
-        self._paint_chips(painter)
+        if self.hud is None:
+            self._paint_chips(painter)
         painter.end()
 
     def _canvas_gradient(self, colors):
@@ -128,6 +153,8 @@ class VideoView(QWidget):
         short panel (the live monitor) and a tall one (a full-screen preview).
         """
         width, height = self.width(), self.height()
+        if self.hud is not None:
+            height = max(100, height - 190)
         side = min(width, height)
         accent = QColor(colors["bracket"])
 
@@ -153,7 +180,7 @@ class VideoView(QWidget):
         title_size = max(12, int(height * 0.045))
         body_size = max(10, int(height * 0.032))
         text_block = title_size + (body_size + 4 if self._subtitle else 0) + 6
-        chip_row = 44 if self._has_chips() else 0
+        chip_row = 44 if self._has_chips() and self.hud is None else 0
         text_top = height - inset_y - chip_row - text_block
         top = inset_y + arm * 0.5
         free = max(24.0, text_top - top)
@@ -249,4 +276,3 @@ class VideoView(QWidget):
         painter.setPen(CHIP_FG)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
         return int(width)
-

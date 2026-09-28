@@ -6,13 +6,14 @@ from pathlib import Path
 import cv2
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
+                             QHBoxLayout, QLabel,
                              QListWidget, QListWidgetItem, QMenu, QPushButton,
                              QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from ...settings import describe_source
 from ...config import ATTENDANCE_MODES
-from ..icons import IconLabel, apply_button_icon, make_icon
+from ..icons import IconLabel, apply_button_icon
 from ..sound import SoundPlayer
 from ..theme import palette, tone_color
 from ..widgets import (ActivityFeed, Card, StatCard,
@@ -70,6 +71,8 @@ class LiveScreen(QWidget):
         self._status_rows = {}
         self._log_rows = []
         self._theme = settings.theme
+        self._camera_status = "STOPPED"
+        self._storage_ready = False
         self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
         self._build()
         self._connect()
@@ -107,26 +110,29 @@ class LiveScreen(QWidget):
             card = StatCard(label, value, hint=hint, icon=icon, tone=tone)
             self.cards[key] = card
             cards_row.addWidget(card)
-        root.addLayout(cards_row)
-        root.addLayout(self._build_controls_row())
+        self._build_control_actions()
 
-        # ── body: camera + logs (left) | status + activity (right) ──────
+        # Keep the preview and activity visible together; setup stays below.
         body = QHBoxLayout()
         body.setSpacing(12)
 
         left = QVBoxLayout()
         left.setSpacing(10)
         left.addWidget(self._build_camera_card(), 1)
-        body.addLayout(left, 3)
+        body.addLayout(left, 7)
 
         right = QVBoxLayout()
         right.setSpacing(10)
-        right.addWidget(self._build_requirements_card())
-        right.addWidget(self._build_status_card())
         right.addWidget(self._build_activity_card(), 1)
-        body.addLayout(right, 2)
+        body.addLayout(right, 3)
 
         root.addLayout(body, 1)
+        root.addLayout(cards_row)
+        diagnostics = QHBoxLayout()
+        diagnostics.setSpacing(12)
+        diagnostics.addWidget(self._build_requirements_card(), 1)
+        diagnostics.addWidget(self._build_status_card(), 1)
+        root.addLayout(diagnostics)
         root.addWidget(self._build_log_card())
 
         self.toast = ToastBar(theme=self._theme)
@@ -227,26 +233,43 @@ class LiveScreen(QWidget):
         self.gear_button.setObjectName("iconButton")
         self.gear_button.setFixedSize(34, 34)
         self.gear_button.setToolTip("Camera settings")
-        self.gear_button.clicked.connect(self.settingsRequested.emit)
-        card.actions.addWidget(self.gear_button)
+        self.gear_button.setAccessibleName("Camera settings")
+        self.gear_button.clicked.connect(self._open_settings)
+        self.gear_button.setParent(self)
+        self.gear_button.hide()
 
         self.expand_button = QPushButton()
         self.expand_button.setObjectName("iconButton")
         self.expand_button.setFixedSize(34, 34)
         self.expand_button.setToolTip("Toggle the on-screen picture guide")
+        self.expand_button.setAccessibleName("Toggle picture guide")
         self.expand_button.clicked.connect(self._toggle_guide)
         card.actions.addWidget(self.expand_button)
 
         self.camera_box = QComboBox()
         self.camera_box.addItem(describe_source(self.settings.source))
         self.camera_box.setEnabled(False)
-        self.camera_box.setFixedWidth(170)
+        self.camera_box.setFixedWidth(130)
         self.camera_box.setToolTip("Change the source on the Settings screen")
-        card.actions.addWidget(self.camera_box)
+        self.camera_box.setParent(self)
+        self.camera_box.hide()
 
         self.video = VideoView(theme=self._theme, message="Position your face in the frame",
                                subtitle="The engine is running and ready to detect")
-        self.video.setMinimumHeight(240)
+        self.video.setMinimumHeight(360)
+        self.preview_hud = self.video.enable_controls()
+        self.preview_hud.set_source(describe_source(self.settings.source))
+        self.preview_hud.record.clicked.connect(self._toggle_engine)
+        self.preview_hud.pause.clicked.connect(self._toggle_pause)
+        self.preview_hud.restart.clicked.connect(self._restart)
+        self.preview_hud.snapshot.clicked.connect(self._save_snapshot)
+        self.preview_hud.capture.clicked.connect(self._save_snapshot)
+        self.preview_hud.flash.clicked.connect(self.flashPreviewRequested.emit)
+        self.preview_hud.settings.clicked.connect(self._open_settings)
+        self.preview_hud.captures.clicked.connect(self._open_captures)
+        self.preview_hud.fullscreen.clicked.connect(self._toggle_fullscreen)
+        self.preview_hud.more.setMenu(self.more_button.menu())
+        self.preview_hud.more.setPopupMode(self.preview_hud.more.ToolButtonPopupMode.InstantPopup)
         frame = QFrame()
         frame.setObjectName("cameraFrame")
         frame_layout = QVBoxLayout(frame)
@@ -258,6 +281,7 @@ class LiveScreen(QWidget):
         info.setSpacing(14)
         self.cam_source_label = QLabel("Source: -")
         self.cam_source_label.setObjectName("cameraValue")
+        self.cam_source_label.setMaximumWidth(150)
         self.cam_resolution = QLabel("Resolution: -")
         self.cam_resolution.setObjectName("cameraInfo")
         self.cam_fps_label = QLabel("FPS: -")
@@ -272,9 +296,8 @@ class LiveScreen(QWidget):
         card.add_layout(info)
         return card
 
-    def _build_controls_row(self):
-        row = QHBoxLayout()
-        row.setSpacing(6)
+    def _build_control_actions(self):
+        # Keep action state in one place; visible controls live on the video HUD.
         self.start_button = QPushButton("Start Engine")
         self.start_button.setObjectName("controlButtonSuccess")
         self.pause_button = QPushButton("Pause")
@@ -292,15 +315,20 @@ class LiveScreen(QWidget):
         menu = QMenu(self)
         menu.addAction("Open captures folder", self._open_captures)
         menu.addAction("Restart the engine", self._restart)
-        menu.addAction("Camera settings", self.settingsRequested.emit)
+        menu.addAction("Camera settings", self._open_settings)
+        menu.addAction("Toggle picture guide", self._toggle_guide)
+        self.fullscreen_action = menu.addAction("Enter full screen", self._toggle_fullscreen)
         menu.addAction("Preview capture flash", self.flashPreviewRequested.emit)
         self.more_button.setMenu(menu)
+        self.fullscreen_button = QPushButton("Full Screen")
+        self.fullscreen_button.setObjectName("controlButton")
+        self.fullscreen_button.setToolTip("Toggle full-screen monitor")
+        apply_button_icon(self.fullscreen_button, "expand", palette(self._theme)["text_secondary"])
         for button in (self.start_button, self.pause_button, self.restart_button,
-                       self.snapshot_button, self.captures_button, self.more_button):
-            button.setMinimumHeight(34)
-            row.addWidget(button)
-        row.addStretch(1)
-        return row
+                       self.snapshot_button, self.more_button, self.captures_button,
+                       self.fullscreen_button):
+            button.setParent(self)
+            button.hide()
 
     def _build_log_card(self):
         card = Card("System Logs", "", icon="list", compact=True, theme=self._theme)
@@ -373,13 +401,21 @@ class LiveScreen(QWidget):
         return card
 
     def _build_activity_card(self):
-        card = Card("Recent Activity", "", icon="list", theme=self._theme)
+        card = Card("Live Activity", "Attendance updates", icon="list", theme=self._theme)
         self.activity_card = card
         card.setMinimumHeight(150)
-        self.view_all_button = QPushButton("View all")
+        self.view_all_button = QPushButton("View attendance report  →")
         self.view_all_button.setObjectName("linkButton")
-        self.view_all_button.clicked.connect(self.viewAllRequested.emit)
-        card.actions.addWidget(self.view_all_button)
+        self.view_all_button.clicked.connect(self._view_all_activity)
+        self.activity_count = QLabel("0 saved")
+        self.activity_count.setObjectName("chip")
+        self.activity_count.setFixedHeight(24)
+        self.activity_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card.actions.addWidget(self.activity_count)
+
+        session = QLabel("THIS SESSION · NEWEST FIRST")
+        session.setObjectName("activitySection")
+        card.add(session)
 
         self.activity = ActivityFeed(theme=self._theme, max_rows=8)
         scroll = QScrollArea()
@@ -391,6 +427,7 @@ class LiveScreen(QWidget):
         scroll.setWidget(self.activity)
         self.activity_scroll = scroll
         card.add(scroll, 1)
+        card.add(self.view_all_button)
         return card
 
     # ── wiring ───────────────────────────────────────────────────────────
@@ -402,6 +439,7 @@ class LiveScreen(QWidget):
         self.engine.attendanceSaved.connect(self.on_saved)
         self.engine.attendanceFailed.connect(self.on_failed)
         self.engine.runningChanged.connect(self._sync_running)
+        self.engine.pausedChanged.connect(lambda _paused: self._update_pause_button())
         self.engine.errorRaised.connect(self.on_error)
         self.engine.logMessage.connect(self.on_log)
         self.start_button.clicked.connect(self._toggle_engine)
@@ -409,8 +447,19 @@ class LiveScreen(QWidget):
         self.restart_button.clicked.connect(self._restart)
         self.snapshot_button.clicked.connect(self._save_snapshot)
         self.captures_button.clicked.connect(self._open_captures)
+        self.fullscreen_button.clicked.connect(self._toggle_fullscreen)
 
     # ── engine control ───────────────────────────────────────────────────
+
+    def _open_settings(self):
+        if getattr(self, "_fs_active", False):
+            self._exit_fullscreen()
+        self.settingsRequested.emit()
+
+    def _view_all_activity(self):
+        if getattr(self, "_fs_active", False):
+            self._exit_fullscreen()
+        self.viewAllRequested.emit()
 
     def _toggle_engine(self):
         try:
@@ -467,6 +516,7 @@ class LiveScreen(QWidget):
 
     def on_frame(self, frame):
         self.video.set_frame(frame)
+        self._sync_preview_controls()
 
     def on_stats(self, stats):
         # KPI cards
@@ -486,9 +536,14 @@ class LiveScreen(QWidget):
 
         # Camera strip + overlay chips
         status = stats.get("status", "STOPPED")
+        self._camera_status = status
+        self._storage_ready = stats.get("storage_ready", False)
         fps = stats.get("camera_fps", 0)
         self.cam_fps_label.setText(f"FPS: {fps:.1f}")
-        self.cam_source_label.setText(f"Source: {stats.get('source', '-')}")
+        source = describe_source(self.settings.source)
+        self.cam_source_label.setToolTip(source)
+        self.cam_source_label.setText(self.cam_source_label.fontMetrics().elidedText(
+            source, Qt.TextElideMode.ElideRight, 150))
         resolution = stats.get("resolution") or stats.get("resolution_text")
         if resolution:
             self.cam_resolution.setText(f"Resolution: {resolution}")
@@ -501,13 +556,15 @@ class LiveScreen(QWidget):
                                        fps=fps, faces=faces)
             else:
                 self.video.set_overlay(fps=fps, faces=faces)
+        self._sync_preview_controls()
+        self.preview_hud.set_metrics(self.video._resolution, fps)
         queue = stats.get("queue", 0)
         queue_max = max(1, stats.get("queue_max", 1))
         self.cam_pipeline.setText(f"Pipeline: {queue}/{queue_max} queued")
 
         # Live badge visibility
         connected = status == "CONNECTED"
-        self.live_badge.setVisible(connected)
+        self.live_badge.setVisible(connected and self.engine.running and not self.engine.paused)
 
         # System status rows
         self._set_status_row("camera", "Connected" if connected else status.title(), connected)
@@ -562,11 +619,13 @@ class LiveScreen(QWidget):
         self.toast.show_message(f"Attendance recorded for {result.job.employee_name}", "ok")
         self._add_activity(result.job.employee_name, "Verified",
                            f"{result.job.duration:.1f}s verified presence",
-                           result.job.employee_id)
+                           result.job.employee_id, time_text=recorded)
 
     def on_failed(self, result):
         self._log("ERROR", f"Save failed: {result.error}")
         self.toast.show_message(f"Attendance save failed: {result.error}", "bad")
+        self._add_activity(result.job.employee_name, "Save failed", str(result.error),
+                           result.job.employee_id)
 
     def on_error(self, message):
         self._log("ERROR", str(message))
@@ -578,6 +637,7 @@ class LiveScreen(QWidget):
     # ── state sync ───────────────────────────────────────────────────────
 
     def _sync_running(self, running):
+        self._camera_status = "CONNECTING" if running else "STOPPED"
         self._sync_requirements()
         self.pause_button.setEnabled(bool(running))
         self._update_pause_button(retint=False)
@@ -605,6 +665,7 @@ class LiveScreen(QWidget):
             self.cards["waiting"].set_value("-")
             self.cards["unknown"].set_value("0", "idle")
             self.video.set_overlay(faces=0)
+            self.video.set_overlay(resolution="", fps=0)
             for row_key in self._status_rows:
                 self._set_status_row(row_key, "Idle", True)
             self.live_badge.setVisible(False)
@@ -613,15 +674,25 @@ class LiveScreen(QWidget):
         self.start_button.style().unpolish(self.start_button)
         self.start_button.style().polish(self.start_button)
         self._retint_buttons(running=running)
+        self._sync_preview_controls(running)
 
     def _update_pause_button(self, retint=True):
         paused = self.engine.paused
-        self.pause_button.setText("Resume" if paused else "Pause")
+        label = "Resume" if paused else "Pause"
+        self.pause_button.setText(label)
         self.pause_button.setObjectName("softButton" if paused else "controlButton")
         self.pause_button.style().unpolish(self.pause_button)
         self.pause_button.style().polish(self.pause_button)
+        self._sync_preview_controls()
         if retint:
             self._retint_buttons()
+
+    def _sync_preview_controls(self, running=None):
+        running = self.engine.running if running is None else running
+        self.preview_hud.set_state(running, self.engine.paused, self._camera_status,
+                                   self._storage_ready, self.video.has_frame())
+        self.live_badge.setVisible(running and not self.engine.paused and
+                                  self._camera_status == "CONNECTED")
 
     def _retint_buttons(self, running=None):
         """Buttons carry vector glyphs, so re-colour them when state or theme changes."""
@@ -635,8 +706,9 @@ class LiveScreen(QWidget):
             (self.snapshot_button, "image"),
             (self.captures_button, "folder"),
             (self.more_button, "more"),
+            (self.fullscreen_button, "expand"),
             (self.gear_button, "gear"),
-            (self.expand_button, "expand"),
+            (self.expand_button, "face-id"),
             (self.clear_button, "trash"),
         )
         for button, name in plan:
@@ -668,20 +740,96 @@ class LiveScreen(QWidget):
         if self.auto_toggle.isChecked():
             self.log_list.scrollToBottom()
 
-    def _add_activity(self, name, status, detail, employee_id=""):
+    def _add_activity(self, name, status, detail, employee_id="", time_text=None):
+        if status == "Verified":
+            self._saved_activity_count = getattr(self, "_saved_activity_count", 0) + 1
+            self.activity_count.setText(f"{self._saved_activity_count} saved")
         self.activity.add(
             name,
             detail=detail,
-            status=status,
+            status="Check-in saved" if status == "Verified" else status,
             tone="ok" if status == "Verified" else "bad",
-            time_text=datetime.now().strftime("%H:%M:%S"),
+            time_text=time_text or datetime.now().strftime("%H:%M:%S"),
             subtitle=employee_id,
         )
 
     # ── settings / lifecycle ─────────────────────────────────────────────
 
+    # ── fullscreen ────────────────────────────────────────────────────────
+
+    def _toggle_fullscreen(self):
+        win = self.window()
+        if not win:
+            return
+        if getattr(self, "_fs_active", False):
+            self._exit_fullscreen()
+        else:
+            self._enter_fullscreen()
+
+    def _enter_fullscreen(self):
+        win = self.window()
+        self._fs_active = True
+        self._was_maximized = win.isMaximized()
+        self.fullscreen_action.setText("Exit full screen")
+        self.preview_hud.set_fullscreen(True)
+
+        # remember which panels to hide
+        self._fs_hidden = []
+        for w in self._fs_panels():
+            if w.isVisible():
+                self._fs_hidden.append(w)
+                w.hide()
+
+        # hide the main window chrome
+        for attr in ("sidebar", "header"):
+            w = getattr(win, attr, None)
+            if w:
+                self._fs_hidden.append(w)
+                w.hide()
+
+        # expand video
+        self.video.setMinimumHeight(0)
+        win.showFullScreen()
+
+    def _exit_fullscreen(self):
+        win = self.window()
+        self._fs_active = False
+
+        self.fullscreen_action.setText("Enter full screen")
+        self.preview_hud.set_fullscreen(False)
+
+        for w in getattr(self, "_fs_hidden", []):
+            w.show()
+        self._fs_hidden = []
+
+        self.video.setMinimumHeight(360)
+        if self._was_maximized:
+            win.showMaximized()
+        else:
+            win.showNormal()
+
+    def _fs_panels(self):
+        panels = []
+        for key in self.cards:
+            panels.append(self.cards[key])
+        for w in (self.requirements_card, self.status_card, self.log_card):
+            panels.append(w)
+        # hide the controls row buttons (they are in the floating overlay)
+        for btn in (self.start_button, self.pause_button, self.restart_button,
+                    self.snapshot_button, self.captures_button, self.more_button,
+                    self.fullscreen_button):
+            panels.append(btn)
+        return panels
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and getattr(self, "_fs_active", False):
+            self._exit_fullscreen()
+            return
+        super().keyPressEvent(event)
+
     def on_settings_changed(self, settings):
         self.settings = settings
+        self.preview_hud.set_source(describe_source(settings.source))
         self._sound.stop()
         self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
         self._sync_requirements()
