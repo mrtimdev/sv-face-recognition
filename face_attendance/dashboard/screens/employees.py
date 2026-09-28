@@ -231,7 +231,7 @@ class EmployeesScreen(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
         root.setSpacing(16)
-        self.header = PageHeader("Enrolled Employees", "Manage people, enrollment photos and attendance access.")
+        self.header = PageHeader("", "Manage people, enrollment photos and attendance access.")
         self.header.layout().setStretch(0, 1)
         self.enrolled_pill = StatusPill("0 enrolled", "idle", dot=True)
         self.reload_button = QPushButton("Refresh")

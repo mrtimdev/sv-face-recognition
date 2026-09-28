@@ -253,7 +253,7 @@ QFrame#cardDivider, QFrame#hLine {{
     border: none;
     max-height: 1px;
 }}
-QFrame#cardHeader {{ background: transparent; }}
+QWidget#cardHeader {{ background: transparent; }}
 QFrame#subtlePanel {{
     background-color: {c['panel_alt']};
     border: 1px solid {c['border_soft']};
@@ -332,6 +332,12 @@ QPushButton#controlButton {{
     font-weight: 600;
     min-width: 0px;
     min-height: 18px;
+}}
+/* The overflow button already has an ellipsis; hide the native corner arrow. */
+QPushButton[overflowMenu="true"]::menu-indicator {{
+    image: none;
+    width: 0px;
+    height: 0px;
 }}
 QPushButton#controlButtonSuccess {{
     background-color: {c['success']};
@@ -730,6 +736,11 @@ QFrame#headerBar {{
     background-color: {c['header_bg']};
     border-bottom: 1px solid {c['header_border']};
 }}
+QFrame#headerBrand {{
+    background: transparent;
+    border-right: 1px solid {c['header_border']};
+}}
+QLabel#headerDetails {{ font-size: 12px; color: {c['muted']}; }}
 QFrame#headerChip {{
     background-color: {c['panel_alt']};
     border: 1px solid {c['border_soft']};

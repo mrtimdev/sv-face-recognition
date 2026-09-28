@@ -14,6 +14,7 @@ class PageHeader(QWidget):
         column.setSpacing(2)
         self.title_label = QLabel(title)
         self.title_label.setObjectName("pageTitle")
+        self.title_label.setVisible(bool(title))
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("pageSubtitle")
         self.subtitle_label.setWordWrap(True)
@@ -30,6 +31,7 @@ class PageHeader(QWidget):
 
     def set_title(self, text):
         self.title_label.setText(text)
+        self.title_label.setVisible(bool(text))
 
     def set_subtitle(self, text):
         self.subtitle_label.setText(text)

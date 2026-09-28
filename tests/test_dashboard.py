@@ -65,6 +65,46 @@ class BridgeTests(unittest.TestCase):
 
 
 class WindowTests(unittest.TestCase):
+    def test_unified_header_tracks_navigation_engine_and_source(self):
+        from unittest.mock import patch, PropertyMock
+        from PyQt6.QtWidgets import QLabel
+        from face_attendance.dashboard.app import MainWindow, NAV
+        application = _app()
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(temp_settings(directory), use_lock=False)
+            window.show()
+            try:
+                for index, (_, title) in enumerate(NAV):
+                    window.nav.setCurrentRow(index)
+                    application.processEvents()
+                    self.assertEqual(window.page_title.text(), title)
+                    visible_titles = [label for label in window.findChildren(QLabel)
+                                      if label.objectName() in ("pageTitle", "screenTitle")
+                                      and label.isVisible()]
+                    self.assertEqual(visible_titles, [window.page_title])
+                self.assertEqual(window.engine_pill.label.text(), "ENGINE STOPPED")
+                with patch.object(type(window.engine), "running", new_callable=PropertyMock,
+                                  return_value=True):
+                    window.engine.runningChanged.emit(True)
+                    self.assertEqual(window.engine_pill.label.text(), "ENGINE RUNNING")
+                    window.engine.set_paused(True)
+                    self.assertEqual(window.engine_pill.label.text(), "ENGINE PAUSED")
+                    self.assertEqual(window.engine_pill.property("tone"), "warn")
+                    window.engine.set_paused(False)
+                    self.assertEqual(window.engine_pill.label.text(), "ENGINE RUNNING")
+                window.engine.runningChanged.emit(False)
+                self.assertEqual(window.engine_pill.label.text(), "ENGINE STOPPED")
+                window.settings = replace(window.settings, source="rtsp://camera.example/" + "stream/" * 50)
+                window._refresh_header()
+                application.processEvents()
+                self.assertIn("1 employee enrolled", window.header_details.toolTip())
+                self.assertTrue(window.header_details.text().endswith("\u2026"))
+                self.assertLessEqual(window.header_details.fontMetrics().horizontalAdvance(
+                    window.header_details.text()), window.header_details.width())
+            finally:
+                window.close()
+                application.processEvents()
+
     def test_capture_flash_preview_finishes_and_does_not_record_attendance(self):
         from PyQt6.QtCore import QAbstractAnimation, QEventLoop, QTimer, Qt
         from face_attendance.dashboard.app import MainWindow

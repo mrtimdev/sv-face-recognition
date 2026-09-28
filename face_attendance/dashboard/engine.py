@@ -71,6 +71,7 @@ class AttendanceEngine(QObject):
     attendanceFailed = pyqtSignal(object)    # SaveResult with outcome "error"
     catalogChanged = pyqtSignal(object)      # employee rows after rebuild
     runningChanged = pyqtSignal(bool)
+    pausedChanged = pyqtSignal(bool)
     errorRaised = pyqtSignal(str)
     logMessage = pyqtSignal(str)
 
@@ -178,6 +179,7 @@ class AttendanceEngine(QObject):
         paused = bool(paused)
         if paused != self._paused:
             self._paused = paused
+            self.pausedChanged.emit(paused)
             self.logMessage.emit("Attendance recording paused" if paused
                                  else "Attendance recording resumed")
 

@@ -38,7 +38,7 @@ class SettingsScreen(QWidget):
         outer.setContentsMargins(20, 18, 20, 18)
         outer.setSpacing(16)
 
-        self.header = PageHeader("Settings", "Configure camera, recognition, storage and appearance.")
+        self.header = PageHeader("", "Configure camera, recognition, storage and appearance.")
         self.header.layout().setStretch(0, 1)
         self.apply_button = QPushButton("Save")
         self.apply_restart_button = QPushButton("Save & restart")

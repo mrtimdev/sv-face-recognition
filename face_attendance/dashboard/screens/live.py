@@ -15,7 +15,7 @@ from ...config import ATTENDANCE_MODES
 from ..icons import IconLabel, apply_button_icon, make_icon
 from ..sound import SoundPlayer
 from ..theme import palette, tone_color
-from ..widgets import (ActivityFeed, Card, PageHeader, StatCard, StatusPill,
+from ..widgets import (ActivityFeed, Card, StatCard,
                        ToastBar, ToggleSwitch, VideoView)
 
 STATUS_TONES = {"CONNECTED": "ok", "CONNECTING": "warn", "RECONNECTING": "warn",
@@ -94,11 +94,6 @@ class LiveScreen(QWidget):
         root.setContentsMargins(20, 14, 20, 14)
         root.setSpacing(12)
 
-        self.header = PageHeader("Live Monitor", "Keep your whole face visible and follow the camera prompts.")
-        self.engine_pill = StatusPill("ENGINE STOPPED", "idle", dot=True)
-        self.header.add_action(self.engine_pill)
-        root.addWidget(self.header)
-
         # ── KPI cards ───────────────────────────────────────────────────
         cards_row = QHBoxLayout()
         cards_row.setSpacing(12)
@@ -113,6 +108,7 @@ class LiveScreen(QWidget):
             self.cards[key] = card
             cards_row.addWidget(card)
         root.addLayout(cards_row)
+        root.addLayout(self._build_controls_row())
 
         # ── body: camera + logs (left) | status + activity (right) ──────
         body = QHBoxLayout()
@@ -120,7 +116,6 @@ class LiveScreen(QWidget):
 
         left = QVBoxLayout()
         left.setSpacing(10)
-        left.addLayout(self._build_controls_row())
         left.addWidget(self._build_camera_card(), 1)
         body.addLayout(left, 3)
 
@@ -292,6 +287,8 @@ class LiveScreen(QWidget):
         self.captures_button.setObjectName("controlButton")
         self.more_button = QPushButton("More")
         self.more_button.setObjectName("controlButton")
+        self.more_button.setProperty("overflowMenu", True)
+        self.more_button.setToolTip("More monitor actions")
         menu = QMenu(self)
         menu.addAction("Open captures folder", self._open_captures)
         menu.addAction("Restart the engine", self._restart)
@@ -582,8 +579,6 @@ class LiveScreen(QWidget):
 
     def _sync_running(self, running):
         self._sync_requirements()
-        self.engine_pill.set_status("ENGINE RUNNING" if running else "ENGINE STOPPED",
-                                    "ok" if running else "idle")
         self.pause_button.setEnabled(bool(running))
         self._update_pause_button(retint=False)
 
@@ -627,9 +622,6 @@ class LiveScreen(QWidget):
         self.pause_button.style().polish(self.pause_button)
         if retint:
             self._retint_buttons()
-        if self.engine.running:
-            self.engine_pill.set_status("ENGINE PAUSED" if paused else "ENGINE RUNNING",
-                                        "warn" if paused else "ok")
 
     def _retint_buttons(self, running=None):
         """Buttons carry vector glyphs, so re-colour them when state or theme changes."""
@@ -659,10 +651,6 @@ class LiveScreen(QWidget):
                 color = colors["text_secondary"]
             apply_button_icon(button, name, color, size=14)
         self.start_button.setText("Stop Engine" if running else "Start Engine")
-
-    def _update_subtitle(self):
-        self.header.set_subtitle(
-            f"Source: {describe_source(self.settings.source)}")
 
     # ── logging ──────────────────────────────────────────────────────────
 
@@ -699,7 +687,6 @@ class LiveScreen(QWidget):
         self._sync_requirements()
         if self.camera_box.count():
             self.camera_box.setItemText(0, describe_source(settings.source))
-        self._update_subtitle()
 
     def set_theme(self, theme):
         self._theme = theme
@@ -712,8 +699,6 @@ class LiveScreen(QWidget):
         for panel in (self.camera_card, self.log_card, self.status_card, self.activity_card,
                       self.requirements_card):
             panel.set_theme(theme)
-        self.engine_pill.set_status(self.engine_pill.label.text(),
-                                    self.engine_pill.property("tone") or "idle")
         for dot, _value, icon in self._status_rows.values():
             icon.set_icon_color(palette(theme)["muted"])
         for row in self._log_rows:

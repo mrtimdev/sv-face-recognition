@@ -25,6 +25,10 @@ class StatusPill(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.set_status(text, tone)
 
+    def set_theme(self, theme):
+        self._theme = theme
+        self.set_status(self.label.text(), self.property("tone") or "idle")
+
     def set_status(self, text, tone="idle"):
         self.label.setText(str(text))
         self.setProperty("tone", tone)

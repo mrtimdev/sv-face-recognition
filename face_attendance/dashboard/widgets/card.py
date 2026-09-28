@@ -31,7 +31,7 @@ class Card(QFrame):
         self.icon = None
         if icon:
             self.icon = IconLabel(icon, size=20)
-            header_row.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignTop)
+            header_row.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.text_col = QVBoxLayout()
         self.text_col.setSpacing(1)

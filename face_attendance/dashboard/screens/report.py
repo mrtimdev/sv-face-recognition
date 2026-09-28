@@ -77,12 +77,9 @@ class ReportScreen(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(12)
-        title = QLabel("Attendance Report")
-        title.setObjectName("screenTitle")
         self.subtitle = QLabel("Read-only view of the committed attendance table "
                                "(attendance.db is the record of truth)")
         self.subtitle.setObjectName("screenSubtitle")
-        layout.addWidget(title)
         layout.addWidget(self.subtitle)
 
         filters = QHBoxLayout()
