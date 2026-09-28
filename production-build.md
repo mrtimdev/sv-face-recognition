@@ -40,6 +40,29 @@ old dlib templates require photo migration or re-enrollment (see README).
 
 ## CI/CD (GitHub Actions)
 
+### Build a Windows installer without publishing a release
+
+Once the updated workflow is on the repository's default branch, open
+**Actions → Build & Release → Run workflow**. Select the branch containing
+the installer fix (for example, `uniface-version`) and click **Run workflow**.
+This manual run builds Windows only. When it succeeds, download the
+`windows-installer` artifact from the run summary and extract the setup `.exe`.
+
+### Recovering the failed v1.0.3 build
+
+The original `v1.0.3` tag points to a commit without `SourceDir=..` in
+`scripts/installer.iss`. Inno Setup therefore searches for `icon.ico` and
+`dist` inside `scripts`, causing the installer step to fail. The branch fix
+resolves these paths from the repository root, including the output path used
+by the artifact upload step.
+
+Re-running that old tagged workflow still uses the old commit. Use the manual
+branch build above, or create a new release tag that includes the fix. Before
+tagging a new version, update `VERSION` in `build.spec` and `AppVersion` and
+`OutputBaseFilename` in `scripts/installer.iss` to match it.
+
+### Publish a release
+
 Push a version tag to automatically build both platforms and create a GitHub Release:
 
     git tag v1.0.3

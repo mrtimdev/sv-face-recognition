@@ -4,6 +4,7 @@
 ; Compile: iscc scripts\installer.iss
 
 [Setup]
+; Resolve the icon, packaged files, and output directory from the repository root.
 SourceDir=..
 AppName=SV Face ID
 AppVersion=1.0.3
