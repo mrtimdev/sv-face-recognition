@@ -201,6 +201,49 @@ class AttendanceReader:
             self.connection = None
 
 
+def delete_records(db_path, record_ids, delete_snapshots=True, progress_cb=None):
+    """Delete attendance rows by id and optionally their snapshot files.
+
+    *progress_cb(done, total)* is called after each row so the UI can update a
+    progress bar.  Returns ``(deleted_rows, deleted_files)``.
+    """
+    db_path = Path(db_path)
+    if not db_path.exists() or not record_ids:
+        return 0, 0
+    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn.row_factory = sqlite3.Row
+    total = len(record_ids)
+    deleted_rows = 0
+    deleted_files = 0
+    try:
+        for i, rid in enumerate(record_ids):
+            row = conn.execute(
+                "SELECT snapshot, event_id FROM attendance WHERE id = ?", (rid,)).fetchone()
+            if row:
+                if delete_snapshots and row["snapshot"]:
+                    snap = Path(row["snapshot"])
+                    if snap.is_file():
+                        try:
+                            snap.unlink()
+                            deleted_files += 1
+                        except OSError:
+                            pass
+                if row["event_id"]:
+                    conn.execute("DELETE FROM attendance_outbox WHERE event_id = ?",
+                                 (row["event_id"],))
+            conn.execute("DELETE FROM attendance WHERE id = ?", (rid,))
+            deleted_rows += 1
+            if progress_cb:
+                progress_cb(i + 1, total)
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return deleted_rows, deleted_files
+
+
 def export_rows(path, rows, work_start="", punctuality_column=False):
     """Write the filtered report as UTF-8 CSV; returns the number of data rows."""
     path = Path(path)
@@ -217,4 +260,56 @@ def export_rows(path, rows, work_start="", punctuality_column=False):
                 values.append(punctuality(row["epoch"], work_start))
             values += [row["status"], f"{row['duration']:.2f}", row["snapshot"], row["event_id"]]
             writer.writerow(values)
+    return len(rows)
+
+
+def export_excel(path, rows, work_start="", punctuality_column=False):
+    """Write the filtered report as an .xlsx workbook; returns the row count."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    headers = list(HEADERS)
+    if punctuality_column:
+        headers.insert(3, "Punctuality")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Attendance Report"
+
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="1E40AF", end_color="1E40AF", fill_type="solid")
+    header_align = Alignment(horizontal="center", vertical="center")
+    thin = Side(style="thin", color="E5EAF2")
+    cell_border = Border(bottom=thin)
+
+    for col, title in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=title)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_align
+
+    for r, row in enumerate(rows, 2):
+        values = [row["time"], row["name"], row["employee_id"]]
+        if punctuality_column:
+            values.append(punctuality(row["epoch"], work_start))
+        values += [row["status"], round(row["duration"], 2),
+                   Path(row["snapshot"]).name if row["snapshot"] else "", row["event_id"]]
+        for c, val in enumerate(values, 1):
+            cell = ws.cell(row=r, column=c, value=val)
+            cell.border = cell_border
+            if c in (5, 6) and isinstance(val, (int, float)):
+                cell.alignment = Alignment(horizontal="right")
+
+    for col in range(1, len(headers) + 1):
+        letter = get_column_letter(col)
+        max_len = max(len(str(ws.cell(row=r, column=col).value or ""))
+                      for r in range(1, min(len(rows) + 2, 52)))
+        ws.column_dimensions[letter].width = min(45, max(12, max_len + 4))
+
+    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(rows) + 1}"
+    ws.freeze_panes = "A2"
+    wb.save(str(path))
     return len(rows)

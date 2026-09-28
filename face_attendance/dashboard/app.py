@@ -19,12 +19,12 @@ from .errors import DashboardErrorHandler
 from .icons import IconLabel, apply_button_icon, make_icon
 from .screens.employees import EmployeesScreen
 from .screens.live import LiveScreen
-from .screens.realtime import RealtimeScreen
 from .screens.report import ReportScreen
 from .screens.settings import SettingsScreen
 from .telegram import TelegramService
 from .theme import palette, stylesheet
 from .widgets import Avatar, StatusPill
+from .splash import SplashScreen
 from .widgets.capture_flash import CaptureFlash
 
 APP_VERSION = "v2.0.0"
@@ -32,7 +32,6 @@ SIDEBAR_WIDTH = 244
 
 NAV = (
     ("monitor", "Live Monitor"),
-    ("list", "Real-time Attendance"),
     ("chart", "Attendance Report"),
     ("users", "Enrolled Employees"),
     ("gear", "Settings"),
@@ -230,7 +229,6 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.screens = [
             LiveScreen(self.engine, self.settings),
-            RealtimeScreen(self.engine, self.settings),
             ReportScreen(self.engine, self.settings),
             EmployeesScreen(self.engine, self.settings),
             SettingsScreen(self.engine, self.settings),
@@ -388,9 +386,9 @@ class MainWindow(QMainWindow):
         live = self.screens[0]
         live.flashPreviewRequested.connect(lambda: self.capture_flash.trigger(preview=True))
         live.viewAllRequested.connect(lambda: self.nav.setCurrentRow(1))
-        live.settingsRequested.connect(lambda: self.nav.setCurrentRow(4))
+        live.settingsRequested.connect(lambda: self.nav.setCurrentRow(3))
         live.settingsApplied.connect(self._broadcast_settings)
-        ctx = self.screens[4]
+        ctx = self.screens[3]
         ctx.settingsApplied.connect(
             lambda settings, restart: self._broadcast_settings(settings, restart))
         self.nav.currentRowChanged.connect(lambda row: self._refresh_nav_icons())
@@ -565,14 +563,22 @@ def run_dashboard(settings_path=None, autostart=False, argv=None):
     errors.install()
     try:
         settings = Settings.load(settings_path)
-        if settings.dashboard_pin_hash:
-            dialog = LoginDialog(settings.dashboard_pin_hash)
-            application.setStyleSheet(stylesheet(settings.theme))
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return 1
-        window = MainWindow(settings, autostart=autostart)
-        errors.errorRaised.connect(window.on_unhandled_error)
-        window.show()
+
+        def _show_main():
+            if settings.dashboard_pin_hash:
+                dialog = LoginDialog(settings.dashboard_pin_hash)
+                application.setStyleSheet(stylesheet(settings.theme))
+                if dialog.exec() != QDialog.DialogCode.Accepted:
+                    application.quit()
+                    return
+            window = MainWindow(settings, autostart=autostart)
+            errors.errorRaised.connect(window.on_unhandled_error)
+            window.show()
+            _show_main.window = window
+
+        splash = SplashScreen()
+        _show_main.window = None
+        splash.start(on_finished=_show_main)
         return application.exec()
     finally:
         errors.close()

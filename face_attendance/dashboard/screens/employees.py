@@ -15,14 +15,14 @@ from PyQt6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PyQt6.QtWidgets import (QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                              QLabel, QLineEdit, QListWidget, QListWidgetItem, QComboBox, QDialog,
-                             QHeaderView, QInputDialog, QTableWidget, QTableWidgetItem, QAbstractItemView,
-                             QMessageBox, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
-                             QVBoxLayout, QWidget)
+                             QHeaderView, QInputDialog, QMenu, QTableWidget, QTableWidgetItem,
+                             QAbstractItemView, QMessageBox, QPushButton, QScrollArea, QSpinBox,
+                             QStackedWidget, QVBoxLayout, QWidget)
 
 from ...camera import CameraManager
 from ...enrollment import EnrollmentOutcome, EnrollmentService, FACE_BACKEND_LOCK, _atomic_write
 from ..bridge import to_pixmap
-from ..icons import apply_button_icon
+from ..icons import apply_button_icon, make_icon
 from ..theme import palette
 from ..widgets import Avatar, Card, PageHeader, StatCard, StatusPill, ToastBar, VideoView
 
@@ -309,7 +309,7 @@ class EmployeesScreen(QWidget):
         self.employee_table.setIconSize(QSize(48, 48))
         header = self.employee_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        for col, width in ((0, 80), (2, 170), (3, 160), (4, 85), (5, 275)):
+        for col, width in ((0, 80), (2, 170), (3, 160), (4, 85), (5, 90)):
             self.employee_table.setColumnWidth(col, width)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setMinimumSectionSize(80)
@@ -1236,15 +1236,27 @@ class EmployeesScreen(QWidget):
             actions.setStyleSheet("QWidget#employeeCell { background: transparent; }")
             action_layout = QHBoxLayout(actions)
             action_layout.setContentsMargins(4, 8, 4, 8)
-            action_layout.setSpacing(6)
-            for text, callback, tone in (("Edit", self._edit_selected, ""),
-                                         ("Update photo", self._use_selected, "softButton"),
-                                         ("Delete", self._remove_employee, "danger")):
-                button = QPushButton(text)
-                button.setObjectName(tone)
-                button.setToolTip(f"{text}: {row['employee_name']}")
-                button.clicked.connect(lambda checked=False, i=index, action=callback: self._row_action(i, action))
-                action_layout.addWidget(button)
+            menu_btn = QPushButton("Edit")
+            menu_btn.setObjectName("controlButton")
+            menu_btn.setProperty("overflowMenu", True)
+            menu_btn.setToolTip(f"Actions: {row['employee_name']}")
+            apply_button_icon(menu_btn, "more", palette(self._theme)["text_secondary"])
+            menu = QMenu(menu_btn)
+            for label, cb, icon_name in (
+                ("Edit name", self._edit_selected, "user"),
+                ("Update photo", self._use_selected, "camera"),
+                ("View profile", self._show_profile, "user"),
+            ):
+                act = menu.addAction(label)
+                act.setIcon(make_icon(icon_name, 16, palette(self._theme)["text_secondary"]))
+                act.triggered.connect(lambda checked=False, i=index, fn=cb: self._row_action(i, fn))
+            menu.addSeparator()
+            del_act = menu.addAction("Delete employee")
+            del_act.setIcon(make_icon("trash", 16, palette(self._theme)["danger"]))
+            del_act.triggered.connect(lambda checked=False, i=index: self._row_action(i, self._remove_employee))
+            menu_btn.setMenu(menu)
+            action_layout.addWidget(menu_btn)
+            action_layout.addStretch()
             self.employee_table.setCellWidget(index, 5, actions)
             self.employee_table.setRowHeight(index, 64)
         ready = len({row["employee_id"] for row in self.rows if row["samples"]})

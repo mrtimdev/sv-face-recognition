@@ -188,6 +188,9 @@ def stylesheet(theme="light"):
     if font_family not in available:
         font_family = next((name for name in ("Helvetica Neue", "Segoe UI", "DejaVu Sans", "Arial")
                             if name in available), sorted(available)[0] if available else font_family)
+    mono_family = next((name for name in ("SF Mono", "JetBrains Mono", "Cascadia Mono",
+                                          "Consolas", "DejaVu Sans Mono", "Courier New")
+                        if name in available), "monospace")
     return f"""
 /* === Base =============================================================== */
 QWidget {{
@@ -233,7 +236,7 @@ QLabel#welcomeText {{ font-size: 17px; font-weight: 700; color: {c['text']}; }}
 QLabel#welcomeSub {{ font-size: 12px; color: {c['muted']}; }}
 QLabel#headerClock {{
     font-size: 20px; font-weight: 700; color: {c['text']};
-    font-family: "SF Mono", "JetBrains Mono", "Consolas", monospace;
+    font-family: "{mono_family}", monospace;
 }}
 QLabel#headerDate {{ font-size: 11px; color: {c['muted']}; }}
 QLabel#versionLabel {{ font-size: 11px; color: {c['muted']}; }}
@@ -436,6 +439,57 @@ QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow,
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ width: 0px; height: 0px; }}
 
+/* === Calendar popup ====================================================== */
+QCalendarWidget {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 10px;
+}}
+QCalendarWidget QToolButton {{
+    background: transparent;
+    color: {c['text']};
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 10px;
+    border: none;
+    border-radius: 6px;
+}}
+QCalendarWidget QToolButton:hover {{ background-color: {c['hover']}; }}
+QCalendarWidget QToolButton::menu-indicator {{ image: none; width: 0; }}
+QCalendarWidget QMenu {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 8px;
+}}
+QCalendarWidget QSpinBox {{
+    background-color: {c['input_bg']};
+    border: 1px solid {c['input_border']};
+    border-radius: 6px;
+    padding: 2px 6px;
+    min-height: 14px;
+}}
+QCalendarWidget QAbstractItemView {{
+    background-color: {c['card']};
+    alternate-background-color: {c['card']};
+    border: none;
+    border-radius: 0px;
+    selection-background-color: {c['primary']};
+    selection-color: {c['primary_fg']};
+    font-size: 13px;
+    outline: none;
+    gridline-color: transparent;
+}}
+QCalendarWidget QAbstractItemView::item {{
+    padding: 0px;
+    min-width: 32px;
+    min-height: 28px;
+}}
+QCalendarWidget QWidget#qt_calendar_navigationbar {{
+    background-color: {c['card']};
+    border-bottom: 1px solid {c['border']};
+    padding: 4px;
+}}
+
 /* === Checkboxes ========================================================= */
 QCheckBox, QRadioButton {{ background: transparent; spacing: 7px; }}
 QCheckBox::indicator, QRadioButton::indicator {{ width: 16px; height: 16px; }}
@@ -593,11 +647,11 @@ QLabel#logTag[level="WARN"] {{ background-color: {c['warn_bg']}; color: {c['log_
 QLabel#logTag[level="ERROR"] {{ background-color: {c['danger_bg']}; color: {c['log_tag_error']}; }}
 QLabel#logTimestamp {{
     font-size: 11px; color: {c['muted']};
-    font-family: "SF Mono", "JetBrains Mono", "Consolas", monospace;
+    font-family: "{mono_family}", monospace;
 }}
 QLabel#logMessage {{
     font-size: 12px; color: {c['text_secondary']};
-    font-family: "SF Mono", "JetBrains Mono", "Consolas", monospace;
+    font-family: "{mono_family}", monospace;
 }}
 
 /* === Camera preview ===================================================== */
@@ -800,6 +854,124 @@ QFrame#toast[tone="ok"] {{ border-left-color: {c['success']}; }}
 QFrame#toast[tone="bad"] {{ border-left-color: {c['danger']}; }}
 QFrame#toast[tone="warn"] {{ border-left-color: {c['warn']}; }}
 QLabel#toastText {{ font-size: 12px; color: {c['text_secondary']}; }}
+
+/* === Filter chips ======================================================== */
+QPushButton#filterChip {{
+    background-color: {c['chip_bg']};
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 4px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    color: {c['chip_fg']};
+    min-width: 0px;
+}}
+QPushButton#filterChip:hover {{
+    background-color: {c['hover']};
+    color: {c['text']};
+    border-color: {c['border']};
+}}
+QPushButton#filterChip:checked {{
+    background-color: {c['primary_soft']};
+    color: {c['primary']};
+    border-color: {c['primary']};
+}}
+
+/* === Page buttons ======================================================= */
+QPushButton#pageButton {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 8px;
+    padding: 0px;
+    font-size: 12px;
+    font-weight: 600;
+    color: {c['text_secondary']};
+    min-width: 32px;
+    min-height: 28px;
+}}
+QPushButton#pageButton:hover {{
+    border-color: {c['primary']};
+    color: {c['primary']};
+    background-color: {c['primary_soft']};
+}}
+QPushButton#pageActive {{
+    background-color: {c['primary']};
+    border: 1px solid {c['primary']};
+    border-radius: 8px;
+    padding: 0px;
+    font-size: 12px;
+    font-weight: 700;
+    color: {c['primary_fg']};
+    min-width: 32px;
+    min-height: 28px;
+}}
+/* === Selection toolbar =================================================== */
+QFrame#selectionBar {{
+    background-color: {c['primary_soft']};
+    border: 1px solid {c['primary']};
+    border-radius: 10px;
+}}
+QLabel#selectionCount {{
+    font-size: 12px;
+    font-weight: 700;
+    color: {c['primary']};
+}}
+/* === Detail modal ======================================================== */
+QDialog#recordDetail {{
+    background-color: {c['bg']};
+}}
+QFrame#detailImageFrame {{
+    background-color: {c['video_bg']};
+    border: 1px solid {c['border']};
+    border-radius: 14px;
+}}
+QLabel#detailLabel {{
+    font-size: 12px;
+    color: {c['muted']};
+}}
+QLabel#detailValue {{
+    font-size: 13px;
+    font-weight: 600;
+    color: {c['text']};
+}}
+QLabel#detailTitle {{
+    font-size: 18px;
+    font-weight: 700;
+    color: {c['text']};
+}}
+
+/* === Context menus ====================================================== */
+QMenu {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 10px;
+    padding: 6px;
+    color: {c['text']};
+    font-size: 13px;
+}}
+QMenu::item {{
+    padding: 8px 24px 8px 12px;
+    border-radius: 6px;
+    margin: 1px 2px;
+}}
+QMenu::item:selected {{
+    background-color: {c['primary_soft']};
+    color: {c['primary_soft_fg']};
+}}
+QMenu::separator {{
+    height: 1px;
+    background-color: {c['border_soft']};
+    margin: 4px 8px;
+}}
+QMenu::icon {{
+    padding-left: 8px;
+}}
+QMenu::item:disabled {{
+    color: {c['muted']};
+}}
+QMenu::item#dangerItem {{
+    color: {c['danger']};
+}}
 
 /* === Frameless feed scrolling =========================================== */
 QScrollArea#scrollFeed, QScrollArea#scrollFeed > QWidget > QWidget {{
