@@ -12,14 +12,16 @@ from .enrollment import FACE_BACKEND_LOCK
 from .face_backend import OpenCVFaceBackend
 from .geometry import association_cost, iou
 from .models import Detection, RecognitionResult
+from .quality import FaceQuality
 
 
 class RecognitionService:
-    def __init__(self, config, catalog, backend=None, anti_spoof=None):
+    def __init__(self, config, catalog, backend=None, anti_spoof=None, quality=None):
         if backend is None:
             backend = OpenCVFaceBackend()
         self.backend, self.config, self.catalog = backend, config, catalog
         self.anti_spoof = AntiSpoofService() if anti_spoof is None else anti_spoof
+        self.quality = FaceQuality(config) if quality is None else quality
         self.employee_indices = {}
         for index, employee in enumerate(catalog.employees):
             self.employee_indices.setdefault(employee.employee_id, []).append(index)
@@ -63,6 +65,22 @@ class RecognitionService:
             full_rgb = cv2.cvtColor(packet.frame, cv2.COLOR_BGR2RGB)
             with FACE_BACKEND_LOCK:
                 self.backend.promote(full_rgb, sx, sy)
+        quality = {i: self.quality.inspect(packet.frame, box) for i, box in enumerate(full_boxes)}
+        landmarks_map = {}
+        # Pose/landmark quality applies even when expressions are not required.
+        landmark_indices = [i for i in range(len(full_boxes)) if quality[i].ok]
+        if landmark_indices and hasattr(self.backend, "face_landmarks"):
+            if full_rgb is None:
+                full_rgb = cv2.cvtColor(packet.frame, cv2.COLOR_BGR2RGB)
+            landmark_boxes = [tuple(map(int, full_boxes[i])) for i in landmark_indices]
+            try:
+                with FACE_BACKEND_LOCK:
+                    landmarks_list = self.backend.face_landmarks(full_rgb, landmark_boxes, model="large")
+                landmarks_map = dict(zip(landmark_indices, landmarks_list))
+            except Exception:
+                logging.debug("Face landmark extraction failed", exc_info=True)
+        for i in landmark_indices:
+            quality[i] = self.quality.landmarks(quality[i], landmarks_map.get(i), full_boxes[i])
         hints, encode_indices, used_hints = {}, [], set()
         for index, box in enumerate(full_boxes):
             candidates = sorted((association_cost(box, hint.bounding_box), hint.track_id, hint)
@@ -81,30 +99,13 @@ class RecognitionService:
                    or packet.captured_at - hint.last_recognized >= cfg.stable_recheck_sec)
             if hint is not None and not hint.stable:
                 due = packet.sequence - hint.last_encoded_sequence >= cfg.recognition_interval
-            if due:
+            if due and quality[index].ok:
                 encode_indices.append(index)
         encodings = []
-        landmarks_map = {}
         if encode_indices:
-            encode_boxes = [(full_boxes if full_rgb is not None else boxes)[i] for i in encode_indices]
+            encode_boxes = [(full_boxes if isinstance(self.backend, OpenCVFaceBackend) else boxes)[i] for i in encode_indices]
             with FACE_BACKEND_LOCK:
-                encodings = self.backend.face_encodings(full_rgb if full_rgb is not None else rgb, encode_boxes)
-        # Sample eyes on every detection, independently of expensive encodings.
-        # Quarter-size detection images do not preserve enough eye detail.
-        if cfg.attendance_mode != "face" and full_boxes and hasattr(self.backend, "face_landmarks"):
-            if full_rgb is None:
-                full_rgb = cv2.cvtColor(packet.frame, cv2.COLOR_BGR2RGB)
-            landmark_boxes = [(max(0, int(t)), min(width, int(r)),
-                               min(height, int(b)), max(0, int(l)))
-                              for t, r, b, l in full_boxes]
-            try:
-                with FACE_BACKEND_LOCK:
-                    landmarks_list = self.backend.face_landmarks(
-                        full_rgb, landmark_boxes, model="large")
-                landmarks_map = dict(enumerate(landmarks_list))
-            except Exception:
-                # Empty evidence is intentionally rejected by the liveness gate.
-                logging.debug("Eye landmark extraction failed", exc_info=True)
+                encodings = self.backend.face_encodings(full_rgb if isinstance(self.backend, OpenCVFaceBackend) else rgb, encode_boxes)
         roi_map = {}
         for i in range(len(full_boxes)):
             t, r, b, l = full_boxes[i]
@@ -121,6 +122,11 @@ class RecognitionService:
             hint = hints[index]
             lm = landmarks_map.get(index)
             roi = roi_map.get(index)
+            if not quality[index].ok:
+                detections.append(Detection(box, hint_id=hint.track_id if hint else None,
+                    quality_ok=False, quality_prompt=quality[index].prompt,
+                    quality_metrics=quality[index].metrics))
+                continue
             # Always inspect the current presentation, even when identity is reused.
             if hasattr(self.anti_spoof, "inspect"):
                 inspection = self.anti_spoof.inspect(packet.frame, box)
@@ -132,7 +138,8 @@ class RecognitionService:
                 model_scores = ()
             detections.append(Detection(box, employee, distance, index in encode_indices,
                                         hint.track_id if hint else None, lm, roi,
-                                        spoof_score, spoof_error, model_scores))
+                                        spoof_score, spoof_error, model_scores,
+                                        quality[index].ok, quality[index].prompt, quality[index].metrics))
         return RecognitionResult(packet, tuple(detections), time.monotonic() - started)
 
 

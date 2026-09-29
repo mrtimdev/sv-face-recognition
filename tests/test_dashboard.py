@@ -180,7 +180,7 @@ class WindowTests(unittest.TestCase):
                 window.close()
                 application.processEvents()
 
-    def test_all_five_screens_build_and_switch(self):
+    def test_all_four_screens_build_and_switch(self):
         from PyQt6.QtCore import QTimer
         from face_attendance.dashboard.app import MainWindow
         application = _app()
@@ -188,7 +188,7 @@ class WindowTests(unittest.TestCase):
             window = MainWindow(temp_settings(directory), use_lock=False)
             window.show()
             try:
-                self.assertEqual(window.nav.count(), 5)
+                self.assertEqual(window.nav.count(), 4)
                 for row in range(window.nav.count()):
                     window.nav.setCurrentRow(row)
                     application.processEvents()
@@ -438,7 +438,8 @@ class EmployeesScreenTests(unittest.TestCase):
                 self.assertEqual(screen.rows[0]["employee_id"], original_id)
                 self.assertEqual(screen.rows[0]["employee_name"], "Edited employee")
                 self.assertEqual(screen.rows[0]["samples"], 2)
-                self.assertTrue(screen._enrollment_photo_path("Seed").exists())
+                self.assertTrue(screen._find_enrollment_photo("Seed", "Edited employee").exists())
+                self.assertEqual(screen._find_enrollment_photo("Seed", "Edited employee").parent.name, "samples")
                 self.assertFalse(screen.editor.isVisible())
                 screen._switch_to_wizard()
                 self.assertEqual(screen.name_edit.text(), "")

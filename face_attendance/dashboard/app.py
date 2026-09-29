@@ -368,7 +368,7 @@ class MainWindow(QMainWindow):
         status_layout.addStretch(1)
         footer_layout.addWidget(status_card)
 
-        version = QLabel(f"{APP_VERSION}\n\u00a9 2026 SV Technologies")
+        version = QLabel(f"{APP_VERSION}\n\u00a9 2026 SV Trucking Face Recognition. All rights reserved.")
         version.setObjectName("versionLabel")
         version.setContentsMargins(4, 0, 0, 0)
         footer_layout.addWidget(version)

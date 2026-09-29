@@ -2,7 +2,7 @@
 import json
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from .catalog import legacy_employee_id
 from .models import SaveResult
@@ -48,6 +48,7 @@ class AttendanceRepository:
                 if name not in columns:
                     conn.execute(f"ALTER TABLE attendance ADD COLUMN {name} {kind}")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS attendance_event_id ON attendance(event_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS attendance_recorded_time ON attendance(recorded_at_epoch)")
             conn.execute("CREATE INDEX IF NOT EXISTS attendance_employee_time ON attendance(employee_id, recorded_at_epoch)")
             conn.execute("""CREATE TABLE IF NOT EXISTS attendance_cooldowns (
                 employee_id TEXT PRIMARY KEY, last_capture_epoch REAL NOT NULL)""")
@@ -111,6 +112,17 @@ class AttendanceRepository:
     def load_cooldowns(self):
         return {row["employee_id"]: row["last_capture_epoch"] for row in
                 self.connection.execute("SELECT employee_id, last_capture_epoch FROM attendance_cooldowns")}
+
+    def verified_today(self):
+        """Unique employees with a committed record during the local calendar day."""
+        now = datetime.fromtimestamp(self.clock())
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        row = self.connection.execute(
+            "SELECT COUNT(DISTINCT employee_id) FROM attendance "
+            "WHERE recorded_at_epoch >= ? AND recorded_at_epoch < ? AND status='KNOWN'",
+            (start.timestamp(), end.timestamp())).fetchone()
+        return {"date": start.date().isoformat(), "count": int(row[0])}
 
     def record(self, job, snapshots):
         """Serialize competing writers, check eligibility, then commit row + cooldown + outbox."""

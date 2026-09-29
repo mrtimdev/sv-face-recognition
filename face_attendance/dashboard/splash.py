@@ -538,7 +538,7 @@ class SplashScreen(QWidget):
         p.setFont(self._get_font(10, False))
         p.setPen(QColor(_C["muted"]))
         p.drawText(QRectF(0, h - 44, w, 20), Qt.AlignmentFlag.AlignCenter,
-                   "© 2026 SV Technologies")
+                   "© 2026 SV Trucking Face Recognition. All rights reserved.")
         p.restore()
 
     def _draw_face_icon(self, p, size):

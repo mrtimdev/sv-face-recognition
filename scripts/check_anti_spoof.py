@@ -47,7 +47,7 @@ def main(argv=None):
     parser.add_argument('source', type=Path, help='Local image or camera-recorded attack/live video')
     parser.add_argument('--interval', type=float, default=.1, help='Seconds between samples')
     parser.add_argument('--max-samples', type=int, default=300)
-    parser.add_argument('--detection-scale', type=float, default=.25, help='Match the dashboard detection scale')
+    parser.add_argument('--detection-scale', type=float, default=.5, help='Match the dashboard detection scale')
     parser.add_argument('--presence-sec', type=float, default=3., help='Match the attendance dwell time')
     parser.add_argument('--expected', choices=('live', 'attack'), help='Return nonzero when the expected check fails')
     parser.add_argument('--report', type=Path, help='Optional JSON report destination')

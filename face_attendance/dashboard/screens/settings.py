@@ -64,6 +64,7 @@ class SettingsScreen(QWidget):
         column.setSpacing(14)
         column.addWidget(self._build_camera_group())
         column.addWidget(self._build_recognition_group())
+        column.addWidget(self._build_sound_group())
         column.addWidget(self._build_storage_group())
         column.addWidget(self._build_report_group())
         column.addWidget(self._build_telegram_group())
@@ -123,7 +124,7 @@ class SettingsScreen(QWidget):
                 ("camera_height", "Frame height", 120, 2160, 10, 0, ""),
                 ("target_fps", "Target FPS", 1, 120, 1, 1, "Requested from the driver, not guaranteed."),
                 ("detection_scale", "Detector scale", 0.1, 1.0, 0.05, 2,
-                 "Smaller is faster; 0.25 is the terminal default."),
+                 "0.50 is the default; 0.25 uses less CPU. Compare Analysis latency in Live Monitor."),
                 ("detection_interval", "Detection interval", 1, 30, 1, 0, "Camera frames between detections."),
                 ("recognition_interval", "Recognition interval", 1, 60, 1, 0,
                  "Frames between encodings for unconfirmed faces."),
@@ -145,6 +146,10 @@ class SettingsScreen(QWidget):
                 ("max_detect_faces", "Max faces to detect", 1, 20, 1, 0,
                  "Upper limit on simultaneous faces the engine will process per frame. "
                  "Higher values use more CPU; 5 is a sensible default for most setups."),
+                ("quality_min_face_px", "Minimum face pixels", 80, 300, 10, 0,
+                 "Shortest face dimension in the original frame. Smaller faces receive Move closer guidance."),
+                ("quality_min_sharpness", "Minimum sharpness", 1, 200, 1, 1,
+                 "Blur check on a 96 × 96 face image. Calibrate for your camera; this is not a liveness score."),
                 ("face_tolerance", "SFace cosine distance", 0.3, 0.9, 0.01, 2,
                  "Lower is stricter. Loosening this never fixes duplicate enrollment data."),
                 ("identity_margin", "Identity margin", 0.0, 0.3, 0.005, 3,
@@ -167,6 +172,19 @@ class SettingsScreen(QWidget):
             self._register(form, key, label, box, hint)
         return card
 
+    def _build_sound_group(self):
+        card, form = self._card_form("Built-in sounds", "Distinct local tones; no internet required.", icon="sliders")
+        for key, label in (("sounds_enabled", "Enable sounds"),
+                           ("sound_detection", "Face detected / no face in view"),
+                           ("sound_guidance", "Position and lighting guidance"),
+                           ("sound_unknown", "Not enrolled")):
+            self._register(form, key, label, QCheckBox())
+        note = QLabel("Verification, saved attendance, errors and camera disconnection have separate tones. "
+                      "Alerts are debounced and never overlap. Preview each tone in Live Monitor.")
+        note.setWordWrap(True)
+        form.addRow(note)
+        return card
+
     def _build_storage_group(self):
         card, form = self._card_form("Storage", "File paths for data, evidence and logs.", icon="database")
         for key, label, caption in (
@@ -175,7 +193,7 @@ class SettingsScreen(QWidget):
                 ("encodings_path", "Face encodings", "Versioned SFace templates used by the engine"),
                 ("employees_path", "Employee map", "employees.json label to HRM ID"),
                 ("log_path", "Observation log", "Throttled CSV of recognition observations"),
-                ("alert_path", "Alert sound", "Optional WAV played on a check-in")):
+                ("alert_path", "Custom success sound", "Optional WAV override; the built-in success tone is used when unavailable")):
             edit = QLineEdit()
             button = QPushButton("Browse")
             row = QHBoxLayout()

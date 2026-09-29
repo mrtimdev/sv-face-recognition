@@ -56,7 +56,7 @@ class Settings:
     camera_width: int = 1280
     camera_height: int = 720
     target_fps: float = 30.0
-    detection_scale: float = 0.25
+    detection_scale: float = 0.5
     detection_interval: int = 2
     recognition_interval: int = 3
     stable_recheck_sec: float = 0.5
@@ -67,6 +67,8 @@ class Settings:
     cooldown_sec: float = 30.0
     opencv_threads: int = 1
     max_detect_faces: int = 5
+    quality_min_face_px: int = 80
+    quality_min_sharpness: float = 25.0
     camera_timeout_ms: int = 2500
     reconnect_sec: float = 1.0
     persistence_queue_size: int = 8
@@ -76,6 +78,10 @@ class Settings:
     employees_path: str = str(Config().employees_path)
     log_path: str = str(Config().log_path)
     alert_path: str = str(Config().alert_path)
+    sounds_enabled: bool = True
+    sound_detection: bool = True
+    sound_guidance: bool = True
+    sound_unknown: bool = True
     theme: str = "dark"
     report_page_size: int = 100
     report_work_start: str = ""  # opt-in "Late" label in reports; "" disables it

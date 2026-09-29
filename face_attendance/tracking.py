@@ -134,7 +134,7 @@ class FaceTracker:
             track.ambiguous = False
         for i, track in enumerate(active):
             for other in active[i + 1:]:
-                if iou(track.bounding_box, other.bounding_box) > 0.2:
+                if iou(track.bounding_box, other.bounding_box) > 0:
                     track.ambiguous = other.ambiguous = True
                     self._invalidate(track)
                     self._invalidate(other)
@@ -212,6 +212,16 @@ class FaceTracker:
                 track.bounding_box = tuple(0.55 * d + 0.45 * old for d, old in
                                            zip(adjusted, track.bounding_box))
             track.visible, track.last_seen = True, packet.captured_at
+            track.quality_ok = detection.quality_ok
+            track.quality_prompt = detection.quality_prompt
+            track.quality_metrics = detection.quality_metrics
+            if not track.quality_ok:
+                self._invalidate(track)
+                if track.pending_event_id is None:
+                    track.transition(State.DETECTING, now)
+                if self.previous_gray is not None:
+                    track.points = self._features(self.previous_gray, track.bounding_box)
+                continue
             # A skipped encoding can only reuse the exact track that authorized the skip.
             if not detection.encoded and detection.hint_id != track.track_id:
                 self._invalidate(track)

@@ -40,7 +40,7 @@ class Config:
     camera_width: int = 1280
     camera_height: int = 720
     target_fps: float = 30.0
-    detection_scale: float = 0.25
+    detection_scale: float = 0.5
     detection_interval: int = 2
     recognition_interval: int = 3
     stable_recheck_sec: float = 0.5
@@ -64,6 +64,8 @@ class Config:
     camera_stale_sec: float = 1.0
     opencv_threads: int = 1
     max_detect_faces: int = 5
+    quality_min_face_px: int = 80
+    quality_min_sharpness: float = 25.0
     alert_cooldown_sec: float = 3.0
     log_cooldown_sec: float = 10.0
     encodings_path: Path = ROOT / "encodings_sface.pickle"
@@ -83,9 +85,11 @@ class Config:
                       "flash_duration", "shutter_duration", "success_duration", "retry_sec",
                       "persistence_queue_size", "camera_timeout_ms", "reconnect_sec",
                       "camera_stale_sec", "opencv_threads", "stable_recheck_sec",
-                      "max_detect_faces"):
+                      "max_detect_faces", "quality_min_face_px", "quality_min_sharpness"):
             if not math.isfinite(getattr(self, field)) or getattr(self, field) <= 0:
                 raise ValueError(f"{field} must be positive")
+        if self.quality_min_face_px < 80:
+            raise ValueError("quality_min_face_px must be at least 80 for anti-spoofing")
         if not 0 < self.detection_scale <= 1:
             raise ValueError("detection_scale must be in (0, 1]")
         if not 0 < self.face_tolerance < 1 or not 0 <= self.identity_margin < 1:

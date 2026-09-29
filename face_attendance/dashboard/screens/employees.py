@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import (QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxL
 
 from ...camera import CameraManager
 from ...enrollment import EnrollmentOutcome, EnrollmentService, FACE_BACKEND_LOCK, _atomic_write
+from ...storage import delete_capture
+from ...enrollment_photos import sample_photo_map
 from ..bridge import to_pixmap
 from ..icons import apply_button_icon, make_icon
 from ..theme import palette
@@ -34,6 +36,7 @@ PREVIEW_INTERVAL_MS = 33
 THUMB_SIZE = 56
 PROFILE_PHOTO_SIZE = 130
 GALLERY_THUMB_SIZE = 80
+ENROLLMENT_PREVIEW_HEIGHT = 380
 MAX_GALLERY_ITEMS = 12
 ENROLLMENT_PHOTOS_DIR = "enrollment_photos"
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
@@ -212,6 +215,7 @@ class EmployeesScreen(QWidget):
         self._engine_was_running = False
         self._thumb_cache = {}
         self._captures_map = {}
+        self._sample_photos_map = {}
         self._captures_dirty = True
         self._theme = settings.theme if hasattr(settings, "theme") else "dark"
         self._build()
@@ -369,8 +373,9 @@ class EmployeesScreen(QWidget):
         self.save_button = QPushButton("Save enrollment")
         self.save_button.setObjectName("primary")
 
-        self.hint = QLabel("Use a clear photo with only this employee in view. "
-                           "The first photo will appear in the employee directory.")
+        self.hint = QLabel("Add front-facing, slight left/right, and slight up/down views of the same person. "
+                           "Keep both eyes visible. Auto stops at 8 samples; Add samples appends more. "
+                           "Every accepted photo is saved; the first available sample is the directory image.")
         self.hint.setObjectName("screenSubtitle")
         self.hint.setWordWrap(True)
         card.add(self.hint)
@@ -385,7 +390,7 @@ class EmployeesScreen(QWidget):
 
         self.capture_video = VideoView(widget, message="Preview off",
                                        subtitle="Start the preview to capture samples")
-        self.capture_video.setMinimumHeight(200)
+        self.capture_video.setMinimumHeight(ENROLLMENT_PREVIEW_HEIGHT)
         frame = QFrame()
         frame.setObjectName("cameraFrame")
         frame_layout = QVBoxLayout(frame)
@@ -425,6 +430,7 @@ class EmployeesScreen(QWidget):
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(8)
         self.drop = DropLabel("Drop a photo here\nor choose one below")
+        self.drop.setMinimumHeight(ENROLLMENT_PREVIEW_HEIGHT)
         self.drop.setObjectName("panel")
         layout.addWidget(self.drop, 1)
         row = QHBoxLayout()
@@ -445,6 +451,7 @@ class EmployeesScreen(QWidget):
     def _build_profile_card(self):
         card = Card("Employee Profile", "", icon="user", theme=self._theme)
         self.profile_card_widget = card
+        card.body.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         header = QHBoxLayout()
         header.setSpacing(16)
@@ -453,7 +460,7 @@ class EmployeesScreen(QWidget):
         self.profile_photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.profile_photo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.profile_photo.mousePressEvent = self._profile_photo_clicked
-        header.addWidget(self.profile_photo)
+        header.addWidget(self.profile_photo, 0, Qt.AlignmentFlag.AlignTop)
 
         info = QVBoxLayout()
         info.setSpacing(4)
@@ -476,6 +483,31 @@ class EmployeesScreen(QWidget):
         header.addLayout(info, 1)
         card.add_layout(header)
 
+        enrolled_header = QHBoxLayout()
+        enrolled_title = QLabel("Enrolled samples")
+        enrolled_title.setObjectName("sectionTitle")
+        self.enrolled_count_label = QLabel()
+        self.enrolled_count_label.setObjectName("screenSubtitle")
+        enrolled_header.addWidget(enrolled_title)
+        enrolled_header.addStretch()
+        enrolled_header.addWidget(self.enrolled_count_label)
+        card.add_layout(enrolled_header)
+        self.enrolled_scroll = QScrollArea()
+        self.enrolled_scroll.setWidgetResizable(True)
+        self.enrolled_scroll.setObjectName("panel")
+        self.enrolled_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.enrolled_scroll.setFixedHeight(GALLERY_THUMB_SIZE + 66)
+        self.enrolled_container = QWidget()
+        self.enrolled_layout = QHBoxLayout(self.enrolled_container)
+        self.enrolled_layout.setContentsMargins(8, 8, 8, 8)
+        self.enrolled_layout.setSpacing(8)
+        self.enrolled_scroll.setWidget(self.enrolled_container)
+        card.add(self.enrolled_scroll)
+        self.enrolled_hint = QLabel()
+        self.enrolled_hint.setObjectName("screenSubtitle")
+        self.enrolled_hint.setWordWrap(True)
+        card.add(self.enrolled_hint)
+
         gallery_header = QHBoxLayout()
         gallery_title = QLabel("Evidence captures")
         gallery_title.setObjectName("sectionTitle")
@@ -492,7 +524,7 @@ class EmployeesScreen(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.gallery_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.gallery_scroll.setFixedHeight(GALLERY_THUMB_SIZE + 20)
+        self.gallery_scroll.setFixedHeight(GALLERY_THUMB_SIZE + 68)
         self.gallery_scroll.setObjectName("panel")
         self.gallery_container = QWidget()
         self.gallery_layout = QHBoxLayout(self.gallery_container)
@@ -525,6 +557,7 @@ class EmployeesScreen(QWidget):
         row.addStretch()
         row.addWidget(self.p_enroll_btn)
         card.add_layout(row)
+        card.body.addStretch(1)
 
         return card
 
@@ -656,6 +689,9 @@ class EmployeesScreen(QWidget):
             return False
 
     def _find_enrollment_photo(self, label, display_name):
+        for photo in self._sample_photos_map.get(label, []):
+            if photo is not None and photo.is_file():
+                return photo
         path = self._enrollment_photo_path(label)
         if path.is_file():
             return path
@@ -736,7 +772,7 @@ class EmployeesScreen(QWidget):
         self.wizard_card.title_label.setText(title)
         self.wizard_card.header.layout().setStretch(1, 1)
         self.editor.setWindowTitle(title)
-        self.wizard_card.set_subtitle("New face samples improve matching. The first photo becomes the directory image."
+        self.wizard_card.set_subtitle("Add more views of this employee. Every accepted sample photo is saved."
                                      if row else "Enter their details, then capture or upload a clear face photo.")
         self.save_button.setText("Save photos" if row else "Add employee")
         self.right_stack.setCurrentIndex(0)
@@ -788,6 +824,8 @@ class EmployeesScreen(QWidget):
         # -- text info --
         safe = _safe_name(row["employee_name"])
         captures = self._captures_map.get(safe, [])
+        self._profile_row = dict(row)
+        self._profile_captures = tuple(captures)
         self.profile_name.setText(row["employee_name"])
         self.profile_id_label.setText(
             f"ID: {row['employee_id']}" if row["employee_id"] else "No employee ID")
@@ -812,8 +850,55 @@ class EmployeesScreen(QWidget):
         # -- enable/disable actions --
         self.p_del_btn.setEnabled(row["samples"] > 0)
 
+        self._populate_enrolled_samples(row)
+
         # -- gallery shows evidence captures --
         self._populate_gallery(captures)
+
+    def _populate_enrolled_samples(self, row):
+        while self.enrolled_layout.count():
+            item = self.enrolled_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        photos = self._sample_photos_map.get(row["name"], [])
+        available = 0
+        for index in range(row["samples"]):
+            path = photos[index] if index < len(photos) else None
+            pixmap = self._thumbnail_for(path, GALLERY_THUMB_SIZE) if path else None
+            tile = QWidget()
+            tile.setFixedWidth(104)
+            column = QVBoxLayout(tile)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(6)
+            photo = QLabel()
+            photo.setFixedSize(GALLERY_THUMB_SIZE, GALLERY_THUMB_SIZE)
+            photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            photo.setObjectName("panel")
+            if pixmap is not None and not pixmap.isNull():
+                available += 1
+                photo.setPixmap(pixmap)
+                photo.setCursor(Qt.CursorShape.PointingHandCursor)
+                photo.setToolTip(f"Sample {index + 1} · Click to view full size")
+                photo.mousePressEvent = lambda _event, p=path: self._open_image(p)
+            else:
+                photo.setText("Photo\nunavailable")
+                photo.setToolTip("The face encoding is enrolled, but its original photo is unavailable.")
+            photo.setAccessibleName(f"Enrolled sample {index + 1}")
+            column.addWidget(photo, 0, Qt.AlignmentFlag.AlignHCenter)
+            caption = QLabel(f"Sample {index + 1}")
+            caption.setObjectName("screenSubtitle")
+            caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            column.addWidget(caption)
+            self.enrolled_layout.addWidget(tile)
+        self.enrolled_layout.addStretch()
+        total = row["samples"]
+        self.enrolled_count_label.setText(f"{total} enrolled · {available} photos")
+        self.enrolled_hint.setText(
+            "Some samples have no saved original photo. Their encodings still work for matching. "
+            "Add samples to save new views; old photos cannot be recovered from encodings."
+            if available < total else
+            "Click a sample to view its original photo. These samples are used for face matching."
+            if total else "No enrolled samples yet. Add samples to enroll this employee.")
 
     def _populate_gallery(self, captures):
         """Fill the scrollable gallery with clickable thumbnails."""
@@ -834,6 +919,11 @@ class EmployeesScreen(QWidget):
             return
 
         for path in shown:
+            tile = QWidget()
+            tile.setFixedWidth(104)
+            column = QVBoxLayout(tile)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(6)
             thumb = self._thumbnail_for(path, GALLERY_THUMB_SIZE)
             label = QLabel()
             label.setFixedSize(GALLERY_THUMB_SIZE, GALLERY_THUMB_SIZE)
@@ -847,7 +937,17 @@ class EmployeesScreen(QWidget):
                     _placeholder_pixmap(GALLERY_THUMB_SIZE, "?", self._theme))
             # Closure to capture `path`
             label.mousePressEvent = (lambda p: lambda e: self._open_image(p))(path)
-            self.gallery_layout.addWidget(label)
+            column.addWidget(label, 0, Qt.AlignmentFlag.AlignHCenter)
+            delete = QPushButton("Delete")
+            delete.setObjectName("danger")
+            delete.setProperty("evidenceDelete", True)
+            delete.setAccessibleName(f"Delete evidence capture {path.name}")
+            delete.setToolTip("Delete this evidence image and its full-frame companion")
+            delete.setFixedHeight(32)
+            apply_button_icon(delete, "trash", palette(self._theme)["danger"], size=14)
+            delete.clicked.connect(lambda _checked=False, p=path: self._delete_evidence(p))
+            column.addWidget(delete)
+            self.gallery_layout.addWidget(tile)
 
         self.gallery_layout.addStretch()
 
@@ -858,6 +958,29 @@ class EmployeesScreen(QWidget):
                 "Click any photo to view full size.")
         else:
             self.gallery_hint.setText("Click any photo to view full size")
+
+    def _delete_evidence(self, path):
+        row = getattr(self, "_profile_row", None)
+        if row is None or path not in getattr(self, "_profile_captures", ()):
+            return
+        answer = QMessageBox.question(
+            self.editor, "Delete evidence capture",
+            f"Permanently delete this capture for {row['employee_name']}?\n\n{path.name}\n\n"
+            "The face crop, full-frame image and capture metadata will be removed. "
+            "The attendance record and enrolled face samples will be kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            removed = delete_capture(path, self.settings.capture_dir)
+        except (OSError, ValueError) as exc:
+            self._notify(f"Could not finish deleting the capture: {exc}", "bad")
+        else:
+            self._notify("Evidence capture deleted." if removed else "This capture was already removed.", "ok")
+        self._invalidate_captures()
+        self.reload()
+        self._populate_profile(row)
 
     def _profile_photo_clicked(self, event):
         path = getattr(self, "_profile_photo_path", "")
@@ -1176,8 +1299,9 @@ class EmployeesScreen(QWidget):
             if self.preview_on:
                 self.probe_timer.start()
             return
-        # Save the first sample as the enrollment profile photo.
-        photo_saved = self._save_enrollment_photo(
+        # New enrollment persists each accepted photo in the worker alongside
+        # its encoding. Keep compatibility with older/custom enrollment runners.
+        photo_saved = bool(outcome.photo_paths) or self._save_enrollment_photo(
             outcome.name, getattr(self, "_enrollment_save_samples", []))
         self._enrollment_save_samples = []
         self.pending.clear()
@@ -1199,6 +1323,7 @@ class EmployeesScreen(QWidget):
         self._captures_dirty = True
 
     def reload(self):
+        self._sample_photos_map = sample_photo_map(self.settings.encodings_path)
         if self._captures_dirty:
             self._captures_map = self._scan_captures()
             self._captures_dirty = False

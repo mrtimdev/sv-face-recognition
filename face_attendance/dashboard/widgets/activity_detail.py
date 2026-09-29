@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QDialog, QFrame, QGraphicsBlurEffect, QHBoxLayout,
 
 from ..icons import apply_button_icon
 from ..theme import palette
+from ...enrollment_photos import sample_photo_map
 
 
 def load_photo(path, limit=1200):
@@ -31,10 +32,16 @@ def enrollment_photos(settings, employee_id, rows):
     directory = Path(settings.encodings_path).parent / "enrollment_photos"
     safe = lambda label: "".join(c if c.isalnum() or c in "-_" else "_" for c in str(label))[:60]
     photos = []
+    saved = sample_photo_map(settings.encodings_path)
     for row in rows:
         if str(row["employee_id"]) != str(employee_id):
             continue
         label = row["name"]
+        saved_samples = [path for path in saved.get(label, [])
+                         if path is not None and path.is_file()]
+        if saved_samples:
+            photos.extend(path for path in saved_samples if path not in photos)
+            continue
         digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:12]
         path = directory / f"{safe(label)}_{digest}.jpg"
         if not path.is_file():

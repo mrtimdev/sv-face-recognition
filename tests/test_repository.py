@@ -34,6 +34,20 @@ class RepositoryTests(unittest.TestCase):
     def count(self, table):
         return self.repo.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
+    def test_daily_total_counts_unique_employees_and_survives_restart(self):
+        self.now = datetime(2026, 9, 29, 10, 0).timestamp()
+        self.assertEqual(self.repo.verified_today(), {"date": "2026-09-29", "count": 0})
+        self.repo.record(self.job, self.snapshots)
+        self.now += 31
+        self.repo.record(replace(self.job, event_id="second"), self.snapshots)
+        self.repo.record(replace(self.job, event_id="other", employee_id="E002"), self.snapshots)
+        self.assertEqual(self.repo.verified_today()["count"], 2)
+        self.repo.close()
+        self.repo = AttendanceRepository(self.db, clock=lambda: self.now)
+        self.assertEqual(self.repo.verified_today()["count"], 2)
+        self.now = datetime(2026, 9, 30, 0, 0).timestamp()
+        self.assertEqual(self.repo.verified_today(), {"date": "2026-09-30", "count": 0})
+
     def test_atomic_record_outbox_idempotency_and_cooldown(self):
         saved = self.repo.record(self.job, self.snapshots)
         self.assertEqual(saved.outcome, "saved")

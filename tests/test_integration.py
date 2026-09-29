@@ -18,6 +18,7 @@ from face_attendance.recognition import RecognitionService
 from face_attendance.tracking import FaceTracker
 from face_attendance.liveness import LivenessChecker
 from face_attendance.runtime import AttendanceApplication
+from tests.quality_helpers import PassingQuality
 from tests.test_attendance import FakePersistence
 from tests.test_liveness import landmarks, OPEN_EYE, CLOSED_EYE, response_for
 
@@ -68,10 +69,10 @@ class IntegrationTests(unittest.TestCase):
     def test_brief_flow_interruptions_resume_and_capture_once(self):
         frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
         catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.zeros((1, 128)))
-        config = Config()
+        config = replace(Config(), detection_scale=.25)
         tracker, backend, worker = FaceTracker(config), ExpressionBackend(), FakePersistence()
         backend.faces, backend.checker = 1, tracker.liveness
-        recognition = RecognitionService(config, catalog, backend, anti_spoof=FakeAntiSpoof())
+        recognition = RecognitionService(config, catalog, backend, quality=PassingQuality(), anti_spoof=FakeAntiSpoof())
         service = AttendanceService(config, worker)
         worker.startup.put(({}, ""))
         saved_at = []
@@ -103,10 +104,10 @@ class IntegrationTests(unittest.TestCase):
         catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.zeros((1, 128)))
         for mode in ("face", "blink"):
             with self.subTest(mode=mode):
-                config = replace(Config(), attendance_mode=mode, stable_recheck_sec=1.0)
+                config = replace(Config(), detection_scale=.25, attendance_mode=mode, stable_recheck_sec=1.0)
                 tracker, backend, worker, pad = FaceTracker(config), ExpressionBackend(), FakePersistence(), FakeAntiSpoof()
                 backend.faces, backend.checker = 1, tracker.liveness
-                recognition = RecognitionService(config, catalog, backend, anti_spoof=pad)
+                recognition = RecognitionService(config, catalog, backend, quality=PassingQuality(), anti_spoof=pad)
                 service = AttendanceService(config, worker)
                 worker.startup.put(({}, ""))
                 for seq in range(150):
@@ -135,7 +136,7 @@ class IntegrationTests(unittest.TestCase):
                  ("blink_and_smile", "both", .99, True))
         for mode, action, score, expected in cases:
             with self.subTest(mode=mode, action=action, score=score):
-                config = replace(Config(), attendance_mode=mode, capture_after_sec=.5)
+                config = replace(Config(), detection_scale=.25, attendance_mode=mode, capture_after_sec=.5)
                 tracker, backend, worker = FaceTracker(config), Backend(), FakePersistence()
                 backend.faces = 1
                 landmark_calls = []
@@ -149,7 +150,7 @@ class IntegrationTests(unittest.TestCase):
                     return [landmarks(smile=ready and action in ("smile", "both"))]
 
                 backend.face_landmarks = expressions
-                recognition = RecognitionService(config, catalog, backend, anti_spoof=FakeAntiSpoof(score))
+                recognition = RecognitionService(config, catalog, backend, quality=PassingQuality(), anti_spoof=FakeAntiSpoof(score))
                 service = AttendanceService(config, worker)
                 worker.startup.put(({}, ""))
                 for seq in range(45):
@@ -161,7 +162,7 @@ class IntegrationTests(unittest.TestCase):
                     service.update(tracker.tracks, packet, now, True)
                 self.assertEqual(len(worker.jobs), int(expected))
                 if mode == "face":
-                    self.assertEqual(landmark_calls, [])
+                    self.assertTrue(landmark_calls)  # Pose quality also needs landmarks in face mode.
 
     def test_main_loop_without_landmarks_blocks_records_and_releases_workers(self):
         frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
@@ -219,12 +220,12 @@ class IntegrationTests(unittest.TestCase):
                 conn.close()
 
     def test_two_employees_auto_capture_and_restart_cooldown(self):
-        config = Config()
+        config = replace(Config(), detection_scale=.25)
         frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
         catalog = SimpleNamespace(employees=(Employee("A", "Alice"), Employee("B", "Bob")),
                                   encodings=np.array([np.zeros(128), np.ones(128)]))
         backend = ExpressionBackend()
-        recognition = RecognitionService(config, catalog, backend, anti_spoof=FakeAntiSpoof())
+        recognition = RecognitionService(config, catalog, backend, quality=PassingQuality(), anti_spoof=FakeAntiSpoof())
         tracker = FaceTracker(config)
         tracker.liveness = LivenessChecker()
         backend.checker = tracker.liveness
@@ -259,12 +260,12 @@ class IntegrationTests(unittest.TestCase):
             self.test_two_employees_auto_capture_and_restart_cooldown()
 
     def test_early_departure_and_return_require_new_continuous_verification(self):
-        config = Config()
+        config = replace(Config(), detection_scale=.25)
         frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
         catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.array([np.zeros(128)]))
         backend = ExpressionBackend()
         backend.faces = 1
-        recognition, tracker = RecognitionService(config, catalog, backend, anti_spoof=FakeAntiSpoof()), FaceTracker(config)
+        recognition, tracker = RecognitionService(config, catalog, backend, quality=PassingQuality(), anti_spoof=FakeAntiSpoof()), FaceTracker(config)
         tracker.liveness = LivenessChecker()
         backend.checker = tracker.liveness
         worker, submitted = FakePersistence(), []
@@ -285,14 +286,14 @@ class IntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(submitted[0], 15.5)
 
     def test_static_phone_or_paper_face_never_creates_attendance(self):
-        config = Config()
+        config = replace(Config(), detection_scale=.25)
         frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
         catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.zeros((1, 128)))
         backend = BlinkBackend()
         backend.faces = 1
         # A high-texture photograph with valid but permanently open eyes.
         backend.now = 0
-        recognition, tracker = RecognitionService(config, catalog, backend, anti_spoof=FakeAntiSpoof()), FaceTracker(config)
+        recognition, tracker = RecognitionService(config, catalog, backend, quality=PassingQuality(), anti_spoof=FakeAntiSpoof()), FaceTracker(config)
         worker = FakePersistence()
         service = AttendanceService(config, worker)
         worker.startup.put(({}, ""))
@@ -311,12 +312,12 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(worker.events, [])
 
     def test_blinking_replay_rejected_by_pad_never_creates_attendance(self):
-        config = Config()
+        config = replace(Config(), detection_scale=.25)
         frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
         catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.zeros((1, 128)))
         backend = BlinkBackend()
         backend.faces = 1
-        recognition, tracker = RecognitionService(config, catalog, backend, anti_spoof=FakeAntiSpoof(.01)), FaceTracker(config)
+        recognition, tracker = RecognitionService(config, catalog, backend, quality=PassingQuality(), anti_spoof=FakeAntiSpoof(.01)), FaceTracker(config)
         worker = FakePersistence()
         service = AttendanceService(config, worker)
         worker.startup.put(({}, ""))

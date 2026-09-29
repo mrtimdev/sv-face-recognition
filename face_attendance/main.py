@@ -18,7 +18,7 @@ def parser():
     p.add_argument("--width", type=int, help="Requested camera width; default 1280")
     p.add_argument("--height", type=int, help="Requested camera height; default 720")
     p.add_argument("--fps", type=float, help="Target camera/UI FPS; default 30")
-    p.add_argument("--scale", type=float, help="Detector resize factor; default 0.25")
+    p.add_argument("--scale", type=float, help="Detector resize factor; default 0.5")
     p.add_argument("--db", type=Path, help="SQLite database path")
     p.add_argument("--captures", type=Path, help="Evidence image directory")
     p.add_argument("--encodings", type=Path, help="Existing trusted encodings.pickle")

@@ -69,7 +69,7 @@ class AttendanceService:
 
     def observe(self, tracks, now, wall_time):
         for track in tracks.values():
-            if not track.visible:
+            if not track.visible or not track.quality_ok:
                 continue
             if track.identity_valid and not (
                     track.liveness_ok and 0 <= now - track.last_liveness_at <= MAX_SAMPLE_GAP
@@ -88,7 +88,7 @@ class AttendanceService:
         captures = []
         cfg = self.config
         for track in tracks.values():
-            fresh = (camera_connected and packet is not None and track.visible and not track.ambiguous
+            fresh = (camera_connected and packet is not None and track.visible and track.quality_ok and not track.ambiguous
                      and now - packet.captured_at <= cfg.camera_stale_sec
                      and now - track.last_seen <= cfg.detection_fresh_sec
                      and now - track.last_recognized <= cfg.identity_fresh_sec)

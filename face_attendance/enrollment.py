@@ -17,7 +17,9 @@ from pathlib import Path
 import cv2
 
 from .catalog import legacy_employee_id, load_employee_map
-from .template_store import read_templates, template_payload
+from .template_store import (read_templates, template_payload, read_template_bundle,
+                             preserve_photo_references)
+from .enrollment_photos import save_sample_photo, remove_sample_photos
 
 
 # Serialize model calls shared by enrollment workers and live recognition.
@@ -45,6 +47,7 @@ class EnrollmentOutcome:
     total_samples: int = 0
     total_people: int = 0
     issues: tuple = ()
+    photo_paths: tuple = ()
 
     @property
     def ok(self):
@@ -77,8 +80,10 @@ def read_encodings(path):
     return read_templates(path)
 
 
-def write_encodings(path, data):
-    _atomic_write(path, lambda handle: pickle.dump(template_payload(data), handle))
+def write_encodings(path, data, photos=None):
+    if photos is None:
+        photos = preserve_photo_references(path, data)
+    _atomic_write(path, lambda handle: pickle.dump(template_payload(data, photos), handle))
 
 
 def write_employee(path, name, employee_id):
@@ -221,6 +226,7 @@ class EnrollmentService:
         if not images:
             return EnrollmentOutcome("no_face", "No captured sample to enroll", name=name)
         check_quality = self.check_quality if check_quality is None else check_quality
+        created_photos = []
         try:
             conflict, message, previous = self._check_name(name, employee_id)
             if conflict:
@@ -234,15 +240,21 @@ class EnrollmentService:
                 status, payload, sample_issues = outcomes[0]
                 return EnrollmentOutcome(status, payload, name=name, employee_id=employee_id,
                                          issues=tuple(sample_issues))
-            data = read_encodings(self.encodings_path)
+            data, photos = read_template_bundle(self.encodings_path)
             data.setdefault(name, [])
+            photos.setdefault(name, [])
+            for image, (status, _, _) in zip(images, outcomes):
+                if status == "ok":
+                    created_photos.append(save_sample_photo(self.encodings_path, image))
             data[name].extend(encodings)
+            photos[name].extend(path.name for path in created_photos)
             if employee_id:
                 canonical = write_employee(self.employees_path, name, employee_id)
             else:
                 canonical = previous.name if previous else name
-            write_encodings(self.encodings_path, data)
-        except (ValueError, OSError, pickle.UnpicklingError, EOFError, AttributeError) as exc:
+            write_encodings(self.encodings_path, data, photos=photos)
+        except (ValueError, OSError, pickle.UnpicklingError, EOFError, AttributeError, cv2.error) as exc:
+            remove_sample_photos(self.encodings_path, [path.name for path in created_photos])
             return EnrollmentOutcome("error", str(exc), name=name, employee_id=employee_id)
 
         final_id = employee_id or (previous.employee_id if previous else legacy_employee_id(name))
@@ -252,7 +264,7 @@ class EnrollmentService:
         return EnrollmentOutcome("enrolled", message, name=name, employee_id=final_id,
                                  employee_name=canonical, samples_added=len(encodings),
                                  total_samples=len(data[name]), total_people=len(data),
-                                 issues=tuple(rejected))
+                                 issues=tuple(rejected), photo_paths=tuple(str(path) for path in created_photos))
 
     def update_employee(self, name, display_name):
         """Edit the display name while retaining enrollment labels and permanent IDs.
@@ -279,11 +291,13 @@ class EnrollmentService:
 
     def delete_employee(self, name):
         """Remove a label from the pickle and the mapping; attendance history is kept."""
-        data = read_encodings(self.encodings_path)
+        data, photos = read_template_bundle(self.encodings_path)
         if name not in data:
             raise ValueError(f"{name!r} is not enrolled")
+        removed_photos = photos.pop(name, [])
         removed = len(data.pop(name))
-        write_encodings(self.encodings_path, data)
+        write_encodings(self.encodings_path, data, photos=photos)
+        remove_sample_photos(self.encodings_path, removed_photos)
         records = load_employee_map(self.employees_path)
         if name in records:
             remaining = {key: {"employee_id": value.employee_id, "name": value.name}
@@ -294,14 +308,16 @@ class EnrollmentService:
         return removed
 
     def delete_sample(self, name, index):
-        data = read_encodings(self.encodings_path)
+        data, photos = read_template_bundle(self.encodings_path)
         samples = data.get(name)
         if not samples:
             raise ValueError(f"{name!r} has no samples")
         if not 0 <= index < len(samples):
             raise ValueError("Sample index out of range")
+        removed_photo = photos[name].pop(index)
         samples.pop(index)
         if not samples:
             return self.delete_employee(name)
-        write_encodings(self.encodings_path, data)
+        write_encodings(self.encodings_path, data, photos=photos)
+        remove_sample_photos(self.encodings_path, [removed_photo])
         return 1

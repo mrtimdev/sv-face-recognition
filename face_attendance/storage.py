@@ -23,6 +23,31 @@ def evidence_files(snapshot):
     return Path(snapshot), context, context.with_suffix(".json")
 
 
+def delete_capture(snapshot, directory):
+    """Delete one gallery capture and its companions, preserving attendance rows.
+
+    Keep the thumbnail until companion deletion succeeds so a filesystem error
+    leaves the capture visible for retry. Never traverse outside the capture root.
+    """
+    root = Path(directory).resolve()
+    path = Path(snapshot)
+    if path.parent.resolve() != root or path.suffix.lower() != ".jpg":
+        raise ValueError("Select an evidence image in the configured capture folder")
+    artifacts = evidence_files(path)
+    for artifact in artifacts:
+        expected = root if artifact == path else root / "context"
+        if artifact.is_symlink() or artifact.resolve().parent != expected:
+            raise ValueError("Evidence links outside the capture folder cannot be deleted here")
+    removed = 0
+    for artifact in (*artifacts[1:], artifacts[0]):
+        try:
+            artifact.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+    return removed
+
+
 class SnapshotService:
     def __init__(self, directory):
         self.directory = Path(directory)

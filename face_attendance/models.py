@@ -64,6 +64,9 @@ class Detection:
     spoof_score: Optional[float] = None
     spoof_error: str = ""
     spoof_model_scores: tuple = ()
+    quality_ok: bool = True
+    quality_prompt: str = ""
+    quality_metrics: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,9 @@ class FaceTrack:
     spoof_ok: bool = False
     spoof_score: Optional[float] = None
     spoof_model_scores: tuple = ()
+    quality_ok: bool = True
+    quality_prompt: str = ""
+    quality_metrics: tuple = ()
     spoof_prompt: str = "Checking real face..."
     last_spoof_at: float = float("-inf")
     spoof_progress: float = 0.0

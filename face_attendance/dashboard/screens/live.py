@@ -16,7 +16,7 @@ from ...config import ATTENDANCE_MODES
 from ...storage import context_path
 from ..icons import IconLabel, apply_button_icon
 from ..bridge import to_pixmap
-from ..sound import SoundPlayer
+from ...sound_events import EventSounds, SOUND_LABELS
 from ..theme import palette, tone_color
 from ..widgets import (ActivityFeed, Card, StatCard,
                        ToastBar, ToggleSwitch, VideoView)
@@ -77,7 +77,7 @@ class LiveScreen(QWidget):
         self._theme = settings.theme
         self._camera_status = "STOPPED"
         self._storage_ready = False
-        self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
+        self._sound = EventSounds(settings)
         self._build()
         self._connect()
         self._sync_running(engine.running)
@@ -106,7 +106,7 @@ class LiveScreen(QWidget):
         cards_row.setSpacing(12)
         card_defs = (
             ("enrolled", "Enrolled", "-", "users", "blue", "Employees in catalog"),
-            ("verified", "Verified Today", "0", "check-circle", "green", "Successful check-ins"),
+            ("verified", "Verified Today", "0", "check-circle", "green", "Employees checked in today"),
             ("waiting", "Waiting", "-", "clock", "orange", "Presence accumulating"),
             ("unknown", "Unknown", "0", "alert", "purple", "Faces not in catalog"),
         )
@@ -174,6 +174,12 @@ class LiveScreen(QWidget):
         actions.addWidget(self.apply_requirements_button)
         self.test_sound_button = QPushButton("Test alert sound")
         self.test_sound_button.clicked.connect(self._test_sound)
+        self.sound_choice = QComboBox()
+        for key, label in SOUND_LABELS.items():
+            self.sound_choice.addItem(label, key)
+        self.sound_choice.setCurrentIndex(self.sound_choice.findData("success"))
+        self.sound_choice.setAccessibleName("Sound to preview")
+        actions.addWidget(self.sound_choice)
         actions.addWidget(self.test_sound_button)
         card.add_layout(actions)
         self.requirement_group.buttonToggled.connect(lambda *_: self._update_requirements_note())
@@ -220,8 +226,8 @@ class LiveScreen(QWidget):
 
     def _test_sound(self):
         if not self._sound.available:
-            self.toast.show_message("Alert sound unavailable. Check the WAV path in Settings.", "bad")
-        elif not self._sound.play():
+            self.toast.show_message("Audio playback unavailable on this system.", "bad")
+        elif not self._sound.play(self.sound_choice.currentData(), preview=True):
             self.toast.show_message("Sound is busy or playback failed; try again shortly.", "warn")
 
     def _build_camera_card(self):
@@ -441,6 +447,7 @@ class LiveScreen(QWidget):
     def _connect(self):
         self.engine.frameReady.connect(self.on_frame)
         self.engine.statsReady.connect(self.on_stats)
+        self.engine.tracksReady.connect(self._on_tracks)
         self.engine.captureTriggered.connect(self.on_capture)
         self.engine.attendanceSaved.connect(self.on_saved)
         self.engine.attendanceFailed.connect(self.on_failed)
@@ -530,7 +537,8 @@ class LiveScreen(QWidget):
         self.cards["enrolled"].set_value(stats.get("enrolled", 0))
         self.cards["enrolled"].set_hint(describe_source(self.settings.source))
         known = stats.get("known_faces", 0)
-        self.cards["verified"].set_value(known, "ok" if known else "idle")
+        verified = stats.get("verified_today")
+        self.cards["verified"].set_value("-" if verified is None else verified, "ok" if verified else "idle")
         presence = stats.get("presence", 0.0)
         target = max(0.1, float(stats.get("capture_after", 3.0)))
         self.cards["waiting"].set_value(
@@ -543,6 +551,7 @@ class LiveScreen(QWidget):
         # Camera strip + overlay chips
         status = stats.get("status", "STOPPED")
         self._camera_status = status
+        self._sound.camera(status == "CONNECTED", self.engine.running and not self.engine.paused)
         self._storage_ready = stats.get("storage_ready", False)
         fps = stats.get("camera_fps", 0)
         self.cam_fps_label.setText(f"FPS: {fps:.1f}")
@@ -566,7 +575,8 @@ class LiveScreen(QWidget):
         self.preview_hud.set_metrics(self.video._resolution, fps)
         queue = stats.get("queue", 0)
         queue_max = max(1, stats.get("queue_max", 1))
-        self.cam_pipeline.setText(f"Pipeline: {queue}/{queue_max} queued")
+        latency = stats.get("latency_ms", 0)
+        self.cam_pipeline.setText(f"Analysis: {latency:.0f} ms · Queue: {queue}/{queue_max}")
 
         # Live badge visibility
         connected = status == "CONNECTED"
@@ -588,12 +598,15 @@ class LiveScreen(QWidget):
                                 stats.get("recognition_error", "")) if t]
         if self.engine.running:
             self.engine_status_detail.setText(
+                f"{stats['quality_blocked']} face(s) need adjustment" if stats.get("quality_blocked") else
                 "Face recognized; liveness not verified" if stats.get("liveness_blocked")
                 else "Engine is active and ready to detect")
         self.engine_status_detail.setToolTip(
             ("Turn off Portrait/background blur or beauty filters if enabled. "
              "Keep your whole face visible in even light.\n" + stats.get("liveness_details", ""))
             if stats.get("liveness_blocked") else "")
+        if stats.get("quality_blocked"):
+            self.engine_status_detail.setToolTip(stats.get("quality_details", ""))
         if not stats.get("storage_ready", False):
             problems.insert(0, "Attendance storage is not ready; recording is disabled.")
         if problems:
@@ -601,6 +614,10 @@ class LiveScreen(QWidget):
             self.problem.show()
         else:
             self.problem.hide()
+
+    def _on_tracks(self, tracks):
+        if self.engine.running and not self.engine.paused:
+            self._sound.tracks(tracks)
 
     def _set_status_row(self, key, text, ok):
         dot, value, _icon = self._status_rows[key]
@@ -629,12 +646,14 @@ class LiveScreen(QWidget):
                            evidence=self._capture_evidence(result))
 
     def on_failed(self, result):
+        self._sound.play("error")
         self._log("ERROR", f"Save failed: {result.error}")
         self.toast.show_message(f"Attendance save failed: {result.error}", "bad")
         self._add_activity(result.job.employee_name, "Save failed", str(result.error),
                            result.job.employee_id, evidence=self._capture_evidence(result))
 
     def on_error(self, message):
+        self._sound.play("error")
         self._log("ERROR", str(message))
         self.toast.show_message(str(message), "bad")
 
@@ -644,6 +663,8 @@ class LiveScreen(QWidget):
     # ── state sync ───────────────────────────────────────────────────────
 
     def _sync_running(self, running):
+        self._sound.stop()
+        self._sound.reset()
         self._camera_status = "CONNECTING" if running else "STOPPED"
         self._sync_requirements()
         self.pause_button.setEnabled(bool(running))
@@ -668,7 +689,7 @@ class LiveScreen(QWidget):
             self._banner_icon.set_icon("alert")
             self._banner_icon.set_icon_color(tone_color(self._theme, "muted"))
             self.video.show_message("Engine stopped", "Press Start Engine to begin")
-            self.cards["verified"].set_value("0", "idle")
+            self.cards["verified"].set_value("-", "idle")
             self.cards["waiting"].set_value("-")
             self.cards["unknown"].set_value("0", "idle")
             self.video.set_overlay(faces=0)
@@ -685,6 +706,9 @@ class LiveScreen(QWidget):
 
     def _update_pause_button(self, retint=True):
         paused = self.engine.paused
+        if paused:
+            self._sound.stop()
+            self._sound.reset()
         label = "Resume" if paused else "Pause"
         self.pause_button.setText(label)
         self.pause_button.setObjectName("softButton" if paused else "controlButton")
@@ -880,7 +904,7 @@ class LiveScreen(QWidget):
         self.settings = settings
         self.preview_hud.set_source(describe_source(settings.source))
         self._sound.stop()
-        self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
+        self._sound = EventSounds(settings)
         self._sync_requirements()
         if self.camera_box.count():
             self.camera_box.setItemText(0, describe_source(settings.source))

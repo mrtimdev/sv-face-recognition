@@ -44,19 +44,30 @@ The HUD is appended beside the full camera image, so employees at the right
 edge are still visible. Its width and typography scale with resolution.
 Camera sizes/FPS are requests to the driver, not guaranteed capabilities.
 
-Audio uses the existing `alert.wav`. macOS uses its native `afplay` and Windows
-uses built-in `winsound`; neither needs `simpleaudio`. On Linux, install the
-optional backend below or use a system `paplay`/`aplay` player:
+The dashboard includes eight distinct local WAV tones: face detected, no face
+in view, not enrolled, quality guidance, verification complete, attendance
+saved, error, and camera disconnected. No audio download or generation step is
+required. Files in `face_attendance/assets/sounds` are included in packaged builds;
+`scripts/generate_builtin_sounds.py` reproduces them using the standard library.
 
-```bash
-pip install -r requirements-audio.txt
-python generate_alert_sound.py
-```
+Use **Settings → Built-in sounds** to mute sounds or disable detection,
+guidance, and unenrolled-face cues. Use the selector beside **Test alert sound**
+in Live Monitor to preview each tone (preview works even while alerts are muted).
+An existing custom `alert_path` WAV overrides only the attendance-success tone.
 
-The application works without audio. Sound plays asynchronously with a cooldown
-and no overlapping playback from the same player. Use **Test alert sound** in
-Live Monitor to check playback. Unknown-face alerts use the same backend, and
-the dashboard's attendance sound plays after a successful save.
+Detection is debounced; no-face audio plays once after the view has been empty
+for two seconds following a face. It does not repeat on an empty camera or play
+on startup. Unenrolled and quality cues require a sustained condition and play
+once per tracked visit, with global cooldowns to coalesce groups. Camera loss
+has its own tone. Poor-quality faces are not announced as unenrolled. A single
+dashboard owner prevents duplicate success audio and overlapping cues; errors
+and successful saves take priority over guidance. Preview continues when audio
+is unavailable.
+
+macOS uses native `afplay` and Windows uses `winsound`. On Linux, install
+`requirements-audio.txt` or provide `paplay`/`aplay`. The terminal workflow retains
+its optional `alert.wav` observation/save alert; `generate_alert_sound.py`
+creates that legacy file.
 
 
 ## Dashboard (PyQt6 admin UI)
@@ -368,27 +379,80 @@ Historical pre-refactor rows are not automatically queued for upload.
 `attendance_log.csv` remains a throttled **recognition observation log**.
 It is not proof that attendance committed; SQLite is the attendance record.
 
+## Per-face quality and guidance
+
+Employee profiles provide a **Delete** button beneath each evidence thumbnail.
+Confirmation removes that crop, its full-frame companion and metadata; enrollment
+samples and attendance records are retained. Reports will show the deleted image
+as unavailable. Enrollment live-camera and upload previews have a 380-pixel minimum
+height, with scrolling to keep the dialog actions accessible on smaller screens.
+
+Enrollment supports multiple samples per employee: use **Add samples** for frontal,
+slight left/right, and slight up/down views with both eyes visible. All accepted
+encodings are appended and considered during identity matching. Auto capture stops
+at eight collected samples; manual capture/upload can add more. There is no guided
+angle-coverage check, and extreme profiles may fail detection or quality checks.
+Every accepted sample now retains its original photo as well as its face encoding.
+**Employee Profile → Enrolled samples** shows one numbered tile per encoding,
+separately from attendance evidence. Click a tile to view the original photo.
+The first available saved sample is the directory portrait. Activity details
+also include all available enrolled sample photos for that employee.
+
+Old catalogs remain compatible. Previously, only a separate directory portrait
+was saved, so old sample tiles display **Photo unavailable** when no original is
+linked. These encodings remain active; missing originals cannot be reconstructed
+from encodings. Adding new samples saves new photos without removing old encodings.
+New images live in `enrollment_photos/samples/`; their filenames are stored beside
+the corresponding vectors in the same atomic catalog update. Only accepted photos
+are retained. Removing a sample removes its corresponding original; deleting an
+employee removes that enrollment's sample originals. Attendance history is kept.
+
+Each analyzed face is checked independently before identity encoding and PAD:
+minimum original-pixel size, clipped boundaries, exposure, blur, valid face mesh,
+and frontal pose geometry. Low-quality detections remain tracked, with an amber
+prompt such as **Move closer**, **Improve lighting**, **Hold still**, or
+**Face the camera**. Overlapping face boxes receive **Separate overlapping faces**.
+Quality loss clears that person's identity confirmation, accumulated presence,
+PAD/expression state, and capture evidence. It does not reset another person's
+verification. Fresh checks must pass again before attendance can be saved.
+
+These are image-suitability heuristics, not proof of liveness or a complete
+occlusion detector. Pose guidance uses normalized 2D landmark geometry, not
+calibrated yaw/pitch angles. Quality thresholds need validation with the actual
+camera, lighting, glasses, and users. Existing MiniFASNet PAD and configured
+expression checks still apply to unmodified camera pixels; no MiDaS or matting
+model is added. No additional head-turn challenge is required.
+
+**Verified Today** now counts distinct employees with committed attendance on
+the local calendar day, loaded by the persistence worker, refreshed after saves
+and periodically (including report deletions). It displays `-` until storage has
+provided a current-day count. **Analysis** shows recognition processing time in
+milliseconds beside the queue, independently of camera FPS.
+
 ## Performance tuning
 
 All tuning defaults are in [face_attendance/config.py](face_attendance/config.py).
-The original 0.25 detector scale and 0.5 tolerance are retained. Detection moves
-from every second frame to every third by default; encoding is scheduled
-separately.
+The default detector scale is 0.5 (640 × 360 at the default camera resolution).
+Existing saved settings retain their overrides; choose 0.50 in Settings and
+use Save & restart to upgrade an existing 0.25 configuration. Identity tolerance
+is unchanged; encoding is scheduled separately from detection.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `camera_width / camera_height` | 1280 / 720 | Requested camera resolution |
 | `target_fps` | 30 | Camera request and maximum UI refresh rate |
-| `detection_scale` | 0.25 | YuNet input size relative to camera frame |
-| `detection_interval` | 3 | Minimum source-frame gap between detections |
-| `recognition_interval` | 5 | Minimum frame gap for unconfirmed/final verification encodings |
-| `stable_recheck_sec` | 0.75 | Periodic re-encoding of stable tracks |
+| `detection_scale` | 0.5 | YuNet input size relative to camera frame |
+| `detection_interval` | 2 | Minimum source-frame gap between detections |
+| `recognition_interval` | 3 | Minimum frame gap for unconfirmed/final verification encodings |
+| `stable_recheck_sec` | 0.5 | Periodic re-encoding of stable tracks |
 | `face_tolerance / identity_margin` | 0.5 / 0.035 | Acceptance threshold / competing-employee separation |
-| `min_confirmation_frames` | 3 | Matching encoded observations before identity confirmation |
+| `quality_min_face_px` | 80 | Minimum original face width/height; cannot be below PAD minimum |
+| `quality_min_sharpness` | 25 | Laplacian variance on a 96 × 96 face; camera-specific tuning |
+| `min_confirmation_frames` | 2 | Matching encoded observations before identity confirmation |
 | `capture_after_sec` | 3 | Required verified presence |
 | `cooldown_sec` | 30 | Persistent employee cooldown |
-| `detection_fresh_sec / identity_fresh_sec` | 0.8 / 1.5 | Maximum trusted observation ages |
-| `max_result_age_sec` | 0.8 | Drop late worker results |
+| `detection_fresh_sec / identity_fresh_sec` | 1.2 / 2.5 | Maximum trusted observation ages |
+| `max_result_age_sec` | 1.5 | Drop late worker results |
 | `session_timeout` | 3 | Retain/fade lost visual tracks |
 | `tracker_width` | 480 | Small grayscale input for optical flow |
 | `flash_duration / shutter_duration` | 0.22 / 0.42 | Nonblocking capture animation |
@@ -401,9 +465,18 @@ newest request survives. Camera/UI and recognition FPS are deliberately
 different. The HUD reports preview FPS and camera FPS.
 
 For a slower CPU, first request 640x480 or increase `--process-every`.
-For smaller/distant faces, increase `--scale` to 0.35 or 0.5 at additional CPU
-cost. Validate tolerance/ambiguity margin against your own employees and camera
+For a slower CPU, `--scale 0.25` reduces detector work. Larger detector inputs
+can help locate distant faces, but cannot recover missing detail for recognition. Validate tolerance/ambiguity margin against your own employees and camera
 lighting. Do not assume a higher camera FPS improves recognition.
+
+An offline benchmark is available with
+`python scripts/benchmark_detection.py --image tests/fixtures/anti_spoof/live.jpg`.
+It repeats a portrait to compare 1/3/5-face processing load at scales 0.25 and 0.5;
+it is not a live camera accuracy or spoof-resistance evaluation. In one local
+run, median analysis times at scale 0.5 were 38/67/107 ms for 1/3/5 faces (12
+samples after warmup, CPU with one OpenCV thread). Validate sustained latency,
+missed detections, false matches/rejections, and time to check-in on real groups,
+including crossing paths and photo/screen replay attempts.
 
 Network sources use FFmpeg open/read timeouts, configured to 2.5 seconds, and
 retry after a one-second interruptible backoff. A one-second frame watchdog

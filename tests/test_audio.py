@@ -56,3 +56,14 @@ class AudioTests(unittest.TestCase):
             worker._alert()
             factory.assert_called_once_with(Config().alert_path, Config().alert_cooldown_sec)
             factory.return_value.play.assert_called_once()
+
+
+class DashboardAudioOwnershipTests(unittest.TestCase):
+    def test_dashboard_persistence_never_plays_duplicate_alert(self):
+        from face_attendance.config import Config
+        from face_attendance.persistence import PersistenceWorker
+        with patch("face_attendance.persistence.SoundPlayer") as factory:
+            worker = PersistenceWorker(Config(), {}, audio_enabled=False)
+            worker._init_audio()
+            worker._alert()
+            factory.assert_not_called()

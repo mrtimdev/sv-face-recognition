@@ -178,6 +178,10 @@ class UIRenderer:
         state = track.state
         if not track.visible:
             label = "AUTO RESET" if state == State.UNKNOWN else "REACQUIRING..."
+        elif not track.quality_ok:
+            label = "IMPROVE FACE QUALITY"
+        elif track.ambiguous:
+            label = "SEPARATE FACES"
         elif state == State.ERROR:
             label = "SAVE FAILED / RETRYING"
         elif track.identity_valid and not track.spoof_ok and not recorded and state != State.CAPTURING:
@@ -210,6 +214,12 @@ class UIRenderer:
             liveness_label = track.liveness_prompt
         if recorded or state == State.CAPTURING:
             liveness_label = "Attendance recorded" if state != State.CAPTURING else "Saving attendance"
+        if track.visible and not track.quality_ok:
+            liveness_label = track.quality_prompt
+            color = AMBER
+        elif track.visible and track.ambiguous:
+            liveness_label = "Separate overlapping faces"
+            color = AMBER
         scale = layout.font(0.49)
         pad, line = layout.px(8), layout.px(22)
         panel_w = min(w - 4, max(r - l, text_size(label, scale, 1)[0] + pad * 2,

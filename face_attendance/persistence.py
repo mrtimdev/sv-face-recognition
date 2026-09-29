@@ -13,7 +13,7 @@ from .storage import SnapshotService
 
 
 class PersistenceWorker:
-    def __init__(self, config, employee_map, repository_factory=AttendanceRepository, snapshots=None):
+    def __init__(self, config, employee_map, repository_factory=AttendanceRepository, snapshots=None, audio_enabled=True):
         self.config, self.employee_map = config, employee_map
         self.repository_factory = repository_factory
         self.snapshots = snapshots or SnapshotService(config.capture_dir)
@@ -25,6 +25,8 @@ class PersistenceWorker:
         self.stop_event, self.wake = threading.Event(), threading.Event()
         self.thread = threading.Thread(target=self._run, name="persistence", daemon=True)
         self.sound = None
+        self.audio_enabled = audio_enabled
+        self.daily_totals = {}
 
     def start(self):
         self.thread.start()
@@ -54,7 +56,8 @@ class PersistenceWorker:
             pass
 
     def _init_audio(self):
-        self.sound = SoundPlayer(self.config.alert_path, self.config.alert_cooldown_sec)
+        if self.audio_enabled:
+            self.sound = SoundPlayer(self.config.alert_path, self.config.alert_cooldown_sec)
 
     def _alert(self):
         if self.sound is not None:
@@ -75,6 +78,13 @@ class PersistenceWorker:
         if event.alert:
             self._alert()
 
+    def _refresh_totals(self, repository):
+        try:
+            self.daily_totals = repository.verified_today()
+        except Exception:
+            logging.debug("Daily attendance count unavailable", exc_info=True)
+            self.daily_totals = {}
+
     def _run(self):
         repository = None
         self._init_audio()
@@ -83,6 +93,7 @@ class PersistenceWorker:
                 try:
                     repository = self.repository_factory(self.config.db_path, self.employee_map,
                                                          self.config.cooldown_sec)
+                    self._refresh_totals(repository)
                     self.startup.put((repository.load_cooldowns(), ""))
                     break
                 except Exception as exc:
@@ -94,9 +105,13 @@ class PersistenceWorker:
             if repository is None:
                 return
             last_checkpoint = time.monotonic()
+            last_totals = last_checkpoint
             while not self.stop_event.is_set() or not self.jobs.empty():
                 self.wake.clear()
                 now = time.monotonic()
+                if now - last_totals >= 5.:
+                    self._refresh_totals(repository)
+                    last_totals = now
                 if now - last_checkpoint >= 3600:
                     repository.checkpoint()
                     last_checkpoint = now
@@ -114,6 +129,7 @@ class PersistenceWorker:
                             if self.stop_event.is_set():
                                 break
                     if result.outcome == "saved":
+                        self._refresh_totals(repository)
                         self._alert()
                         logging.info("Attendance saved for employee %s: %s", job.employee_id, result.snapshot)
                         repository.audit("attendance_saved",

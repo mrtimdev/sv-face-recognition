@@ -93,37 +93,13 @@ def enroll(name: str, image_path: str = None, employee_id=None, source=0, check_
             print("Enrollment cancelled.")
             return
 
-    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    backend = get_backend()
-    with enrollment.FACE_BACKEND_LOCK:
-        boxes = backend.face_locations(rgb)
-
-    if len(boxes) == 0:
-        print("No face detected in the image. Try again with better lighting/angle.")
-        return
-    if len(boxes) > 1:
-        print(f"Found {len(boxes)} faces. Use a photo with exactly one employee to avoid mis-enrollment.")
-        return
-    if check_quality:
-        # Off by default so previously accepted photos keep working.
-        issues = enrollment.frame_quality(image, boxes[0])
-        if issues:
-            print("Sample rejected: " + "; ".join(issues))
-            return
-
-    with enrollment.FACE_BACKEND_LOCK:
-        encodings = backend.face_encodings(rgb, boxes)
-    new_encoding = encodings[0]
-
-    data = load_encodings()
-    data.setdefault(name, [])
-    data[name].append(new_encoding)
-    if employee_id:
-        save_employee(name, employee_id)
-    save_encodings(data)
-
-    print(f"Enrolled '{name}'. Total samples for this person: {len(data[name])}")
-    print(f"Total enrolled people: {len(data)}")
+    service = enrollment.EnrollmentService(ENCODINGS_PATH, EMPLOYEES_PATH,
+                                           backend=get_backend())
+    outcome = service.enroll(image, name, employee_id, check_quality=check_quality)
+    print(outcome.message)
+    if outcome.ok:
+        print(f"Total samples for this person: {outcome.total_samples}")
+        print(f"Total enrolled people: {outcome.total_people}")
 
 
 if __name__ == "__main__":

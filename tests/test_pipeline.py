@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from tests.quality_helpers import PassingQuality
 from face_attendance.camera import CameraManager
 from face_attendance.channels import LatestValue
 from face_attendance.config import Config
@@ -38,11 +39,11 @@ class FakeBackend:
 
 class RecognitionTests(unittest.TestCase):
     def setUp(self):
-        self.cfg = Config()
+        self.cfg = replace(Config(), detection_scale=.25)
         self.a, self.b = Employee("A", "Alice"), Employee("B", "Bob")
         self.catalog = SimpleNamespace(employees=(self.a, self.a, self.b), encodings=np.zeros((3, 128)))
         self.backend = FakeBackend()
-        self.service = RecognitionService(self.cfg, self.catalog, self.backend)
+        self.service = RecognitionService(self.cfg, self.catalog, self.backend, quality=PassingQuality())
         self.packet = FramePacket(100, 10, 1000, 1, np.zeros((240, 320, 3), np.uint8))
 
     def test_match_computes_distances_once_and_uses_employee_margin(self):

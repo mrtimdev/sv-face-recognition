@@ -7,6 +7,7 @@ output is published through Qt signals instead of an OpenCV window. The loop
 runs on its own thread, so widgets never block, and the clean camera frame is
 handed to enrollment through ``grab_clean_frame``.
 """
+from datetime import datetime
 import logging
 import threading
 import time
@@ -46,6 +47,9 @@ def track_snapshot(track, now, tracker=None):
             "visible": bool(track.visible),
             "ambiguous": bool(track.ambiguous),
             "identity_valid": bool(track.identity_valid),
+            "quality_ok": bool(track.quality_ok),
+            "quality_prompt": track.quality_prompt,
+            "quality_metrics": dict(track.quality_metrics),
             "spoof_ok": bool(track.spoof_ok),
             "spoof_score": track.spoof_score,
             "spoof_model_scores": track.spoof_model_scores,
@@ -103,7 +107,7 @@ class AttendanceEngine(QObject):
                        CameraManager(self.config, capture_factory=self._capture_factory))
         self.recognition = RecognitionWorker(
             RecognitionService(self.config, self.catalog, backend=self._backend))
-        self.persistence = PersistenceWorker(self.config, self.catalog.employee_map)
+        self.persistence = PersistenceWorker(self.config, self.catalog.employee_map, audio_enabled=False)
         self.tracker = FaceTracker(self.config)
         self.attendance = AttendanceService(self.config, self.persistence)
         # Qt paints the dashboard-wide flash without altering camera pixels.
@@ -294,7 +298,8 @@ class AttendanceEngine(QObject):
                                          self._stats["liveness_details"].replace("\n", "; "))
                 self._expire_unknown_alerts(now)
                 for track in self.tracker.tracks.values():
-                    if (track.visible and not track.employee_id
+                    if (track.visible and track.quality_ok and not track.ambiguous
+                            and track.state.value == "UNKNOWN"
                             and track.track_id not in self._unknown_alerted
                             and now - track.first_seen >= 2.0):
                         self._unknown_alerted[track.track_id] = now
@@ -329,7 +334,13 @@ class AttendanceEngine(QObject):
                                zip(("V2", "V1SE"), track.spoof_model_scores))
             details.append(f"Track {track.track_id}: {track.spoof_prompt}" +
                            (f" ({scores}; required >= {LIVE_THRESHOLD:.2f})" if scores else ""))
-        return {"status": status,
+        totals = self.persistence.daily_totals
+        today = datetime.now().date().isoformat()
+        return {"verified_today": totals.get("count") if totals.get("date") == today else None,
+                "quality_blocked": len([t for t in visible if not t.quality_ok or t.ambiguous]),
+                "quality_details": "\n".join(f"Track {t.track_id}: " + ("Separate overlapping faces" if t.ambiguous else t.quality_prompt)
+                                            for t in visible if not t.quality_ok or t.ambiguous),
+                "status": status,
                 "paused": self._paused,
                 "source": describe_source(self.settings.source),
                 "camera_fps": round(self.camera.fps, 1),
@@ -337,7 +348,7 @@ class AttendanceEngine(QObject):
                 "faces": len(visible),
                 "known_faces": len(known),
                 "unknown_faces": len([track for track in visible
-                                      if not (track.employee_id and track.identity_valid)]),
+                                      if track.quality_ok and not track.ambiguous and track.state.value == "UNKNOWN"]),
                 "cooldowns": len([track for track in visible if track.cooldown_remaining > 0]),
                 "enrolled": self.catalog.enrolled_count,
                 "presence": round(max((track.verified_presence for track in visible), default=0.0), 1),
