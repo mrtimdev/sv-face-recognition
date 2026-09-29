@@ -1,19 +1,25 @@
 """Compact, newest-first attendance activity with a bounded row count."""
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ..theme import palette
-from .avatar import initials
+from .activity_detail import EvidencePhoto
 from .stat_card import IconTile
 
 
 class ActivityRow(QFrame):
+    activated = pyqtSignal(object)
+
     def __init__(self, theme="light", parent=None):
         super().__init__(parent)
         self.setObjectName("activityRow")
         self.setFixedHeight(100)
         self._tone = "ok"
         self._texts = {}
+        self.entry = {}
+        self._pressed = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 12, 10, 12)
         layout.setSpacing(10)
@@ -22,10 +28,9 @@ class ActivityRow(QFrame):
         self.accent.setObjectName("activityAccent")
         self.accent.setFixedWidth(3)
         layout.addWidget(self.accent)
-        self.avatar = QLabel("?")
-        self.avatar.setObjectName("activityAvatar")
-        self.avatar.setFixedSize(38, 38)
-        self.avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.avatar = EvidencePhoto(theme=theme, thumbnail=True)
+        self.avatar.setFixedSize(48, 48)
+        self.avatar.setToolTip("Attendance capture · Open details")
         layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
 
         text_col = QVBoxLayout()
@@ -46,6 +51,8 @@ class ActivityRow(QFrame):
         self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         text_col.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(text_col, 1)
+        for child in self.findChildren(QWidget):
+            child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.set_theme(theme)
 
     def _label(self, object_name):
@@ -56,8 +63,14 @@ class ActivityRow(QFrame):
         label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         return label
 
-    def update_row(self, name, detail="", status="", tone="ok", time_text="", subtitle=""):
-        self.avatar.setText(initials(name))
+    def update_row(self, name, detail="", status="", tone="ok", time_text="", subtitle="", evidence=None):
+        self.entry = dict(evidence or {})
+        self.entry.update(name=str(name), employee_id=str(subtitle), detail=str(detail),
+                          status=str(status), time=str(time_text))
+        capture = self.entry.get("capture")
+        if capture is not None:
+            self.avatar.set_photo(capture)
+        self.setAccessibleName(f"Attendance details for {name}, {status}, {time_text}")
         self._texts = {
             self.name_label: str(name),
             self.detail_label: " · ".join(str(part) for part in (subtitle, detail) if part),
@@ -71,6 +84,23 @@ class ActivityRow(QFrame):
         self.set_theme(self._theme)
         self._elide()
 
+    def mousePressEvent(self, event):
+        self._pressed = event.button() == Qt.MouseButton.LeftButton
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._pressed and event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.pos()):
+            self.activated.emit(self.entry)
+        self._pressed = False
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.activated.emit(self.entry)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _elide(self):
         for label, text in self._texts.items():
             label.setText(label.fontMetrics().elidedText(
@@ -83,6 +113,7 @@ class ActivityRow(QFrame):
 
     def set_theme(self, theme):
         self._theme = theme
+        self.avatar.set_theme(theme)
         c = palette(theme)
         tone = {"ok": "success", "bad": "danger", "warn": "warn"}.get(self._tone, "info")
         badge_color = ({"success": "#15803D", "danger": "#B91C1C", "warn": "#92400E", "info": "#1D4ED8"}
@@ -91,10 +122,9 @@ class ActivityRow(QFrame):
             QFrame#activityRow {{ background: {c['card_alt']};
                 border: 1px solid {c['border_soft']}; border-radius: 12px; }}
             QFrame#activityRow:hover {{ background: {c['hover']}; border-color: {c['border']}; }}
+            QFrame#activityRow:focus {{ border: 1px solid {c['primary']}; }}
             QFrame#activityAccent {{ background: {c[tone]}; border: none; border-radius: 1px; }}
             QLabel {{ background: transparent; border: none; }}
-            QLabel#activityAvatar {{ background: {c['primary_soft']}; color: {c['primary_soft_fg']};
-                border-radius: 12px; font-size: 13px; font-weight: 700; }}
             QLabel#activityName {{ color: {c['text']}; font-size: 13px; font-weight: 600; }}
             QLabel#activityDetail, QLabel#activityTime {{ color: {c['text_secondary']}; font-size: 11px; }}
             QLabel#activityBadge {{ background: {c[tone + '_bg']}; color: {badge_color};
@@ -105,6 +135,8 @@ class ActivityRow(QFrame):
 
 class ActivityFeed(QWidget):
     """Rows keep their natural height; remaining space belongs to the empty area."""
+
+    rowActivated = pyqtSignal(object)
 
     def __init__(self, theme="light", max_rows=20, empty_text="Ready for check-ins", parent=None):
         super().__init__(parent)
@@ -137,9 +169,10 @@ class ActivityFeed(QWidget):
         self.layout_.addStretch(0)
         self.set_theme(theme)
 
-    def add(self, name, detail="", status="", tone="ok", time_text="", subtitle=""):
+    def add(self, name, detail="", status="", tone="ok", time_text="", subtitle="", evidence=None):
         row = ActivityRow(self._theme)
-        row.update_row(name, detail, status, tone, time_text, subtitle)
+        row.update_row(name, detail, status, tone, time_text, subtitle, evidence)
+        row.activated.connect(self.rowActivated.emit)
         self.layout_.insertWidget(0, row)
         self._rows.insert(0, row)
         self.empty_state.hide()

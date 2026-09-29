@@ -14,10 +14,12 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QF
 from ...settings import describe_source
 from ...config import ATTENDANCE_MODES
 from ..icons import IconLabel, apply_button_icon
+from ..bridge import to_pixmap
 from ..sound import SoundPlayer
 from ..theme import palette, tone_color
 from ..widgets import (ActivityFeed, Card, StatCard,
                        ToastBar, ToggleSwitch, VideoView)
+from ..widgets.activity_detail import ActivityDetailDialog, enrollment_photos, load_photo
 
 STATUS_TONES = {"CONNECTED": "ok", "CONNECTING": "warn", "RECONNECTING": "warn",
                 "CAMERA DISCONNECTED": "bad", "STOPPED": "idle"}
@@ -27,6 +29,7 @@ STATUS_ROW_ICONS = (("camera", "Camera"), ("database", "Database"),
                     ("bolt", "Auto Recording"))
 
 LOG_ROW_LIMIT = 250
+PREVIEW_MIN_HEIGHT = 520
 
 
 class LogRow(QWidget):
@@ -221,7 +224,8 @@ class LiveScreen(QWidget):
             self.toast.show_message("Sound is busy or playback failed; try again shortly.", "warn")
 
     def _build_camera_card(self):
-        card = Card("Camera Preview", "", icon="camera", theme=self._theme)
+        card = Card(theme=self._theme, divider=False)
+        card.header.hide()
         self.camera_card = card
 
         self.live_badge = QLabel("LIVE")
@@ -256,7 +260,7 @@ class LiveScreen(QWidget):
 
         self.video = VideoView(theme=self._theme, message="Position your face in the frame",
                                subtitle="The engine is running and ready to detect")
-        self.video.setMinimumHeight(360)
+        self.video.setMinimumHeight(PREVIEW_MIN_HEIGHT)
         self.preview_hud = self.video.enable_controls()
         self.preview_hud.set_source(describe_source(self.settings.source))
         self.preview_hud.record.clicked.connect(self._toggle_engine)
@@ -418,6 +422,7 @@ class LiveScreen(QWidget):
         card.add(session)
 
         self.activity = ActivityFeed(theme=self._theme, max_rows=8)
+        self.activity.rowActivated.connect(self._open_activity_detail)
         scroll = QScrollArea()
         scroll.setObjectName("scrollFeed")
         scroll.setWidgetResizable(True)
@@ -619,13 +624,14 @@ class LiveScreen(QWidget):
         self.toast.show_message(f"Attendance recorded for {result.job.employee_name}", "ok")
         self._add_activity(result.job.employee_name, "Verified",
                            f"{result.job.duration:.1f}s verified presence",
-                           result.job.employee_id, time_text=recorded)
+                           result.job.employee_id, time_text=recorded,
+                           evidence=self._capture_evidence(result))
 
     def on_failed(self, result):
         self._log("ERROR", f"Save failed: {result.error}")
         self.toast.show_message(f"Attendance save failed: {result.error}", "bad")
         self._add_activity(result.job.employee_name, "Save failed", str(result.error),
-                           result.job.employee_id)
+                           result.job.employee_id, evidence=self._capture_evidence(result))
 
     def on_error(self, message):
         self._log("ERROR", str(message))
@@ -740,7 +746,41 @@ class LiveScreen(QWidget):
         if self.auto_toggle.isChecked():
             self.log_list.scrollToBottom()
 
-    def _add_activity(self, name, status, detail, employee_id="", time_text=None):
+    def _capture_evidence(self, result):
+        capture = load_photo(result.snapshot)
+        if capture.isNull() and result.job.frame is not None:
+            frame = result.job.frame
+            if getattr(frame, "size", 0):
+                height, width = frame.shape[:2]
+                scale = min(1.0, 1200 / max(height, width))
+                if scale < 1:
+                    frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))))
+                capture = to_pixmap(frame)
+        return {"capture": capture,
+                "captured_at": datetime.fromtimestamp(result.job.captured_at).strftime("%d %b %Y · %H:%M:%S"),
+                "duration": f"{result.job.duration:.1f}s",
+                "event_id": result.job.event_id}
+
+    def _open_activity_detail(self, entry):
+        if getattr(self, "_activity_dialog", None) is not None:
+            self._activity_dialog.raise_()
+            return
+        try:
+            photos = enrollment_photos(self.settings, entry.get("employee_id"), self.engine.employee_rows())
+        except (OSError, ValueError, EOFError):
+            photos = []
+        dialog = ActivityDetailDialog(entry, photos, self._theme, self.window())
+        self._activity_dialog = dialog
+        dialog.finished.connect(self._close_activity_detail)
+        dialog.open()
+
+    def _close_activity_detail(self, _result):
+        dialog = self._activity_dialog
+        self._activity_dialog = None
+        if dialog is not None:
+            dialog.deleteLater()
+
+    def _add_activity(self, name, status, detail, employee_id="", time_text=None, evidence=None):
         if status == "Verified":
             self._saved_activity_count = getattr(self, "_saved_activity_count", 0) + 1
             self.activity_count.setText(f"{self._saved_activity_count} saved")
@@ -751,6 +791,7 @@ class LiveScreen(QWidget):
             tone="ok" if status == "Verified" else "bad",
             time_text=time_text or datetime.now().strftime("%H:%M:%S"),
             subtitle=employee_id,
+            evidence=evidence,
         )
 
     # ── settings / lifecycle ─────────────────────────────────────────────
@@ -802,7 +843,7 @@ class LiveScreen(QWidget):
             w.show()
         self._fs_hidden = []
 
-        self.video.setMinimumHeight(360)
+        self.video.setMinimumHeight(PREVIEW_MIN_HEIGHT)
         if self._was_maximized:
             win.showMaximized()
         else:
