@@ -1,20 +1,30 @@
-"""Animated splash screen shown while the dashboard initialises."""
+"""Animated splash screen with real environment checks and loading progress."""
 import math
 import random
+import sqlite3
+from pathlib import Path
 
 from PyQt6.QtCore import (QEasingCurve, QParallelAnimationGroup, QPointF,
                           QPropertyAnimation, QRectF, QSequentialAnimationGroup,
-                          Qt, QTimer, pyqtProperty)
+                          Qt, QThread, QTimer, pyqtProperty, pyqtSignal)
 from PyQt6.QtGui import (QColor, QFont, QFontDatabase, QLinearGradient,
                           QPainter, QPainterPath, QPen, QRadialGradient)
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
 
 from .theme import PALETTES
 
 _C = PALETTES["dark"]
 
-SPLASH_DURATION_MS = 3400
 FADE_OUT_MS = 500
+
+CHECK_LABELS = [
+    ("settings", "Loading Settings"),
+    ("face_models", "Face Recognition Models"),
+    ("antispoof_models", "Anti-Spoof Models"),
+    ("camera", "Camera Access"),
+    ("enrolled", "Enrolled Employees"),
+    ("database", "Database Connection"),
+]
 
 
 class _Particle:
@@ -29,15 +39,104 @@ class _Particle:
         self.phase = random.uniform(0, math.tau)
 
 
-class SplashScreen(QWidget):
-    """Full-screen animated splash — app-icon tile, ripple rings, particles."""
+class _CheckWorker(QThread):
+    """Runs environment checks off the GUI thread, emitting progress."""
 
-    def __init__(self, parent=None):
+    checkResult = pyqtSignal(str, bool, str)   # key, passed, detail
+    allDone = pyqtSignal()
+
+    def __init__(self, settings):
+        super().__init__()
+        self._settings = settings
+
+    def run(self):
+        for key, _ in CHECK_LABELS:
+            passed, detail = getattr(self, f"_check_{key}")()
+            self.checkResult.emit(key, passed, detail)
+            self.msleep(180)
+        self.allDone.emit()
+
+    def _check_settings(self):
+        try:
+            cfg = self._settings.to_config()
+            mode = cfg.attendance_mode.replace("_", " + ").title()
+            return True, f"Mode: {mode}"
+        except Exception as exc:
+            return False, str(exc)[:60]
+
+    def _check_face_models(self):
+        try:
+            from ..face_backend import MODEL_DIR, MODEL_HASHES
+            missing = [n for n in MODEL_HASHES if not (Path(MODEL_DIR) / n).exists()]
+            if missing:
+                return False, f"Missing: {', '.join(missing)}"
+            return True, f"{len(MODEL_HASHES)} models verified"
+        except Exception as exc:
+            return False, str(exc)[:60]
+
+    def _check_antispoof_models(self):
+        try:
+            from ..anti_spoof import MODEL_DIR, MODELS
+            missing = [name for name, _, _ in MODELS if not (Path(MODEL_DIR) / name).exists()]
+            if missing:
+                return False, f"Missing: {', '.join(missing)}"
+            return True, f"{len(MODELS)} models verified"
+        except Exception as exc:
+            return False, str(exc)[:60]
+
+    def _check_camera(self):
+        try:
+            import cv2
+            source = self._settings.source
+            src = int(source) if str(source).isdecimal() else source
+            if isinstance(src, int):
+                cap = cv2.VideoCapture(src)
+                ok = cap.isOpened()
+                cap.release()
+                return ok, f"Webcam {src} ready" if ok else f"Webcam {src} unavailable"
+            return True, f"Source: {Path(str(src)).name if '://' not in str(src) else 'stream'}"
+        except Exception as exc:
+            return False, str(exc)[:60]
+
+    def _check_enrolled(self):
+        try:
+            from ..template_store import read_templates
+            path = Path(self._settings.encodings_path)
+            if not path.exists():
+                return False, "No enrollment data found"
+            data = read_templates(path)
+            total_templates = sum(len(v) for v in data.values())
+            return True, f"{len(data)} employees, {total_templates} templates"
+        except Exception as exc:
+            return False, str(exc)[:60]
+
+    def _check_database(self):
+        try:
+            db_path = Path(self._settings.db_path)
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(db_path), timeout=1.5)
+            conn.execute("PRAGMA integrity_check")
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='attendance'"
+            ).fetchone()
+            conn.close()
+            if row[0]:
+                return True, "Database OK"
+            return True, "New database (will be created)"
+        except Exception as exc:
+            return False, str(exc)[:60]
+
+
+class SplashScreen(QWidget):
+    """Full-screen animated splash with real environment loading checks."""
+
+    def __init__(self, settings=None, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.resize(520, 600)
+        self.resize(520, 680)
 
+        self._settings = settings
         self._icon_scale = 0.0
         self._icon_opacity = 0.0
         self._glow_intensity = 0.0
@@ -52,16 +151,28 @@ class SplashScreen(QWidget):
         self._text_opacity = 0.0
         self._text_slide = 20.0
         self._sub_opacity = 0.0
-        self._dots_opacity = 0.0
-        self._dots_phase = 0.0
         self._fade_out = 1.0
         self._particle_time = 0.0
 
+        self._check_states = {}
+        self._check_spinner_angle = 0.0
+        self._checks_complete = False
+        self._all_passed = True
+        self._completed_count = 0
+
         random.seed(42)
-        self._particles = [_Particle(520, 600) for _ in range(35)]
+        self._particles = [_Particle(520, 680) for _ in range(35)]
 
         self._build_animations()
         self._finished_callback = None
+        self._worker = None
+
+        self._btn_quit = self._make_button("Quit", self._on_quit)
+        self._btn_relaunch = self._make_button("Relaunch", self._on_relaunch)
+        self._btn_continue = self._make_button("Continue", self._on_continue)
+        self._btn_quit.hide()
+        self._btn_relaunch.hide()
+        self._btn_continue.hide()
 
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(16)
@@ -196,15 +307,6 @@ class SplashScreen(QWidget):
         self.update()
 
     @pyqtProperty(float)
-    def dotsOpacity(self):
-        return self._dots_opacity
-
-    @dotsOpacity.setter
-    def dotsOpacity(self, v):
-        self._dots_opacity = v
-        self.update()
-
-    @pyqtProperty(float)
     def fadeOut(self):
         return self._fade_out
 
@@ -223,20 +325,18 @@ class SplashScreen(QWidget):
         a.setEasingCurve(easing)
         return a
 
-    def _ring_group(self, r_prop, a_prop, delay_pad=0):
+    def _ring_group(self, r_prop, a_prop):
         g = QParallelAnimationGroup(self)
         g.addAnimation(self._anim(r_prop, 0.0, 1.0, 800, QEasingCurve.Type.OutQuad))
         g.addAnimation(self._anim(a_prop, 0.9, 0.0, 800, QEasingCurve.Type.InCubic))
         return g
 
     def _build_animations(self):
-        # phase 1: icon tile appears
         phase1 = QParallelAnimationGroup(self)
         phase1.addAnimation(self._anim(b"iconScale", 0.2, 1.0, 600, QEasingCurve.Type.OutBack))
         phase1.addAnimation(self._anim(b"iconOpacity", 0.0, 1.0, 400))
         phase1.addAnimation(self._anim(b"glowIntensity", 0.0, 1.0, 700))
 
-        # phase 2: triple ripple rings (staggered)
         ripple = QSequentialAnimationGroup(self)
         ripple.addAnimation(self._ring_group(b"ring1", b"ring1Alpha"))
         ripple_23 = QParallelAnimationGroup(self)
@@ -250,7 +350,6 @@ class SplashScreen(QWidget):
         ripple_23.addAnimation(r3)
         ripple.addAnimation(ripple_23)
 
-        # phase 3: orbit dots spin + scanner sweep (parallel)
         phase3 = QParallelAnimationGroup(self)
         phase3.addAnimation(self._anim(b"orbitAngle", 0.0, 360.0, 1400, QEasingCurve.Type.InOutSine))
         scan_seq = QSequentialAnimationGroup(self)
@@ -258,7 +357,6 @@ class SplashScreen(QWidget):
         scan_seq.addAnimation(self._anim(b"scannerPos", -0.1, 1.1, 900, QEasingCurve.Type.InOutQuad))
         phase3.addAnimation(scan_seq)
 
-        # phase 4: text slides up + fades in
         phase4 = QParallelAnimationGroup(self)
         phase4.addAnimation(self._anim(b"textOpacity", 0.0, 1.0, 450))
         phase4.addAnimation(self._anim(b"textSlide", 20.0, 0.0, 450, QEasingCurve.Type.OutCubic))
@@ -267,15 +365,11 @@ class SplashScreen(QWidget):
         sub_delayed.addAnimation(self._anim(b"subOpacity", 0.0, 1.0, 400))
         phase4.addAnimation(sub_delayed)
 
-        # phase 5: loading dots
-        phase5 = self._anim(b"dotsOpacity", 0.0, 1.0, 300)
-
         self._sequence = QSequentialAnimationGroup(self)
         self._sequence.addAnimation(phase1)
         self._sequence.addAnimation(ripple)
         self._sequence.addAnimation(phase3)
         self._sequence.addAnimation(phase4)
-        self._sequence.addAnimation(phase5)
 
         fade = self._anim(b"fadeOut", 1.0, 0.0, FADE_OUT_MS, QEasingCurve.Type.InQuad)
         fade.finished.connect(self._on_done)
@@ -285,11 +379,113 @@ class SplashScreen(QWidget):
 
     def start(self, on_finished=None):
         self._finished_callback = on_finished
+        self._anim_done = False
         self._center_on_screen()
         self.show()
         self._sequence.start()
+        self._sequence.finished.connect(self._on_anim_done)
         self._tick_timer.start()
-        QTimer.singleShot(SPLASH_DURATION_MS, self._begin_fade_out)
+        self._start_checks()
+
+    def _start_checks(self):
+        if self._settings is None:
+            self._checks_complete = True
+            return
+        self._worker = _CheckWorker(self._settings)
+        self._worker.checkResult.connect(self._on_check_result)
+        self._worker.allDone.connect(self._on_checks_done)
+        self._worker.start()
+
+    def _on_check_result(self, key, passed, detail):
+        self._check_states[key] = (passed, detail)
+        if not passed:
+            self._all_passed = False
+        self._completed_count += 1
+        self.update()
+
+    def _on_anim_done(self):
+        self._anim_done = True
+        self._try_fade_out()
+
+    def _on_checks_done(self):
+        self._checks_complete = True
+        if self._all_passed:
+            self._try_fade_out()
+        else:
+            self._show_buttons()
+
+    def _try_fade_out(self):
+        if self._anim_done and self._checks_complete:
+            QTimer.singleShot(600, self._begin_fade_out)
+
+    def _show_buttons(self):
+        w = self.width()
+        cx = w / 2
+        cy = self.height() / 2 - 80
+        btn_y = int(cy + 210 + len(CHECK_LABELS) * 30 + 14)
+        btn_w, btn_h, gap = 110, 34, 10
+        total_w = btn_w * 3 + gap * 2
+        left = int(cx - total_w / 2)
+
+        self._btn_quit.setGeometry(left, btn_y, btn_w, btn_h)
+        self._btn_relaunch.setGeometry(left + btn_w + gap, btn_y, btn_w, btn_h)
+        self._btn_continue.setGeometry(left + (btn_w + gap) * 2, btn_y, btn_w, btn_h)
+
+        self._btn_quit.show()
+        self._btn_relaunch.show()
+        self._btn_continue.show()
+        self._btn_quit.raise_()
+        self._btn_relaunch.raise_()
+        self._btn_continue.raise_()
+
+    def _make_button(self, text, callback):
+        btn = QPushButton(text, self)
+        btn.setFixedHeight(34)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFont(self._get_font(11, True))
+        btn.clicked.connect(callback)
+        if text == "Quit":
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {_C['danger_bg']}; color: {_C['danger']};"
+                f"  border: 1px solid {_C['danger_border']}; border-radius: 10px;"
+                f"  padding: 6px 16px; }}"
+                f"QPushButton:hover {{ background-color: {_C['danger']}; color: #FFFFFF; }}")
+        elif text == "Relaunch":
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {_C['primary']}; color: {_C['primary_fg']};"
+                f"  border: 1px solid {_C['primary']}; border-radius: 10px;"
+                f"  padding: 6px 16px; }}"
+                f"QPushButton:hover {{ background-color: {_C['primary_hover']};"
+                f"  border-color: {_C['primary_hover']}; color: {_C['primary_fg']}; }}")
+        else:
+            btn.setStyleSheet(
+                f"QPushButton {{ background-color: {_C['panel_alt']}; color: {_C['text_secondary']};"
+                f"  border: 1px solid {_C['border']}; border-radius: 10px;"
+                f"  padding: 6px 16px; }}"
+                f"QPushButton:hover {{ border-color: {_C['primary']}; color: {_C['primary']}; }}")
+        return btn
+
+    def _on_quit(self):
+        app = QApplication.instance()
+        if app:
+            app.quit()
+
+    def _on_relaunch(self):
+        import os
+        import sys
+        self.hide()
+        if self._worker:
+            self._worker.wait(2000)
+        app = QApplication.instance()
+        if app:
+            app.quit()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    def _on_continue(self):
+        self._btn_quit.hide()
+        self._btn_relaunch.hide()
+        self._btn_continue.hide()
+        self._begin_fade_out()
 
     def _center_on_screen(self):
         screen = self.screen()
@@ -298,18 +494,19 @@ class SplashScreen(QWidget):
             self.move(geo.center() - self.rect().center())
 
     def _begin_fade_out(self):
-        self._sequence.stop()
         self._tick_timer.stop()
         self._fade_anim.start()
 
     def _on_done(self):
         self.hide()
+        if self._worker:
+            self._worker.wait(2000)
         if self._finished_callback:
             self._finished_callback()
 
     def _tick(self):
         self._particle_time += 0.016
-        self._dots_phase += 0.06
+        self._check_spinner_angle += 5.0
         self.update()
 
     # ── painting ──────────────────────────────────────────────────────────
@@ -319,7 +516,7 @@ class SplashScreen(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setOpacity(self._fade_out)
         w, h = self.width(), self.height()
-        cx, cy = w / 2, h / 2 - 30
+        cx, cy = w / 2, h / 2 - 80
 
         self._paint_background(p, w, h, cx, cy)
         self._paint_particles(p, w, h)
@@ -328,7 +525,7 @@ class SplashScreen(QWidget):
         self._paint_icon_tile(p, cx, cy)
         self._paint_scanner(p, cx, cy)
         self._paint_text(p, w, h, cx, cy)
-        self._paint_loading_dots(p, w, h)
+        self._paint_checks(p, w, h, cx, cy)
         self._paint_footer(p, w, h)
         p.end()
 
@@ -410,28 +607,24 @@ class SplashScreen(QWidget):
         half = tile_size / 2
         tile_rect = QRectF(-half, -half, tile_size, tile_size)
 
-        # tile shadow
         shadow = QColor(0, 0, 0, 60)
         shadow_rect = tile_rect.adjusted(0, 4, 0, 4)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(shadow)
         p.drawRoundedRect(shadow_rect, 22, 22)
 
-        # tile background gradient
         tile_grad = QLinearGradient(tile_rect.topLeft(), tile_rect.bottomRight())
         tile_grad.setColorAt(0.0, QColor("#1E40AF"))
         tile_grad.setColorAt(1.0, QColor("#3B82F6"))
         p.setBrush(tile_grad)
         p.drawRoundedRect(tile_rect, 22, 22)
 
-        # subtle inner glow
         inner_glow = QRadialGradient(0, -half * 0.3, tile_size * 0.8)
         inner_glow.setColorAt(0.0, QColor(255, 255, 255, 25))
         inner_glow.setColorAt(1.0, QColor(255, 255, 255, 0))
         p.setBrush(inner_glow)
         p.drawRoundedRect(tile_rect, 22, 22)
 
-        # tile border
         border_c = QColor(255, 255, 255, 20)
         p.setPen(QPen(border_c, 1.0))
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -461,7 +654,6 @@ class SplashScreen(QWidget):
         p.setPen(QPen(grad, 2.0))
         p.drawLine(QPointF(cx - 40, scan_y), QPointF(cx + 40, scan_y))
 
-        # scanner glow band
         glow_rect = QRectF(cx - 42, scan_y - 8, 84, 16)
         glow_grad = QRadialGradient(cx, scan_y, 44)
         gc = QColor(_C["success"])
@@ -489,14 +681,12 @@ class SplashScreen(QWidget):
             p.save()
             p.setOpacity(self._fade_out * self._sub_opacity)
 
-            # tagline
             sub_font = self._get_font(12, False)
             p.setFont(sub_font)
             p.setPen(QColor(_C["muted"]))
             p.drawText(QRectF(0, text_base_y + self._text_slide + 38, w, 22),
                        Qt.AlignmentFlag.AlignCenter, "Secure  •  Accurate  •  Smarter")
 
-            # version pill
             pill_y = text_base_y + self._text_slide + 66
             pill_text = "v2.0.0"
             pill_font = self._get_font(10, True)
@@ -513,24 +703,148 @@ class SplashScreen(QWidget):
             p.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, pill_text)
             p.restore()
 
-    def _paint_loading_dots(self, p, w, h):
-        if self._dots_opacity < 0.01:
-            return
+    def _paint_checks(self, p, w, h, cx, cy):
         p.save()
-        p.setOpacity(self._fade_out * self._dots_opacity)
-        dot_y = h - 80
-        for i in range(3):
-            phase = self._dots_phase - i * 0.5
-            bounce = abs(math.sin(phase)) * 6
+        p.setOpacity(self._fade_out)
+
+        check_top = cy + 210
+        row_h = 30
+        list_w = 340
+        left_x = cx - list_w / 2
+
+        # progress bar background
+        bar_y = check_top - 18
+        bar_w = list_w
+        bar_h = 4
+        bar_rect = QRectF(left_x, bar_y, bar_w, bar_h)
+        bar_bg = QColor(_C["border"])
+        bar_bg.setAlpha(80)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(bar_bg)
+        p.drawRoundedRect(bar_rect, 2, 2)
+
+        # progress bar fill
+        total = len(CHECK_LABELS)
+        progress = self._completed_count / total if total else 0
+        if progress > 0:
+            fill_rect = QRectF(left_x, bar_y, bar_w * progress, bar_h)
+            fill_color = QColor(_C["success"]) if self._all_passed else QColor(_C["warn"])
+            p.setBrush(fill_color)
+            p.drawRoundedRect(fill_rect, 2, 2)
+
+        # progress text
+        pct_font = self._get_font(10, True)
+        p.setFont(pct_font)
+        pct_text = f"Initializing... {int(progress * 100)}%"
+        if self._checks_complete:
+            pct_text = "All systems ready" if self._all_passed else "Some checks need attention"
+        pct_color = QColor(_C["muted"])
+        p.setPen(pct_color)
+        p.drawText(QRectF(left_x, bar_y - 20, list_w, 16),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, pct_text)
+
+        # check items
+        for i, (key, label) in enumerate(CHECK_LABELS):
+            y = check_top + i * row_h
+            state = self._check_states.get(key)
+
+            if state is None:
+                if self._completed_count == i:
+                    self._paint_spinner(p, left_x + 8, y + row_h / 2, 6)
+                    p.setPen(QColor(_C["primary"]))
+                    p.setFont(self._get_font(11, True))
+                    p.drawText(QRectF(left_x + 24, y, list_w - 24, row_h),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               f"Checking {label}...")
+                else:
+                    dot_c = QColor(_C["muted"])
+                    dot_c.setAlpha(60)
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(dot_c)
+                    p.drawEllipse(QPointF(left_x + 8, y + row_h / 2), 3, 3)
+                    p.setPen(QColor(_C["muted"]))
+                    p.setFont(self._get_font(11, False))
+                    label_c = QColor(_C["muted"])
+                    label_c.setAlpha(100)
+                    p.setPen(label_c)
+                    p.drawText(QRectF(left_x + 24, y, list_w - 24, row_h),
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                               label)
+            else:
+                passed, detail = state
+                if passed:
+                    self._paint_check_icon(p, left_x + 8, y + row_h / 2, 6, _C["success"])
+                else:
+                    self._paint_x_icon(p, left_x + 8, y + row_h / 2, 5, _C["warn"])
+
+                p.setPen(QColor(_C["text"]))
+                p.setFont(self._get_font(11, True))
+                p.drawText(QRectF(left_x + 24, y, list_w * 0.5, row_h),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                           label)
+
+                detail_color = QColor(_C["success"] if passed else _C["warn"])
+                detail_color.setAlpha(200)
+                p.setPen(detail_color)
+                p.setFont(self._get_font(10, False))
+                p.drawText(QRectF(left_x + 24 + list_w * 0.5, y, list_w * 0.5 - 24, row_h),
+                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                           detail)
+
+        p.restore()
+
+    def _paint_spinner(self, p, cx, cy, r):
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        angle = self._check_spinner_angle
+        for i in range(8):
+            a = math.radians(angle + i * 45)
+            dx = cx + r * math.cos(a)
+            dy = cy + r * math.sin(a)
             c = QColor(_C["primary"])
-            c.setAlphaF(0.4 + abs(math.sin(phase)) * 0.6)
-            p.setPen(Qt.PenStyle.NoPen)
+            c.setAlphaF(0.15 + (7 - i) / 7.0 * 0.85)
             p.setBrush(c)
-            p.drawEllipse(QPointF(w / 2 - 16 + i * 16, dot_y - bounce), 3, 3)
+            dot_r = 1.8 - i * 0.1
+            p.drawEllipse(QPointF(dx, dy), dot_r, dot_r)
+        p.restore()
+
+    def _paint_check_icon(self, p, cx, cy, r, color):
+        p.save()
+        bg = QColor(color)
+        bg.setAlpha(30)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(bg)
+        p.drawEllipse(QPointF(cx, cy), r + 2, r + 2)
+
+        pen = QPen(QColor(color), 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        path = QPainterPath()
+        path.moveTo(cx - r * 0.45, cy + r * 0.05)
+        path.lineTo(cx - r * 0.05, cy + r * 0.45)
+        path.lineTo(cx + r * 0.55, cy - r * 0.4)
+        p.drawPath(path)
+        p.restore()
+
+    def _paint_x_icon(self, p, cx, cy, r, color):
+        p.save()
+        bg = QColor(color)
+        bg.setAlpha(30)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(bg)
+        p.drawEllipse(QPointF(cx, cy), r + 2, r + 2)
+
+        pen = QPen(QColor(color), 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        d = r * 0.35
+        p.drawLine(QPointF(cx - d, cy - d), QPointF(cx + d, cy + d))
+        p.drawLine(QPointF(cx + d, cy - d), QPointF(cx - d, cy + d))
         p.restore()
 
     def _paint_footer(self, p, w, h):
-        vis = max(self._sub_opacity, self._dots_opacity)
+        vis = max(self._sub_opacity, 1.0 if self._completed_count > 0 else 0.0)
         if vis < 0.01:
             return
         p.save()
@@ -542,7 +856,6 @@ class SplashScreen(QWidget):
         p.restore()
 
     def _draw_face_icon(self, p, size):
-        """Draw the face-id glyph centered at the current origin."""
         s = size / 24.0
         p.save()
         p.scale(s, s)

@@ -368,6 +368,22 @@ class MainWindow(QMainWindow):
         status_layout.addStretch(1)
         footer_layout.addWidget(status_card)
 
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self.btn_relaunch = QPushButton("  Relaunch")
+        self.btn_relaunch.setObjectName("controlButton")
+        self.btn_relaunch.setCursor(Qt.CursorShape.PointingHandCursor)
+        apply_button_icon(self.btn_relaunch, "restart", 14)
+        self.btn_relaunch.clicked.connect(self._relaunch_app)
+        self.btn_quit = QPushButton("  Quit")
+        self.btn_quit.setObjectName("controlButtonDanger")
+        self.btn_quit.setCursor(Qt.CursorShape.PointingHandCursor)
+        apply_button_icon(self.btn_quit, "x", 14)
+        self.btn_quit.clicked.connect(self._quit_app)
+        btn_row.addWidget(self.btn_relaunch)
+        btn_row.addWidget(self.btn_quit)
+        footer_layout.addLayout(btn_row)
+
         version = QLabel(f"{APP_VERSION}\n\u00a9 2026 SV Trucking Face Recognition. All rights reserved.")
         version.setObjectName("versionLabel")
         version.setContentsMargins(4, 0, 0, 0)
@@ -543,6 +559,18 @@ class MainWindow(QMainWindow):
         except Exception:
             logging.exception("Could not display dashboard error")
 
+    def _quit_app(self):
+        self.close()
+
+    def _relaunch_app(self):
+        import os
+        import sys
+        self.close()
+        app = QApplication.instance()
+        if app:
+            app.quit()
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
     def closeEvent(self, event):
         self.capture_flash.cancel()
         self.clock_timer.stop()
@@ -578,9 +606,15 @@ def run_dashboard(settings_path=None, autostart=False, argv=None):
             window.show()
             _show_main.window = window
 
-        splash = SplashScreen()
+        application.setQuitOnLastWindowClosed(False)
+        splash = SplashScreen(settings=settings)
         _show_main.window = None
-        splash.start(on_finished=_show_main)
+
+        def _on_splash_done():
+            _show_main()
+            application.setQuitOnLastWindowClosed(True)
+
+        splash.start(on_finished=_on_splash_done)
         return application.exec()
     finally:
         errors.close()
