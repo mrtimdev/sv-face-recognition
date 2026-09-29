@@ -21,6 +21,8 @@ from .screens.employees import EmployeesScreen
 from .screens.live import LiveScreen
 from .screens.report import ReportScreen
 from .screens.settings import SettingsScreen
+from .screens.usage import UsageScreen
+from .sysmon import Monitor as SysMonitor, Snapshot as SysSnapshot
 from .telegram import TelegramService
 from .theme import palette, stylesheet
 from .widgets import Avatar, StatusPill
@@ -34,6 +36,7 @@ NAV = (
     ("monitor", "Live Monitor"),
     ("chart", "Attendance Report"),
     ("users", "Enrolled Employees"),
+    ("bolt", "Live Usage"),
     ("gear", "Settings"),
 )
 
@@ -233,6 +236,7 @@ class MainWindow(QMainWindow):
             LiveScreen(self.engine, self.settings),
             ReportScreen(self.engine, self.settings),
             EmployeesScreen(self.engine, self.settings),
+            UsageScreen(self.engine, self.settings),
             SettingsScreen(self.engine, self.settings),
         ]
         for screen in self.screens:
@@ -241,10 +245,7 @@ class MainWindow(QMainWindow):
         root.addLayout(body, 1)
 
         self.setCentralWidget(central)
-        self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage(
-            "Follow the selected attendance requirement in Live Monitor.  "
-            "Keep your whole face visible.")
+        self._build_status_bar()
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.currentRowChanged.connect(self._refresh_header)
         self.nav.setCurrentRow(0)
@@ -395,6 +396,48 @@ class MainWindow(QMainWindow):
         column.addWidget(footer)
         return sidebar
 
+    def _build_status_bar(self):
+        bar = QStatusBar()
+        self.setStatusBar(bar)
+        bar.showMessage(
+            "Follow the selected attendance requirement in Live Monitor.  "
+            "Keep your whole face visible.")
+
+        usage_widget = QWidget()
+        usage_widget.setCursor(Qt.CursorShape.PointingHandCursor)
+        usage_widget.setToolTip("Click to open Live Usage")
+        usage_widget.mousePressEvent = lambda _: self.nav.setCurrentRow(3)
+        row = QHBoxLayout(usage_widget)
+        row.setContentsMargins(8, 0, 8, 0)
+        row.setSpacing(14)
+
+        self._sb_ram = QLabel("RAM —")
+        self._sb_cpu = QLabel("CPU —")
+        self._sb_disk = QLabel("Disk —")
+        for lbl in (self._sb_ram, self._sb_cpu, self._sb_disk):
+            row.addWidget(lbl)
+        self._style_status_labels()
+
+        bar.addPermanentWidget(usage_widget)
+
+        self._sys_monitor = SysMonitor(interval=2.0)
+        self._sys_monitor.snapshotReady.connect(self._on_sys_snapshot)
+        self._sys_monitor.start()
+
+    def _style_status_labels(self):
+        c = palette(self.settings.theme)
+        style = f"font-size: 11px; font-weight: 600; color: {c['text_secondary']};"
+        for lbl in (self._sb_ram, self._sb_cpu, self._sb_disk):
+            lbl.setStyleSheet(style)
+
+    def _on_sys_snapshot(self, snap):
+        ram_gb = snap.ram_used_bytes / (1024 ** 3)
+        self._sb_ram.setText(f"RAM {ram_gb:.2f} GB")
+        self._sb_cpu.setText(f"CPU {snap.cpu_percent:.1f}%")
+        disk_gb_used = snap.disk_used_bytes / (1024 ** 3)
+        disk_gb_total = snap.disk_total_bytes / (1024 ** 3)
+        self._sb_disk.setText(f"Disk: {disk_gb_used:.1f} GB used (limit {disk_gb_total:.1f} GB)")
+
     def _connect(self):
         self.engine.runningChanged.connect(self._engine_state)
         self.engine.pausedChanged.connect(lambda _: self._engine_state(self.engine.running))
@@ -404,9 +447,9 @@ class MainWindow(QMainWindow):
         live = self.screens[0]
         live.flashPreviewRequested.connect(lambda: self.capture_flash.trigger(preview=True))
         live.viewAllRequested.connect(lambda: self.nav.setCurrentRow(1))
-        live.settingsRequested.connect(lambda: self.nav.setCurrentRow(3))
+        live.settingsRequested.connect(lambda: self.nav.setCurrentRow(4))
         live.settingsApplied.connect(self._broadcast_settings)
-        ctx = self.screens[3]
+        ctx = self.screens[4]
         ctx.settingsApplied.connect(
             lambda settings, restart: self._broadcast_settings(settings, restart))
         self.nav.currentRowChanged.connect(lambda row: self._refresh_nav_icons())
@@ -461,6 +504,7 @@ class MainWindow(QMainWindow):
             f"background-color: {colors['badge_bg']}; color: {colors['badge_fg']};"
             "border-radius: 8px; font-size: 10px; font-weight: 700;")
         self._refresh_nav_icons()
+        self._style_status_labels()
         self._engine_state(self.engine.running)
 
     def notify(self, count=1):
@@ -563,17 +607,15 @@ class MainWindow(QMainWindow):
         self.close()
 
     def _relaunch_app(self):
-        import os
         import sys
+        from PyQt6.QtCore import QProcess
+        QProcess.startDetached(sys.executable, sys.argv)
         self.close()
-        app = QApplication.instance()
-        if app:
-            app.quit()
-        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def closeEvent(self, event):
         self.capture_flash.cancel()
         self.clock_timer.stop()
+        self._sys_monitor.stop()
         self.telegram.stop()
         self.engine.shutdown()
         for screen in self.screens:
