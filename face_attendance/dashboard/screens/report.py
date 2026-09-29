@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboB
 
 from ...report import (AttendanceReader, delete_records, export_excel, export_rows,
                        local_text)
+from ...storage import context_path
 from ..icons import apply_button_icon, make_icon
 from ..theme import palette
 from ..widgets import Card, StatCard, ToastBar
@@ -300,6 +301,10 @@ class RecordDetailDialog(QDialog):
         apply_button_icon(self._open_btn, "expand", c["text_secondary"])
         self._open_btn.clicked.connect(lambda: self._open_full_image(None))
         footer.addWidget(self._open_btn)
+        self._context_btn = QPushButton("Open full frame")
+        apply_button_icon(self._context_btn, "image", c["text_secondary"])
+        self._context_btn.clicked.connect(self._open_context_image)
+        footer.addWidget(self._context_btn)
         footer.addStretch()
         close_btn = QPushButton("Close")
         close_btn.setObjectName("primary")
@@ -356,6 +361,7 @@ class RecordDetailDialog(QDialog):
         self._next_btn.setEnabled(self._index < len(self._rows) - 1)
 
         snap = row.get("snapshot", "")
+        self._context_btn.setVisible(bool(snap) and context_path(snap).is_file())
         if snap and Path(snap).is_file():
             pixmap = QPixmap(snap)
             if not pixmap.isNull():
@@ -397,6 +403,13 @@ class RecordDetailDialog(QDialog):
         snap = row.get("snapshot", "")
         if snap and Path(snap).exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(snap))
+
+    def _open_context_image(self):
+        snapshot = self._rows[self._index].get("snapshot", "")
+        if snapshot:
+            path = context_path(snapshot)
+            if path.is_file():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Left:

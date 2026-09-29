@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QF
 
 from ...settings import describe_source
 from ...config import ATTENDANCE_MODES
+from ...storage import context_path
 from ..icons import IconLabel, apply_button_icon
 from ..bridge import to_pixmap
 from ..sound import SoundPlayer
@@ -747,16 +748,23 @@ class LiveScreen(QWidget):
             self.log_list.scrollToBottom()
 
     def _capture_evidence(self, result):
-        capture = load_photo(result.snapshot)
-        if capture.isNull() and result.job.frame is not None:
-            frame = result.job.frame
+        def preview(frame):
             if getattr(frame, "size", 0):
                 height, width = frame.shape[:2]
                 scale = min(1.0, 1200 / max(height, width))
                 if scale < 1:
                     frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))))
-                capture = to_pixmap(frame)
+            return to_pixmap(frame)
+
+        capture = load_photo(result.snapshot)
+        if capture.isNull():
+            capture = preview(result.job.frame)
+        context = context_path(result.snapshot) if result.snapshot else None
+        context = str(context) if context is not None and context.is_file() else ""
         return {"capture": capture,
+                "face_box": result.job.face_box,
+                "context_path": context,
+                "context_capture": None if context else preview(result.job.context_frame),
                 "captured_at": datetime.fromtimestamp(result.job.captured_at).strftime("%d %b %Y · %H:%M:%S"),
                 "duration": f"{result.job.duration:.1f}s",
                 "event_id": result.job.event_id}

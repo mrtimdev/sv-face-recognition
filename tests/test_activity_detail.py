@@ -18,6 +18,43 @@ def photo_path(root, label):
 
 
 class ActivityDetailTests(unittest.TestCase):
+    def test_face_crop_is_default_and_full_frame_is_available_in_modal(self):
+        from face_attendance.dashboard.app import MainWindow
+        from face_attendance.models import CaptureJob, SaveResult
+        from face_attendance.storage import SnapshotService
+        app = _app()
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow(temp_settings(directory), use_lock=False)
+            window.show()
+            app.processEvents()
+            live = window.screens[0]
+            try:
+                crop = np.full((100, 80, 3), (10, 240, 10), np.uint8)
+                context = np.full((240, 320, 3), (240, 10, 10), np.uint8)
+                job = CaptureJob('crop-event', 1, 'E1', 'Example', 1700000000, 3, crop,
+                                 context_frame=context, face_box=(20, 100, 120, 20),
+                                 crop_box=(20, 100, 120, 20), source_sequence=5, source_generation=1)
+                snapshot = SnapshotService(Path(directory) / 'captures').save(job)
+                live.on_saved(SaveResult(job, 'saved', 1700000001, snapshot))
+                row = live.activity._rows[0]
+                self.assertEqual(row.avatar._pixmap.width(), 80)
+                self.assertGreater(row.avatar._pixmap.toImage().pixelColor(0, 0).green(), 220)
+                row.activated.emit(row.entry)
+                app.processEvents()
+                dialog = live._activity_dialog
+                self.assertTrue(dialog.context_button.isVisible())
+                self.assertEqual(dialog.capture_photo._pixmap.width(), 80)
+                dialog.context_button.click()
+                self.assertEqual(dialog.capture_photo._pixmap.width(), 320)
+                self.assertGreater(dialog.capture_photo._pixmap.toImage().pixelColor(0, 0).blue(), 220)
+                dialog.context_button.click()
+                self.assertEqual(dialog.capture_photo._pixmap.width(), 80)
+                dialog.accept()
+                app.processEvents()
+            finally:
+                window.close()
+                app.processEvents()
+
     def test_saved_photo_opens_from_row_and_keyboard_and_closes_cleanly(self):
         from PyQt6.QtCore import Qt
         from PyQt6.QtTest import QTest

@@ -182,16 +182,31 @@ class ActivityDetailDialog(QDialog):
         photos = QHBoxLayout()
         photos.setSpacing(18)
         capture_col = QVBoxLayout()
-        capture_col.addWidget(self._label("01   Attendance capture", "evidenceSection"))
+        capture_header = QHBoxLayout()
+        self.capture_title = self._label("01   Attendance capture", "evidenceSection")
+        self.capture_title.setMinimumHeight(38)
+        capture_header.addWidget(self.capture_title, 1)
+        self.context_button = QPushButton("Full frame")
+        self.context_button.setCheckable(True)
+        self.context_button.setAccessibleName("Toggle face crop and original full frame")
+        self.context_button.clicked.connect(self._toggle_context)
+        fallback = self.entry.get("context_capture")
+        self.context_button.setVisible(bool(self.entry.get("context_path")) or
+                                       (fallback is not None and not fallback.isNull()))
+        capture_header.addWidget(self.context_button)
+        capture_col.addLayout(capture_header)
         self.capture_photo = EvidencePhoto(self.entry.get("capture"), self._theme)
         self.capture_photo.setMinimumHeight(260)
         capture_col.addWidget(self.capture_photo, 1)
-        caption = self._label("Image from this attendance event")
-        caption.setMinimumHeight(38)
-        capture_col.addWidget(caption)
+        self.capture_caption = self._label("Verified face crop from this event" if self.entry.get("face_box")
+                                           else "Image from this attendance event")
+        self.capture_caption.setMinimumHeight(38)
+        capture_col.addWidget(self.capture_caption)
         photos.addLayout(capture_col, 1)
         enrolled_col = QVBoxLayout()
-        enrolled_col.addWidget(self._label("02   Enrolled images", "evidenceSection"))
+        enrolled_title = self._label("02   Enrolled images", "evidenceSection")
+        enrolled_title.setMinimumHeight(38)
+        enrolled_col.addWidget(enrolled_title)
         self.enrolled_photo = EvidencePhoto(theme=self._theme)
         self.enrolled_photo.setMinimumHeight(260)
         enrolled_col.addWidget(self.enrolled_photo, 1)
@@ -225,6 +240,25 @@ class ActivityDetailDialog(QDialog):
         outer.addWidget(self.card, 1, Qt.AlignmentFlag.AlignHCenter)
         outer.addStretch(1)
         self._navigate(0)
+
+    def _toggle_context(self, checked):
+        if checked:
+            photo = load_photo(self.entry.get("context_path"))
+            if photo.isNull():
+                photo = self.entry.get("context_capture")
+            if photo is None or photo.isNull():
+                self.context_button.setChecked(False)
+                self.capture_caption.setText("Full-frame image unavailable")
+                return
+            self.capture_photo.set_photo(photo)
+            self.capture_title.setText("01   Full-frame evidence")
+            self.capture_caption.setText("Original camera frame from this event")
+            self.context_button.setText("Face crop")
+        else:
+            self.capture_photo.set_photo(self.entry["capture"])
+            self.capture_title.setText("01   Attendance capture")
+            self.capture_caption.setText("Verified face crop from this event")
+            self.context_button.setText("Full frame")
 
     def _navigate(self, delta):
         if self.photo_paths:

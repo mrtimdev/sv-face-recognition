@@ -153,8 +153,18 @@ Behavior notes:
   reuse an identity encoding. A blink/smile cannot override a rejection.
   Missing/corrupt models, inference failures, small/clipped faces, close-ups
   without enough surrounding context and stale results block attendance.
-  The saved snapshot is the actual frame checked by the models, rather than a
-  newer, unexamined preview frame.
+  Each attendance snapshot is a padded crop of that employee's face from the
+  exact frame checked by the models. The source-frame detection box is retained
+  separately from the moving preview box. Padding stops before neighboring
+  faces, and overlapping face boxes defer capture. Liveness still uses the
+  original camera pixels and the models' required context, without matting.
+  The full frame is retained in `captures/context/` under the same filename,
+  with a JSON companion recording employee/event/track IDs, source sequence and
+  generation, and face/crop coordinates. Live activity opens on the face crop;
+  **Full frame** in its detail modal shows the original. Report details also
+  provide **Open full frame**. Deleting a record's snapshots removes the crop,
+  context image, and metadata together. Existing full-frame snapshots remain
+  readable without migration.
   Model failures never fall back to expression-only recording. Models run
   locally through existing OpenCV; no images are uploaded or downloaded at runtime.
 - The UI shows **Photo/video suspected** or a model/quality error when blocked.

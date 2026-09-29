@@ -3,6 +3,7 @@ import queue
 import uuid
 
 from .anti_spoof import SAMPLE_MAX_AGE
+from .capture import face_capture
 from .liveness import MAX_SAMPLE_GAP
 from .models import CaptureJob, ObservationEvent, State
 
@@ -142,9 +143,18 @@ class AttendanceService:
                         and evidence.captured_at == track.last_spoof_at)
             if not eligible:
                 continue
+            try:
+                crop, crop_box = face_capture(evidence.frame, track.evidence_box,
+                                             track.evidence_neighbors)
+            except ValueError:
+                # Never fall back to another frame/box or a group photo.
+                continue
             track.transition(State.CONFIRMED, now)
             job = CaptureJob(str(uuid.uuid4()), track.track_id, track.employee_id, track.employee_name,
-                             evidence.wall_time, track.verified_presence, evidence.frame.copy())
+                             evidence.wall_time, track.verified_presence, crop,
+                             context_frame=evidence.frame.copy(), face_box=track.evidence_box,
+                             crop_box=crop_box, source_sequence=evidence.sequence,
+                             source_generation=evidence.generation)
             if self.persistence.submit(job):
                 self.pending[job.employee_id] = job.event_id
                 track.pending_event_id = job.event_id

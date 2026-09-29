@@ -113,6 +113,8 @@ class FaceTracker:
                 # every preview frame. Never count time across missing flow.
                 track.last_evidence_at = None
                 track.evidence_packet = None
+                track.evidence_box = None
+                track.evidence_neighbors = ()
                 if packet.captured_at - track.flow_lost_at > SAMPLE_MAX_AGE:
                     track.reset_verification()
                 track.points = self._features(gray, track.bounding_box)
@@ -250,6 +252,11 @@ class FaceTracker:
                     self.liveness.update_texture(track.track_id, detection.face_roi, packet.captured_at)
                     # Keep the exact analyzed frame for the evidence image.
                     track.evidence_packet = packet
+                    # These are source-frame coordinates, not the current
+                    # motion-compensated/smoothed display box.
+                    track.evidence_box = tuple(detection.bounding_box)
+                    track.evidence_neighbors = tuple(tuple(other.bounding_box)
+                        for other in result.detections if other is not detection)
                 track.liveness_ok = self.liveness.is_live(track.track_id, now)
                 track.last_liveness_at = packet.captured_at if track.liveness_ok else float("-inf")
                 track.liveness_prompt = self.liveness.prompt(track.track_id)

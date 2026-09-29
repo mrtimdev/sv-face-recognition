@@ -37,6 +37,25 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(self.tracker.tracks[2].employee_id, "B")
         self.assertTrue(all(t.identity_valid for t in self.tracker.tracks.values()))
 
+    def test_capture_coordinates_belong_to_the_analyzed_detection(self):
+        self.detect(1, 1, [Detection(self.box_a, self.a, .3, True, spoof_score=.99),
+                           Detection(self.box_b, self.b, .3, True, spoof_score=.99)])
+        source = self.packet(2, 1.1)
+        box = (52, 152, 172, 32)
+        # The displayed box has already moved beyond the worker's source frame.
+        self.tracker.tracks[1].bounding_box = (56, 156, 176, 36)
+        detections = (Detection(box, self.a, .3, True, spoof_score=.99),
+                      Detection(self.box_b, self.b, .3, True, spoof_score=.99))
+        self.assertTrue(self.tracker.apply(RecognitionResult(source, detections, .01), 1.12))
+        track = self.tracker.tracks[1]
+        self.assertIs(track.evidence_packet, source)
+        self.assertEqual(track.evidence_box, box)
+        self.assertNotEqual(track.bounding_box, box)
+        self.assertEqual(track.evidence_neighbors, (self.box_b,))
+        track.invalidate_identity()
+        self.assertIsNone(track.evidence_box)
+        self.assertEqual(track.evidence_neighbors, ())
+
     def test_conflicting_identity_immediately_revokes_eligibility(self):
         self.confirm_two()
         self.detect(20, 1.6, [Detection(self.box_a, self.b, 0.3, True), Detection(self.box_b, self.b, 0.3, True)])

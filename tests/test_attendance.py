@@ -32,6 +32,7 @@ def verified(track_id=1, employee_id="E001", now=10.0):
                      last_recognized=now, identity_valid=True, confirmation_count=4,
                      verified_presence=3.1, last_evidence_at=now,
                      flow_ok=True, spoof_ok=True, last_spoof_at=now, liveness_ok=True, last_liveness_at=now, last_flow_at=now, state=State.VERIFYING,
+                     evidence_box=(20, 100, 120, 20),
                      evidence_packet=FramePacket(100, now, 1000, 1, np.full((240, 320, 3), 57, np.uint8)))
 
 

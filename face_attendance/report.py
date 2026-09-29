@@ -11,6 +11,8 @@ import sqlite3
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+from .storage import evidence_files
+
 
 HEADERS = ("Recorded at (local)", "Employee", "Employee ID", "Status",
            "Verified presence (s)", "Snapshot", "Event ID")
@@ -221,11 +223,11 @@ def delete_records(db_path, record_ids, delete_snapshots=True, progress_cb=None)
                 "SELECT snapshot, event_id FROM attendance WHERE id = ?", (rid,)).fetchone()
             if row:
                 if delete_snapshots and row["snapshot"]:
-                    snap = Path(row["snapshot"])
-                    if snap.is_file():
+                    for snap in evidence_files(row["snapshot"]):
                         try:
-                            snap.unlink()
-                            deleted_files += 1
+                            if snap.is_file():
+                                snap.unlink()
+                                deleted_files += snap.suffix.lower() in (".jpg", ".jpeg", ".png")
                         except OSError:
                             pass
                 if row["event_id"]:

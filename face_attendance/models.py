@@ -104,6 +104,8 @@ class FaceTrack:
     last_spoof_at: float = float("-inf")
     spoof_progress: float = 0.0
     evidence_packet: Any = field(default=None, repr=False, compare=False)
+    evidence_box: Optional[Box] = None
+    evidence_neighbors: tuple = ()
     liveness_ok: bool = False
     liveness_prompt: str = "Look straight at the camera"
     liveness_progress: float = 0.0
@@ -126,6 +128,8 @@ class FaceTrack:
         self.verified_presence = self.verification_progress = 0.0
         self.last_evidence_at = None
         self.evidence_packet = None
+        self.evidence_box = None
+        self.evidence_neighbors = ()
 
     def invalidate_identity(self):
         # Keep the displayed name during brief uncertainty, but revoke capture eligibility.
@@ -151,6 +155,11 @@ class CaptureJob:
     captured_at: float
     duration: float
     frame: Any = field(repr=False, compare=False)
+    context_frame: Any = field(default=None, repr=False, compare=False)
+    face_box: Optional[Box] = None
+    crop_box: Optional[Box] = None
+    source_sequence: Optional[int] = None
+    source_generation: Optional[int] = None
 
 
 @dataclass(frozen=True)
