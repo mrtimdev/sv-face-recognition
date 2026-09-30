@@ -28,6 +28,7 @@ KINDS = {
     "unknown": ("face-id", "warn", "alerts", "orange"),
     "error": ("alert", "bad", "alerts", "red"),
     "update": ("download", "info", "alerts", "blue"),
+    "update_failed": ("alert", "warn", "alerts", "orange"),
 }
 FILTERS = (("all", "All"), ("checkins", "Check-ins"), ("alerts", "Alerts"))
 TONE_KEYS = {"ok": "success", "bad": "danger", "warn": "warn", "info": "info"}

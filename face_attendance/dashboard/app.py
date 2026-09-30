@@ -6,6 +6,7 @@ signals and are notified of settings changes by ``_broadcast_settings``.
 import logging
 import os
 from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel,
@@ -105,6 +106,7 @@ class MainWindow(QMainWindow):
         self._update_prompt = None
         self._prompt_for_update = False
         self._notified_version = ""
+        self._install_problem = None      # InstallOutcome when the last update didn't install
         self._build()
         self.access.changed.connect(self._apply_access)
         self.capture_flash = CaptureFlash(self.centralWidget())
@@ -131,6 +133,10 @@ class MainWindow(QMainWindow):
                 updates.remove_stale_downloads()
             except OSError:
                 logging.debug("could not tidy old update downloads", exc_info=True)
+            try:
+                self._report_install_outcome(updates.take_install_outcome())
+            except Exception:
+                logging.exception("Could not report the last update")
             if settings.update_auto_check:
                 QTimer.singleShot(UPDATE_CHECK_DELAY_MS, self._auto_check_updates)
         if autostart:
@@ -704,7 +710,7 @@ class MainWindow(QMainWindow):
 
     def _open_notification(self, item):
         payload = dict(item.payload or {})
-        if item.kind == "update":
+        if item.kind in ("update", "update_failed"):
             self._open_updates()
             return
         if item.kind not in ("checkin", "failed") or not payload:
@@ -851,7 +857,12 @@ class MainWindow(QMainWindow):
         if not self._prompt_for_update or self._exit is not None:
             return
         self._prompt_for_update = False
-        prompt = UpdatePromptDialog(release, self.settings.theme, self)
+        if not updates.install_support(updates.installed_location())[0]:
+            return      # installing can't work here; Settings › Updates explains why
+        problem = self._install_problem
+        prompt = UpdatePromptDialog(release, self.settings.theme, self,
+                                    problem=problem.reason if problem is not None
+                                    and problem.version == release.version else "")
         prompt.finished.connect(self._update_prompt_done)
         self._update_prompt = prompt
         prompt.open()
@@ -873,17 +884,44 @@ class MainWindow(QMainWindow):
         if self.stack.currentWidget() is self.screens[5]:
             self.screens[5].show_updates()
 
+    def _report_install_outcome(self, outcome):
+        """Say how the last update attempt ended, once, on the first start after it."""
+        if outcome is None:
+            return
+        if outcome.installed:
+            self.notifications.add("update", f"Updated to version {outcome.version}",
+                                   "SV Face ID installed the update and restarted.")
+            self._note(f"Updated to version {outcome.version}")
+            return
+        self._install_problem = outcome
+        self._notified_version = outcome.version   # this notice replaces "is available"
+        self.screens[5].updates_page.set_install_problem(outcome)
+        self.notifications.add("update_failed", f"Version {outcome.version} wasn't installed",
+                               outcome.reason)
+        logging.warning("The update to %s wasn't installed: %s", outcome.version, outcome.reason)
+
     def _install_update(self, release, package):
         if not guard(self, "manage_settings", "install updates"):
             return
+        location = updates.installed_location()
+        target = updates.install_target(location)[0] if location is not None else None
         try:
-            self._pending_install = updates.install_command(
-                package, updates.installed_location(), os.getpid())
+            self._pending_install = updates.install_command(package, location, os.getpid(),
+                                                            target=target)
         except updates.UpdateError as exc:
             QMessageBox.warning(self, "Can't install the update", str(exc))
             return
-        self._begin_exit("update", detail=f"Version {release.version} will be installed, "
-                                          "then SV Face ID reopens by itself.")
+        if target is not None:
+            try:
+                updates.record_pending_install(release.version, target)
+            except OSError:
+                logging.warning("Could not record the pending update", exc_info=True)
+        if target is not None and Path(target) != Path(location):
+            detail = (f"Version {release.version} will be installed in "
+                      f"{updates.folder_label(Path(target).parent)}, then it opens from there.")
+        else:
+            detail = f"Version {release.version} will be installed, then SV Face ID reopens by itself."
+        self._begin_exit("update", detail=detail)
 
     def _launch_installer(self):
         from PyQt6.QtCore import QProcess
@@ -891,6 +929,8 @@ class MainWindow(QMainWindow):
         started, _pid = QProcess.startDetached(program, arguments)
         if not started:
             logging.error("Could not start the update installer: %s %s", program, arguments)
+            if updates.installed_location() is not None:
+                updates.note_install_failure("The installer couldn't be started.")
             self._spawn_replacement()      # at least come back on the current version
 
     def _spawn_replacement(self):

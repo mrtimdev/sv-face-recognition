@@ -5,13 +5,15 @@ main window (``installRequested``), which shuts the dashboard down behind the
 progress card and starts the platform installer.
 """
 import platform
+import re
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea,
+from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea,
                              QTextBrowser, QVBoxLayout, QWidget)
 
 from ... import updates
@@ -22,6 +24,9 @@ from ..threads import settle
 from ..widgets import Card, IconTile, ToggleSwitch
 from ..widgets.notifications import relative_time
 from ..widgets.overlay import WindowOverlay
+
+# A bare URL in release notes, e.g. GitHub's ".../compare/v1.0.5...v1.0.7".
+_BARE_URL = re.compile(r"(?<![<(\[])\bhttps?://[^\s<>()\[\]]+")
 
 
 def platform_label():
@@ -46,6 +51,31 @@ def _local_time(iso_text):
 
 def _megabytes(size):
     return f"{size / 1_048_576:.1f} MB"
+
+
+def linkify(notes):
+    """Wrap bare URLs in ``<...>`` so Markdown links them whole.
+
+    Qt's Markdown ends a bare link at "...", so GitHub's changelog link opened
+    ``compare/v1.0.5`` instead of ``compare/v1.0.5...v1.0.7``.
+    """
+    def wrap(match):
+        url = match.group(0)
+        trimmed = url.rstrip(".,;:!?")
+        return f"<{trimmed}>{url[len(trimmed):]}"
+    return _BARE_URL.sub(wrap, notes)
+
+
+def placement_note(location, target):
+    """How the update gets installed when it can't replace the running copy, else ""."""
+    if location is None or target is None or Path(target) == Path(location):
+        return ""
+    where = updates.folder_label(Path(target).parent)
+    if updates.opened_from_disk_image(location):
+        return (f"SV Face ID is running from its disk image, so the update will be installed "
+                f"in {where} and opened from there.")
+    return (f"This copy can't be replaced where it is, so the update will be installed "
+            f"in {where} and opened from there.")
 
 
 class _CheckWorker(QThread):
@@ -108,6 +138,7 @@ class UpdatesPage(QWidget):
         self.settings = settings
         self._theme = theme
         self._release = None
+        self._problem = None             # InstallOutcome of a failed update, shown until resolved
         self._package = ""
         self._install_after_download = False
         self._check_worker = None
@@ -168,6 +199,22 @@ class UpdatesPage(QWidget):
         status_text.addWidget(self.status_body)
         status.addLayout(status_text, 1)
         self.update_card.add_layout(status)
+
+        self.problem_banner = QFrame()
+        self.problem_banner.setObjectName("banner")
+        self.problem_banner.setProperty("tone", "warn")
+        problem = QVBoxLayout(self.problem_banner)
+        problem.setContentsMargins(12, 8, 12, 8)
+        problem.setSpacing(2)
+        self.problem_title = QLabel("")
+        self.problem_title.setObjectName("bannerTitle")
+        self.problem_body = QLabel("")
+        self.problem_body.setObjectName("bannerBody")
+        self.problem_body.setWordWrap(True)
+        problem.addWidget(self.problem_title)
+        problem.addWidget(self.problem_body)
+        self.problem_banner.hide()
+        self.update_card.add(self.problem_banner)
 
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
@@ -267,10 +314,20 @@ class UpdatesPage(QWidget):
         """Download (if needed) and then install; used by the startup prompt."""
         if release is not None:
             self._release = release
-        if self._release is None:
+        if self._release is None or not self._can_install():
             return
         self._install_after_download = True
         self._start_download()
+
+    def set_install_problem(self, outcome):
+        """Show why the last update didn't install (``InstallOutcome``); None clears it."""
+        self._problem = outcome
+        if outcome is None:
+            self.problem_banner.hide()
+            return
+        self.problem_title.setText(f"Version {outcome.version} wasn't installed")
+        self.problem_body.setText(outcome.reason)
+        self.problem_banner.show()
 
     def skip_version(self, release):
         self._release = release
@@ -297,6 +354,7 @@ class UpdatesPage(QWidget):
         self._release = release
         self._save(update_last_checked=datetime.now(timezone.utc).isoformat(timespec="seconds"))
         if not release.is_newer():
+            self.set_install_problem(None)
             self._set_status("green", "check-circle", "You're up to date",
                              f"Version {__version__} is the newest release.")
             self._show_buttons("check", "page")
@@ -314,31 +372,48 @@ class UpdatesPage(QWidget):
         if release.asset is not None and release.asset.size:
             facts.append(_megabytes(release.asset.size))
         body = " • ".join(facts)
-        supported, reason = updates.install_support(updates.installed_location())
+        location = updates.installed_location()
+        target, reason = updates.install_target(location)
+        note = placement_note(location, target)
         skipped = release.version == self.settings.update_skipped_version
+        if self._problem is not None and self._problem.version != release.version:
+            self.set_install_problem(None)      # about an older release; no longer relevant
         if release.asset is None:
             self._set_status("orange", "alert", f"Version {release.version} is available",
                              body + "\nThis release has no installer for this computer.")
             self._show_buttons("check", "page")
-        elif not supported:
+        elif target is None:
             self._set_status("orange", "download", f"Version {release.version} is available",
                              f"{body}\n{reason}")
             self._show_buttons("check", "page")
         elif skipped:
             self._set_status("orange", "download", f"Version {release.version} is available (skipped)",
-                             body + "\nYou chose to skip this version; it won't be offered at startup.")
+                             body + "\nYou chose to skip this version; it won't be offered at startup."
+                             + (f"\n{note}" if note else ""))
             self.install_button.setText("  Install anyway")
             self._show_buttons("install", "unskip", "page")
         else:
-            self._set_status("blue", "download", f"Version {release.version} is available", body)
-            self.install_button.setText("  Download && install")
+            self._set_status("blue", "download", f"Version {release.version} is available",
+                             body + (f"\n{note}" if note else ""))
+            self.install_button.setText("  Try again" if self._problem is not None
+                                        else "  Download && install")
             self._show_buttons("install", "skip", "page")
         notes = release.notes or "No release notes were published for this version."
-        self.notes.setMarkdown(notes)
+        self.notes.setMarkdown(linkify(notes))
         self.notes.show()
+
+    def _can_install(self):
+        """False when this copy can't be updated; the page then says why."""
+        if updates.install_target(updates.installed_location())[0] is not None:
+            return True
+        if self._release is not None:
+            self._render_release()
+        return False
 
     # --- downloading and installing --------------------------------------------
     def _on_install_clicked(self):
+        if not self._can_install():
+            return
         if self._package and self._release is not None:
             self.installRequested.emit(self._release, self._package)
             return
@@ -388,9 +463,15 @@ class UpdatesPage(QWidget):
             self._show_buttons("install", "skip", "page")
             return
         self._package = path
+        location = updates.installed_location()
+        target = updates.install_target(location)[0]
+        if placement_note(location, target):
+            closing = (f"SV Face ID will close, install the update in "
+                       f"{updates.folder_label(Path(target).parent)} and open it from there.")
+        else:
+            closing = "SV Face ID will close, install the update and reopen on its own."
         self._set_status("green", "check-circle", f"Ready to install version {self._release.version}",
-                         "Downloaded and verified. SV Face ID will close, install the update "
-                         "and reopen on its own.")
+                         f"Downloaded and verified. {closing}")
         self.install_button.setText("  Install and restart")
         self._show_buttons("install", "folder", "page")
         if self._install_after_download:
@@ -441,8 +522,13 @@ class UpdatesPage(QWidget):
 
     def _sync_preferences(self):
         location = updates.installed_location()
-        self.platform_label.setText(platform_label() + (" • installed app" if location
-                                                        else " • running from source"))
+        if location is None:
+            where = "running from source"
+        elif updates.opened_from_disk_image(location):
+            where = "opened from the disk image"
+        else:
+            where = "installed app"
+        self.platform_label.setText(f"{platform_label()} • {where}")
         checked = _local_time(self.settings.update_last_checked)
         self.checked_label.setText(f"Last checked: {relative_time(checked)}"
                                    if checked else "Not checked yet")
@@ -479,11 +565,14 @@ class UpdatesPage(QWidget):
 
 
 class UpdatePromptDialog(WindowOverlay):
-    """Startup notice for a new release: install now, skip this version, or later."""
+    """Startup notice for a new release: install now, skip this version, or later.
+
+    *problem* is why the previous attempt at this version didn't install.
+    """
 
     INSTALL, SKIP, LATER = "install", "skip", "later"
 
-    def __init__(self, release, theme="light", parent=None):
+    def __init__(self, release, theme="light", parent=None, problem=""):
         super().__init__(theme, parent, dismissible=True, title="Update available")
         self.choice = self.LATER
         column = self.column
@@ -503,13 +592,37 @@ class UpdatePromptDialog(WindowOverlay):
         column.addWidget(self.message)
         column.addSpacing(8)
         size = f" • {_megabytes(release.asset.size)}" if release.asset and release.asset.size else ""
-        hint = QLabel("The app closes, installs the update and reopens by itself" + size + ".")
-        hint.setObjectName("fieldHelp")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setWordWrap(True)
-        column.addWidget(hint)
+        location = updates.installed_location()
+        target = updates.install_target(location)[0]
+        if placement_note(location, target):
+            action = (f"The app closes, installs the update in "
+                      f"{updates.folder_label(Path(target).parent)} and opens it from there")
+        else:
+            action = "The app closes, installs the update and reopens by itself"
+        self.hint = QLabel(action + size + ".")
+        self.hint.setObjectName("fieldHelp")
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint.setWordWrap(True)
+        column.addWidget(self.hint)
+        self.problem = None
+        if problem:
+            column.addSpacing(12)
+            self.problem = QFrame()
+            self.problem.setObjectName("banner")
+            self.problem.setProperty("tone", "warn")
+            box = QVBoxLayout(self.problem)
+            box.setContentsMargins(12, 8, 12, 8)
+            box.setSpacing(2)
+            heading = QLabel("The last attempt didn't install")
+            heading.setObjectName("bannerTitle")
+            detail = QLabel(problem)
+            detail.setObjectName("bannerBody")
+            detail.setWordWrap(True)
+            box.addWidget(heading)
+            box.addWidget(detail)
+            column.addWidget(self.problem)
         column.addSpacing(20)
-        self.install_button = QPushButton("Install update")
+        self.install_button = QPushButton("Try again" if problem else "Install update")
         self.install_button.setObjectName("primary")
         self.install_button.setMinimumHeight(42)
         self.install_button.setDefault(True)

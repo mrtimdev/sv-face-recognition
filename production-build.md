@@ -101,8 +101,15 @@ The installed app checks `https://api.github.com/repos/mrtimdev/sv-face-recognit
   behind the progress card, then:
   - **Windows**: runs `SV-Face-ID-Setup-<version>.exe /SILENT /RELAUNCH=1`
     after the app has exited; the installer reopens the app.
-  - **macOS**: swaps `SV Face ID.app` from the DMG (keeping the old copy if the
-    swap fails) and reopens it. The app's folder must be writable by the user.
+  - **macOS**: copies `SV Face ID.app` out of the DMG over the running copy
+    (keeping the old one if the swap fails) and opens it. A copy opened straight
+    from its disk image can't be replaced — the volume is read-only, and macOS
+    runs such apps from a read-only "translocated" copy — so the update is
+    installed in `/Applications` (or `~/Applications`) and opened from there.
+- The next start reports what happened: *Updated to version X*, or *Version X
+  wasn't installed* with the reason (also shown in Settings › Updates, and the
+  next prompt offers *Try again*). The macOS script logs to
+  `<user data>/updates/install-update.log`.
 - Running from source, the check works but nothing is installed.
 
 The first release that contains the updater must be installed by hand once;

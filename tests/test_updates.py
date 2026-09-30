@@ -10,6 +10,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -210,16 +211,57 @@ class InstallTests(unittest.TestCase):
         self.assertIn("source", install_support(None, system="win32")[1])
         self.assertFalse(install_support(Path("/tmp/x"), system="linux")[0])
         self.assertTrue(install_support(Path("C:/Apps/SV Face ID"), system="win32")[0])
+
+    def test_macos_updates_in_place_when_the_folder_is_writable(self):
+        from face_attendance.updates import install_target
         with tempfile.TemporaryDirectory() as directory:
-            locked = Path(directory) / "Applications"
-            locked.mkdir()
-            locked.chmod(0o555)
+            app = Path(directory) / "SV Face ID.app"
+            self.assertEqual(install_target(app, system="darwin"), (app, ""))
+
+    def test_a_read_only_copy_is_updated_into_applications(self):
+        # Opened from the disk image: the volume (and macOS's translocated copy) is read-only.
+        from face_attendance.updates import install_target
+        with tempfile.TemporaryDirectory() as directory:
+            volume, applications = Path(directory) / "Volume", Path(directory) / "Applications"
+            volume.mkdir()
+            volume.chmod(0o555)
             try:
-                supported, reason = install_support(locked / "SV Face ID.app", system="darwin")
+                self.assertEqual(install_target(volume / "SV Face ID.app", system="darwin",
+                                                folders=[applications]),
+                                 (applications / "SV Face ID.app", ""))
+                # Nowhere writable at all: explain instead of pretending.
+                target, reason = install_target(volume / "SV Face ID.app", system="darwin",
+                                                folders=[volume / "Applications"])
             finally:
-                locked.chmod(0o755)
-            self.assertFalse(supported)
+                volume.chmod(0o755)
+            self.assertIsNone(target)
             self.assertIn("can't write", reason)
+
+    def test_a_translocated_app_resolves_to_its_original(self):
+        from face_attendance import updates
+        translocated = Path("/private/var/folders/x/T/AppTranslocation/ABC/d/SV Face ID.app")
+        with tempfile.TemporaryDirectory() as directory:
+            downloads, applications = Path(directory) / "Downloads", Path(directory) / "Applications"
+            downloads.mkdir()
+            # The original is in a writable folder: update it there.
+            with patch.object(updates, "translocated_original", return_value=downloads / "SV Face ID.app"):
+                self.assertEqual(updates.install_target(translocated, system="darwin",
+                                                        folders=[applications])[0],
+                                 downloads / "SV Face ID.app")
+            # The original is on a disk image, or unknown: install into Applications.
+            with patch.object(updates, "translocated_original",
+                              return_value=Path("/Volumes/SV Face ID/SV Face ID.app")):
+                self.assertEqual(updates.install_target(translocated, system="darwin",
+                                                        folders=[applications])[0],
+                                 applications / "SV Face ID.app")
+                self.assertTrue(updates.opened_from_disk_image(translocated))
+            with patch.object(updates, "translocated_original", return_value=None):
+                self.assertEqual(updates.install_target(translocated, system="darwin",
+                                                        folders=[applications])[0],
+                                 applications / "SV Face ID.app")
+        self.assertIsNone(updates.translocated_original("/Applications/SV Face ID.app"))
+        self.assertFalse(updates.opened_from_disk_image(Path("/Applications/SV Face ID.app")))
+        self.assertFalse(updates.opened_from_disk_image(None))
 
     def test_windows_waits_for_the_app_then_runs_the_installer_silently(self):
         from face_attendance.updates import install_command
@@ -236,16 +278,98 @@ class InstallTests(unittest.TestCase):
         from face_attendance.updates import install_command
         with tempfile.TemporaryDirectory() as directory:
             program, arguments = install_command(
-                Path(directory) / "SV Face ID v1.2.0.dmg", Path("/Applications/SV Face ID.app"),
-                4321, system="darwin", directory=directory)
+                Path(directory) / "SV Face ID v1.2.0.dmg",
+                Path("/Volumes/SV Face ID/SV Face ID.app"), 4321, system="darwin",
+                directory=directory, target=Path("/Applications/SV Face ID.app"))
             script = Path(arguments[0])
             text = script.read_text(encoding="utf-8")
             self.assertEqual(program, "/bin/sh")
             self.assertTrue(os.access(script, os.X_OK))
             self.assertIn("PID=4321", text)
             self.assertIn("TARGET='/Applications/SV Face ID.app'", text)
+            self.assertIn("CURRENT='/Volumes/SV Face ID/SV Face ID.app'", text)
             self.assertIn('mv "$TARGET.old" "$TARGET"', text)   # restores on a failed swap
             self.assertEqual(subprocess.run(["/bin/sh", "-n", str(script)]).returncode, 0)
+
+    @unittest.skipUnless(sys.platform == "darwin", "the install script uses macOS tools")
+    def test_macos_script_installs_reports_and_recovers(self):
+        """Runs the real script; only ``hdiutil`` and ``open`` are stand-ins."""
+        from face_attendance.updates import RESULT_FILE, install_command
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stubs, opened = root / "stubs", root / "opened.log"
+            stubs.mkdir()
+            (stubs / "hdiutil").write_text(
+                '#!/bin/sh\n'
+                'if [ "$1" = attach ]; then\n'
+                '  while [ "$1" != -mountpoint ]; do shift; done\n'
+                '  mkdir -p "$2/SV Face ID.app/Contents" && echo 9.9.9 > "$2/SV Face ID.app/Contents/version"\n'
+                'else rm -rf "$2/SV Face ID.app"; fi\n', encoding="utf-8")
+            (stubs / "open").write_text(f'#!/bin/sh\necho "$1" >> "{opened}"\n', encoding="utf-8")
+            for stub in stubs.iterdir():
+                stub.chmod(0o755)
+            finished = subprocess.Popen(["true"])
+            finished.wait()
+            current = root / "Volume" / "SV Face ID.app"
+            env = dict(os.environ, PATH=f"{stubs}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+
+            def install(target):
+                opened.unlink(missing_ok=True)
+                _, arguments = install_command(root / "update.dmg", current, finished.pid,
+                                               system="darwin", directory=root, target=target)
+                subprocess.run(["/bin/sh", *arguments], env=env, timeout=30, check=False)
+                return ((root / RESULT_FILE).read_text(encoding="utf-8").strip(),
+                        opened.read_text(encoding="utf-8").strip())
+
+            target = root / "Applications" / "SV Face ID.app"
+            self.assertEqual(install(target), ("ok", str(target)))          # fresh install
+            self.assertEqual((target / "Contents" / "version").read_text().strip(), "9.9.9")
+            (target / "old-file").write_text("x")
+            self.assertEqual(install(target), ("ok", str(target)))          # replaces a copy
+            self.assertFalse((target / "old-file").exists())
+            self.assertEqual(sorted(p.name for p in target.parent.iterdir()), ["SV Face ID.app"])
+            # A folder that can't be written: report why and reopen the running copy.
+            target.parent.chmod(0o555)
+            try:
+                result, reopened = install(target)
+            finally:
+                target.parent.chmod(0o755)
+            self.assertIn("Couldn't copy the new version", result)
+            self.assertEqual(reopened, str(current))
+            self.assertTrue((target / "Contents" / "version").exists(), "the installed copy is kept")
+
+    def test_the_next_start_reports_whether_the_update_installed(self):
+        from face_attendance.updates import (RESULT_FILE, note_install_failure,
+                                             record_pending_install, take_install_outcome)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.assertIsNone(take_install_outcome(folder))
+            record_pending_install("1.0.8", "/Applications/SV Face ID.app", folder)
+            outcome = take_install_outcome(folder, current="1.0.8")
+            self.assertEqual((outcome.version, outcome.installed), ("1.0.8", True))
+            self.assertIsNone(take_install_outcome(folder, current="1.0.8"), "reported once")
+
+            record_pending_install("1.0.8", "/Applications/SV Face ID.app", folder)
+            (folder / RESULT_FILE).write_text("Couldn't copy the new version into /Applications.\n")
+            outcome = take_install_outcome(folder, current="1.0.7")
+            self.assertFalse(outcome.installed)
+            self.assertEqual(outcome.reason, "Couldn't copy the new version into /Applications.")
+
+            record_pending_install("1.0.8", "/Applications/SV Face ID.app", folder)
+            (folder / RESULT_FILE).write_text("ok\n")       # installed, but an old copy was opened
+            self.assertIn("older copy", take_install_outcome(folder, current="1.0.7").reason)
+
+            record_pending_install("1.0.8", "", folder)
+            note_install_failure("The installer couldn't be started.", folder)
+            self.assertEqual(take_install_outcome(folder, current="1.0.7").reason,
+                             "The installer couldn't be started.")
+
+            record_pending_install("1.0.8", "", folder)
+            self.assertEqual(take_install_outcome(folder, current="1.0.7").reason,
+                             "The installer didn't finish.")
+            (folder / "pending-install.json").write_text("{not json")
+            self.assertIsNone(take_install_outcome(folder))
+            self.assertEqual(list(folder.iterdir()), [])
 
     def test_unsupported_platforms_refuse(self):
         from face_attendance.updates import UpdateError, install_command
@@ -357,6 +481,64 @@ class UpdatesPageTests(unittest.TestCase):
         self.assertTrue(page.install_button.isHidden())
         self.assertIn("running from source", page.status_body.text())
 
+    def test_a_copy_opened_from_the_disk_image_installs_into_applications(self):
+        dmg_copy = Path("/Volumes/SV Face ID/SV Face ID.app")
+        with patch("face_attendance.updates.installed_location", return_value=dmg_copy), \
+                patch("face_attendance.updates.install_target",
+                      return_value=(Path("/Applications/SV Face ID.app"), "")):
+            page = self._page()
+            self._check(page, self._release())
+        self.assertIn("opened from the disk image", page.platform_label.text())
+        self.assertIn("running from its disk image", page.status_body.text())
+        self.assertIn("installed in Applications", page.status_body.text())
+        self.assertFalse(page.install_button.isHidden())
+
+    def test_the_startup_prompt_never_installs_what_cant_be_installed(self):
+        page = self._page()
+        with patch("face_attendance.updates.installed_location", return_value=Path("/x/SV Face ID.app")), \
+                patch("face_attendance.updates.install_target",
+                      return_value=(None, "This account can't write to /x or to the Applications folder.")), \
+                patch("face_attendance.updates.download", side_effect=AssertionError("downloaded")):
+            page.install_update(self._release())
+            self.assertFalse(page.is_busy())
+        self.assertIn("can't write", page.status_body.text())
+        self.assertTrue(page.install_button.isHidden())
+
+    def test_a_failed_update_is_explained_until_it_is_resolved(self):
+        from face_attendance.updates import InstallOutcome
+        from face_attendance.version import __version__
+        page = self._page()
+        page.set_install_problem(InstallOutcome("9.9.9", False, "Couldn't copy the new version."))
+        with patch("face_attendance.updates.installed_location", return_value=Path(self._dir.name)), \
+                patch("face_attendance.updates.install_target", return_value=(Path(self._dir.name), "")):
+            self._check(page, self._release())
+        self.assertFalse(page.problem_banner.isHidden())
+        self.assertEqual(page.problem_title.text(), "Version 9.9.9 wasn't installed")
+        self.assertEqual(page.problem_body.text(), "Couldn't copy the new version.")
+        self.assertEqual(page.install_button.text().strip(), "Try again")
+        self._check(page, self._release(__version__))
+        self.assertTrue(page.problem_banner.isHidden())
+
+    def test_release_note_links_keep_the_whole_url(self):
+        from dataclasses import replace
+        from face_attendance.dashboard.screens.updates import linkify
+        url = "https://github.com/mrtimdev/sv-face-recognition/compare/v1.0.5...v1.0.7"
+        self.assertEqual(linkify(f"**Full Changelog**: {url}."), f"**Full Changelog**: <{url}>.")
+        self.assertEqual(linkify(f"[compare]({url})"), f"[compare]({url})")      # already a link
+        page = self._page()
+        with patch("face_attendance.updates.installed_location", return_value=None):
+            self._check(page, replace(self._release(), notes=f"**Full Changelog**: {url}"))
+        block, anchors = page.notes.document().begin(), set()
+        while block.isValid():
+            fragments = block.begin()
+            while not fragments.atEnd():
+                href = fragments.fragment().charFormat().anchorHref()
+                if href:
+                    anchors.add(href)
+                fragments += 1
+            block = block.next()
+        self.assertEqual(anchors, {url})
+
 
 class UpdateFlowTests(unittest.TestCase):
     def setUp(self):
@@ -404,7 +586,8 @@ class UpdateFlowTests(unittest.TestCase):
         page = window.screens[5].updates_page
         page._release = self._release()
         window._prompt_for_update = True
-        window._on_update_found(self._release())
+        with patch("face_attendance.updates.install_support", return_value=(True, "")):
+            window._on_update_found(self._release())
         prompt = window._update_prompt
         self.assertIsNotNone(prompt)
         self.assertIn("9.9.9", prompt.message.text())
@@ -416,6 +599,43 @@ class UpdateFlowTests(unittest.TestCase):
         window._on_update_found(self._release())
         self.assertIsNone(window._update_prompt)
         self.assertEqual(len(window.notifications), 1)
+
+    def test_no_prompt_when_installing_cannot_work_here(self):
+        window = self._window()
+        window._prompt_for_update = True
+        with patch("face_attendance.updates.install_support", return_value=(False, "read-only")):
+            window._on_update_found(self._release())
+        self.assertIsNone(window._update_prompt)
+        self.assertEqual([item.kind for item in window.notifications.items()], ["update"])
+
+    def test_a_failed_update_is_reported_at_the_next_start(self):
+        from face_attendance.updates import InstallOutcome
+        window = self._window()
+        window._report_install_outcome(InstallOutcome(
+            "9.9.9", False, "Couldn't copy the new version into /Applications."))
+        [notice] = window.notifications.items()
+        self.assertEqual((notice.kind, notice.title), ("update_failed", "Version 9.9.9 wasn't installed"))
+        self.assertIn("Couldn't copy", notice.body)
+        self.assertFalse(window.screens[5].updates_page.problem_banner.isHidden())
+        # The automatic check finds the same version: the prompt says what went wrong.
+        window._prompt_for_update = True
+        with patch("face_attendance.updates.install_support", return_value=(True, "")):
+            window._on_update_found(self._release())
+        prompt = window._update_prompt
+        self.assertIsNotNone(prompt.problem)
+        self.assertEqual(prompt.install_button.text(), "Try again")
+        self.assertEqual(len(window.notifications), 1, "no second 'is available' notice")
+        prompt.later_button.click()
+        _app().processEvents()
+
+    def test_a_successful_update_is_confirmed(self):
+        from face_attendance.updates import InstallOutcome
+        window = self._window()
+        window._report_install_outcome(InstallOutcome("9.9.9", True))
+        window._report_install_outcome(None)
+        [notice] = window.notifications.items()
+        self.assertEqual((notice.kind, notice.title), ("update", "Updated to version 9.9.9"))
+        self.assertTrue(window.screens[5].updates_page.problem_banner.isHidden())
 
     def test_only_accounts_that_manage_settings_are_asked(self):
         from face_attendance.users import User
