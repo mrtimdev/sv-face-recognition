@@ -19,6 +19,7 @@ from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source, hash_p
 from ..icons import apply_button_icon
 from ..theme import palette
 from ..widgets import Card, PageHeader, StatCard, ToastBar
+from .updates import UpdatesPage
 
 
 class SettingsScreen(QWidget):
@@ -44,7 +45,7 @@ class SettingsScreen(QWidget):
         self.header = PageHeader("", "Configure camera, recognition, storage and appearance.")
         self.header.layout().setStretch(0, 1)
         self.apply_button = QPushButton("Save")
-        self.apply_restart_button = QPushButton("Save & restart")
+        self.apply_restart_button = QPushButton("Save && restart")
         self.apply_restart_button.setObjectName("primary")
         self.reset_button = QPushButton("Reset defaults")
         self.reset_button.setObjectName("danger")
@@ -73,6 +74,8 @@ class SettingsScreen(QWidget):
         self._stack.addWidget(self._make_page(self._build_telegram_group()))
         self._stack.addWidget(self._make_page(self._build_security_group()))
         self._stack.addWidget(self._build_backup_page())
+        self.updates_page = UpdatesPage(self.settings, self._theme)
+        self._stack.addWidget(self.updates_page)
         content.addWidget(self._stack, 1)
         outer.addLayout(content, 1)
 
@@ -85,7 +88,7 @@ class SettingsScreen(QWidget):
     def _build_tab_strip(self):
         strip = QFrame()
         strip.setObjectName("settingsStrip")
-        strip.setFixedWidth(180)
+        strip.setFixedWidth(196)
         layout = QVBoxLayout(strip)
         layout.setContentsMargins(8, 12, 8, 12)
         layout.setSpacing(2)
@@ -95,13 +98,14 @@ class SettingsScreen(QWidget):
         self._tab_buttons = []
 
         tabs = [
-            ("camera", "Camera & Capture"),
+            ("camera", "Camera && Capture"),
             ("face-id", "Recognition"),
-            ("database", "Data & Storage"),
+            ("database", "Data && Storage"),
             ("sliders", "Appearance"),
             ("send", "Notifications"),
             ("shield", "Security"),
             ("download", "Backup"),
+            ("refresh", "Updates"),
         ]
         for i, (icon_name, label) in enumerate(tabs):
             btn = QPushButton(f"  {label}")
@@ -412,10 +416,18 @@ class SettingsScreen(QWidget):
         self._bk_size.set_value(info["size_str"], "idle")
         self._bk_size.set_hint(info["size_hint"])
 
+    UPDATES_TAB = 7
+
+    def show_updates(self):
+        """Open the Updates tab (used by the startup prompt and notifications)."""
+        self._tab_group.button(self.UPDATES_TAB).setChecked(True)
+        self._select_tab(self.UPDATES_TAB)
+
     def closeEvent(self, event):
         # A connection test or backup still running must not be destroyed mid-run.
         for name in ("_db_test_worker", "_backup_scan_worker", "_backup_worker", "_tg_worker"):
             settle(getattr(self, name, None), 0)
+        self.updates_page.close()
         super().closeEvent(event)
 
     def _export_backup(self):
@@ -488,7 +500,7 @@ class SettingsScreen(QWidget):
         self.tg_unknown_check.setChecked(True)
         form.addRow("On unknown face", self.tg_unknown_check)
         self.fields["telegram_notify_unknown"] = self.tg_unknown_check
-        self.tg_test_button = QPushButton("Verify Bot & Send Test")
+        self.tg_test_button = QPushButton("Verify Bot && Send Test")
         self.tg_test_button.setObjectName("softButton")
         self.tg_test_result = QLabel("")
         self.tg_test_result.setObjectName("screenSubtitle")
@@ -715,6 +727,8 @@ class SettingsScreen(QWidget):
 
     def load_settings(self, settings):
         self.settings = settings
+        if hasattr(self, "updates_page"):
+            self.updates_page.set_settings(settings)
         source = str(settings.source).strip()
         self._select_data(self.source_type, "device" if source.isdecimal()
                           else "url" if "://" in source else "file")
@@ -822,6 +836,7 @@ class SettingsScreen(QWidget):
             card.set_theme(theme)
         for sc in self._backup_stats:
             sc.set_theme(theme)
+        self.updates_page.set_theme(theme)
         self._tab_strip.style().unpolish(self._tab_strip)
         self._tab_strip.style().polish(self._tab_strip)
         self._update_tab_icons()

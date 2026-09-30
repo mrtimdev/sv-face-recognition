@@ -4,6 +4,7 @@ The window owns the engine and the screens. Screens only talk to the engine via
 signals and are notified of settings changes by ``_broadcast_settings``.
 """
 import logging
+import os
 from datetime import datetime
 
 from PyQt6.QtCore import QSize, Qt, QTimer
@@ -12,10 +13,12 @@ from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel,
                              QMessageBox, QPushButton, QSizePolicy,
                              QStackedWidget, QStatusBar, QVBoxLayout, QWidget)
 
+from .. import updates
 from ..settings import SETTINGS_PATH, Settings, describe_source
+from ..version import __version__
 from ..config import ROOT
 from ..storage import context_path
-from .access import AccessControl, AccountWatcher, NAV_PERMISSIONS
+from .access import AccessControl, AccountWatcher, NAV_PERMISSIONS, guard
 from .bridge import to_pixmap
 from .engine import AttendanceEngine
 from .errors import DashboardErrorHandler
@@ -26,6 +29,7 @@ from .screens.live import LiveScreen
 from .screens.report import ReportScreen
 from .screens.settings import SettingsScreen
 from .screens.usage import UsageScreen
+from .screens.updates import UpdatePromptDialog
 from .screens.users import UsersScreen, ProfileDialog
 from .shutdown import ShutdownSequence, relaunch_command
 from .sysmon import Monitor as SysMonitor, Snapshot as SysSnapshot
@@ -38,7 +42,8 @@ from .widgets.activity_detail import load_photo
 from .widgets.capture_flash import CaptureFlash
 from .widgets.user_menu import role_title
 
-APP_VERSION = "v2.0.0"
+APP_VERSION = f"v{__version__}"
+UPDATE_CHECK_DELAY_MS = 4000
 SIDEBAR_WIDTH = 244
 
 NAV = (
@@ -96,6 +101,10 @@ class MainWindow(QMainWindow):
         self._last_row = -1
         self._exit = None
         self._exit_done = False
+        self._pending_install = None
+        self._update_prompt = None
+        self._prompt_for_update = False
+        self._notified_version = ""
         self._build()
         self.access.changed.connect(self._apply_access)
         self.capture_flash = CaptureFlash(self.centralWidget())
@@ -116,6 +125,14 @@ class MainWindow(QMainWindow):
         self.engine.unknownFaceAlert.connect(self._notify_unknown)
         self.engine.errorRaised.connect(self._notify_error)
         self.notifications.changed.connect(self._on_notifications_changed)
+        if updates.installed_location() is not None:
+            # Only an installed app updates itself; source runs (and tests) never phone home.
+            try:
+                updates.remove_stale_downloads()
+            except OSError:
+                logging.debug("could not tidy old update downloads", exc_info=True)
+            if settings.update_auto_check:
+                QTimer.singleShot(UPDATE_CHECK_DELAY_MS, self._auto_check_updates)
         if autostart:
             QTimer.singleShot(0, self._autostart)
 
@@ -378,6 +395,9 @@ class MainWindow(QMainWindow):
         ctx.settingsApplied.connect(
             lambda settings, restart: self._broadcast_settings(settings, restart))
         self.screens[4].usersChanged.connect(self._on_users_changed)
+        updates_page = self.screens[5].updates_page
+        updates_page.installRequested.connect(self._install_update)
+        updates_page.updateFound.connect(self._on_update_found)
         self.clock_timer = QTimer(self)
         self.clock_timer.setInterval(1000)
         self.clock_timer.timeout.connect(self._tick)
@@ -684,6 +704,9 @@ class MainWindow(QMainWindow):
 
     def _open_notification(self, item):
         payload = dict(item.payload or {})
+        if item.kind == "update":
+            self._open_updates()
+            return
         if item.kind not in ("checkin", "failed") or not payload:
             self._go("Live Monitor")
             return
@@ -787,8 +810,8 @@ class MainWindow(QMainWindow):
     def _relaunch_app(self, mode="restart"):
         self._begin_exit(mode)
 
-    def _begin_exit(self, mode):
-        """Stop everything behind a progress card, then quit or restart (see shutdown.py)."""
+    def _begin_exit(self, mode, detail=None):
+        """Stop everything behind a progress card, then quit, restart or update (see shutdown.py)."""
         if self._exit is not None or self._exit_done:
             return
         if self.account_watcher is not None:
@@ -796,19 +819,79 @@ class MainWindow(QMainWindow):
         self.notification_panel.close()
         self.user_menu.close()
         self.capture_flash.cancel()
-        self._note({"quit": "Shutting down\u2026", "signout": "Signing out\u2026"}.get(
-            mode, "Restarting\u2026"))
-        self._exit = ShutdownSequence(self, mode, services=(self.telegram, self._sys_monitor))
+        self._note({"quit": "Shutting down\u2026", "signout": "Signing out\u2026",
+                    "update": "Installing update\u2026"}.get(mode, "Restarting\u2026"))
+        self._exit = ShutdownSequence(self, mode, services=(self.telegram, self._sys_monitor),
+                                      detail=detail)
         self._exit.finished.connect(self._complete_exit)
         self._exit.start()
 
     def _complete_exit(self, mode):
         self._exit_done = True
-        if mode != "quit":
+        if mode == "update":
+            self._launch_installer()
+        elif mode != "quit":
             # Only now: the engine lock is released, so the new instance can take it.
             self._spawn_replacement()
         self._exit.overlay.done(0)
         self.close()
+
+    # --- application updates ------------------------------------------------
+    def _auto_check_updates(self):
+        if self._exit is not None or not self.access.allows("manage_settings"):
+            return
+        self._prompt_for_update = True
+        self.screens[5].updates_page.check_now()
+
+    def _on_update_found(self, release):
+        if self._notified_version != release.version:
+            self._notified_version = release.version
+            self.notifications.add("update", f"Version {release.version} is available",
+                                   "Open Settings \u203a Updates to install it.")
+        if not self._prompt_for_update or self._exit is not None:
+            return
+        self._prompt_for_update = False
+        prompt = UpdatePromptDialog(release, self.settings.theme, self)
+        prompt.finished.connect(self._update_prompt_done)
+        self._update_prompt = prompt
+        prompt.open()
+
+    def _update_prompt_done(self, _result):
+        prompt, self._update_prompt = self._update_prompt, None
+        if prompt is None:
+            return
+        page = self.screens[5].updates_page
+        if prompt.choice == prompt.INSTALL:
+            self._open_updates()
+            page.install_update()
+        elif prompt.choice == prompt.SKIP and page.current_release() is not None:
+            page.skip_version(page.current_release())
+        prompt.deleteLater()
+
+    def _open_updates(self):
+        self._go("Settings")
+        if self.stack.currentWidget() is self.screens[5]:
+            self.screens[5].show_updates()
+
+    def _install_update(self, release, package):
+        if not guard(self, "manage_settings", "install updates"):
+            return
+        try:
+            self._pending_install = updates.install_command(
+                package, updates.installed_location(), os.getpid())
+        except updates.UpdateError as exc:
+            QMessageBox.warning(self, "Can't install the update", str(exc))
+            return
+        self._begin_exit("update", detail=f"Version {release.version} will be installed, "
+                                          "then SV Face ID reopens by itself.")
+
+    def _launch_installer(self):
+        from PyQt6.QtCore import QProcess
+        program, arguments = self._pending_install
+        started, _pid = QProcess.startDetached(program, arguments)
+        if not started:
+            logging.error("Could not start the update installer: %s %s", program, arguments)
+            self._spawn_replacement()      # at least come back on the current version
 
     def _spawn_replacement(self):
         from PyQt6.QtCore import QProcess

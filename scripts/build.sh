@@ -26,9 +26,10 @@ echo "==> Done!"
 if [ -d "dist/SV Face ID.app" ]; then
     echo "    macOS app:  dist/SV Face ID.app"
     echo ""
+    VERSION=$(python scripts/set_version.py)
     echo "    To create a DMG installer:"
     echo "      hdiutil create -volname 'SV Face ID' -srcfolder 'dist/SV Face ID.app' \\"
-    echo "        -ov -format UDZO 'dist/SV-Face-ID-1.0.3.dmg'"
+    echo "        -ov -format UDZO 'dist/SV-Face-ID-v${VERSION}-mac.dmg'"
     echo ""
     echo "    To sign for distribution:"
     echo "      codesign --deep --force --sign 'Developer ID Application: YOUR NAME' 'dist/SV Face ID.app'"

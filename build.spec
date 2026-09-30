@@ -15,7 +15,11 @@ import platform
 # ── Options ──────────────────────────────────────────────────────────
 APP_NAME = "SV Face ID"
 BUNDLE_ID = "com.svtechnologies.faceid"
-VERSION = "1.0.3"
+# One version for the app, Info.plist and installers (stamped from the Git tag in CI).
+_version_ns = {}
+exec(open(os.path.join(os.path.abspath(SPECPATH), "face_attendance", "version.py"),
+          encoding="utf-8").read(), _version_ns)
+VERSION = _version_ns["__version__"]
 onefile = False          # True → single exe (slower startup); False → folder
 bundle = True            # macOS only: True → .app bundle
 console = False          # True → show terminal window (useful for debugging)
@@ -63,6 +67,10 @@ hiddenimports = [
     "face_attendance.camera",
     "face_attendance.models",
     "face_attendance.settings",
+    "face_attendance.version",
+    "face_attendance.updates",
+    "face_attendance.users",
+    "face_attendance.database",
     "face_attendance.config",
     "face_attendance.storage",
     "face_attendance.persistence",

@@ -38,6 +38,8 @@ MODES = {
                 "log-out", "blue", "Returning to the sign-in screen", "Signing out now…"),
     "quit": ("Shutting down", "The application is shutting down. Please wait a moment.",
              "power", "red", "Closing the application", "Closing now…"),
+    "update": ("Installing update", "SV Face ID will close, install the update and reopen.",
+               "download", "blue", "Starting the installer", "Installing now…"),
 }
 
 
@@ -190,8 +192,9 @@ class _StepRow(QWidget):
 class ShutdownOverlay(WindowOverlay):
     """Progress card shown while the dashboard stops; it cannot be dismissed."""
 
-    def __init__(self, mode="quit", theme="light", parent=None):
+    def __init__(self, mode="quit", theme="light", parent=None, detail=None):
         title, subtitle, glyph, tone, final_step, closing = MODES[mode]
+        subtitle = detail or subtitle
         super().__init__(theme, parent, dismissible=False, title=title)
         self.mode = mode
         self._closing_title = closing
@@ -274,12 +277,12 @@ class ShutdownSequence(QObject):
 
     finished = pyqtSignal(str)
 
-    def __init__(self, window, mode, services=()):
+    def __init__(self, window, mode, services=(), detail=None):
         super().__init__(window)
         self.mode = mode
         self._engine = window.engine
         self._services = tuple(services)
-        self.overlay = ShutdownOverlay(mode, window.settings.theme, window)
+        self.overlay = ShutdownOverlay(mode, window.settings.theme, window, detail)
         self._queue = []
         self._worker = None
         self._gate = QTimer(self)

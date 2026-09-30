@@ -28,6 +28,10 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller Pillow
 
+      - name: Stamp version from tag
+        # face_attendance/version.py feeds the app, Info.plist and the updater.
+        run: python scripts/set_version.py "$GITHUB_REF_NAME"
+
       - name: Build app bundle
         run: |
           source venv/bin/activate
@@ -62,6 +66,11 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller Pillow
 
+      - name: Stamp version from tag
+        # Manual (workflow_dispatch) builds keep the committed version.
+        if: github.ref_type == 'tag'
+        run: python scripts/set_version.py "$env:GITHUB_REF_NAME"
+
       - name: Build executable
         run: |
           .\venv\Scripts\Activate.ps1
@@ -70,7 +79,9 @@ jobs:
       - name: Create installer
         run: |
           choco install innosetup -y --no-progress
-          iscc scripts\installer.iss
+          $version = python scripts/set_version.py
+          Write-Host "Installer version: $version"
+          iscc "/DMyAppVersion=$version" scripts\installer.iss
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

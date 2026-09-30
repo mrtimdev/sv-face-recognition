@@ -97,6 +97,9 @@ class Settings:
     telegram_notify_capture: bool = True
     telegram_notify_unknown: bool = True
     dashboard_pin_hash: str = ""
+    update_auto_check: bool = True
+    update_skipped_version: str = ""
+    update_last_checked: str = ""     # ISO timestamp of the last successful check
 
     def to_config(self):
         """Build a validated ``Config``; raises ``ValueError`` for bad values."""

@@ -46,8 +46,7 @@ class Card(QFrame):
             self.subtitle_label.hide()
         self.text_col.addWidget(self.title_label)
         self.text_col.addWidget(self.subtitle_label)
-        header_row.addLayout(self.text_col)
-        header_row.addStretch(1)
+        header_row.addLayout(self.text_col, 1)
 
         self.actions = QHBoxLayout()
         self.actions.setSpacing(8)

@@ -10,7 +10,7 @@ To make a DMG installer:
 
 
 hdiutil create -volname 'SV Face ID' -srcfolder 'dist/SV Face ID.app' \
-  -ov -format UDZO 'dist/SV-Face-ID-1.0.3.dmg'
+  -ov -format UDZO "dist/SV-Face-ID-v$(python scripts/set_version.py)-mac.dmg"
 To sign for distribution (requires Apple Developer ID):
 
 
@@ -30,8 +30,9 @@ This produces dist\SV Face ID\SV Face ID.exe.
 To make an installer — install Inno Setup, then:
 
 
-iscc scripts\installer.iss
-Produces dist\SV-Face-ID-Setup-1.0.3.exe — a standard Windows installer with desktop shortcut.
+iscc /DMyAppVersion=1.0.6 scripts\installer.iss
+Produces dist\SV-Face-ID-Setup-1.0.6.exe — a standard Windows installer with desktop shortcut.
+(Use the version from `python scripts/set_version.py`; CI passes it automatically.)
 
 Recognition and PAD ONNX assets plus licenses are bundled by `build.spec`.
 Rebuild an existing app bundle to include the new backend. An older bundle
@@ -57,21 +58,53 @@ resolves these paths from the repository root, including the output path used
 by the artifact upload step.
 
 Re-running that old tagged workflow still uses the old commit. Use the manual
-branch build above, or create a new release tag that includes the fix. Before
-tagging a new version, update `VERSION` in `build.spec` and `AppVersion` and
-`OutputBaseFilename` in `scripts/installer.iss` to match it.
+branch build above, or create a new release tag that includes the fix.
+
+### One version, taken from the tag
+
+`face_attendance/version.py` is the only place the version lives. On a `v*`
+tag the workflow runs `python scripts/set_version.py <tag>` before building, so
+the app (sidebar, splash, Settings › Updates), the macOS `Info.plist`, the DMG
+and the Windows installer (`SV-Face-ID-Setup-<version>.exe`, and the version
+Windows shows under Installed apps) all match the tag. Nothing needs editing by
+hand. (Releases v1.0.4 and v1.0.5 shipped an installer still named 1.0.3
+because the version used to be typed into `installer.iss`.)
 
 ### Publish a release
 
 Push a version tag to automatically build both platforms and create a GitHub Release:
 
-    git tag v1.0.3
-    git push origin v1.0.3
-
-    git tag v1.0.4
-    git push origin v1.0.4
+    python scripts/set_version.py v1.0.6    # optional: keeps source runs in step
+    git commit -am "Release v1.0.6"
+    git tag v1.0.6
+    git push origin HEAD v1.0.6
 
 This triggers `.github/workflows/build-release.yml` which:
 - Builds macOS `.app` and packages it as a `.dmg`
 - Builds Windows `.exe` and creates an Inno Setup installer
 - Creates a GitHub Release with both artifacts attached
+
+## In-app updates
+
+The installed app checks `https://api.github.com/repos/mrtimdev/sv-face-recognition/releases/latest`
+(no token needed while the repository is public):
+
+- **Settings › Updates** shows the running version, *Check for updates*,
+  *Download & install*, *Skip this version* / *Stop skipping*, the release notes,
+  and *Check for updates automatically* (on by default).
+- With auto-check on, the installed app checks a few seconds after start and asks
+  accounts that can manage settings: *Install update*, *Skip this version* or
+  *Later*. A skipped version is not offered again; newer ones still are.
+- Downloads go to `<user data>/updates/` and must match the SHA-256 digest GitHub
+  publishes for the asset; otherwise nothing is installed.
+- Installing shuts the dashboard down (camera, recognition, queued attendance)
+  behind the progress card, then:
+  - **Windows**: runs `SV-Face-ID-Setup-<version>.exe /SILENT /RELAUNCH=1`
+    after the app has exited; the installer reopens the app.
+  - **macOS**: swaps `SV Face ID.app` from the DMG (keeping the old copy if the
+    swap fails) and reopens it. The app's folder must be writable by the user.
+- Running from source, the check works but nothing is installed.
+
+The first release that contains the updater must be installed by hand once;
+earlier versions (up to v1.0.5) cannot update themselves.
+

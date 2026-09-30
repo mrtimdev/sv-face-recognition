@@ -701,7 +701,8 @@ class SplashScreen(QWidget):
                        Qt.AlignmentFlag.AlignCenter, "Secure  •  Accurate  •  Smarter")
 
             pill_y = text_base_y + self._text_slide + 66
-            pill_text = "v2.0.0"
+            from ..version import __version__
+            pill_text = f"v{__version__}"
             pill_font = self._get_font(10, True)
             p.setFont(pill_font)
             pill_w = p.fontMetrics().horizontalAdvance(pill_text) + 20

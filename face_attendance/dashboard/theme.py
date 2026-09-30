@@ -1224,6 +1224,14 @@ QLabel#exitStep {{ font-size: 13px; color: {c['muted']}; }}
 QLabel#exitStep[state="active"] {{ color: {c['text']}; font-weight: 600; }}
 QLabel#exitStep[state="done"] {{ color: {c['text_secondary']}; }}
 QLabel#exitNote {{ font-size: 11px; color: {c['muted']}; }}
+QTextBrowser#releaseNotes {{
+    background-color: {c['panel_alt']};
+    border: 1px solid {c['border_soft']};
+    border-radius: 10px;
+    padding: 6px 10px;
+    color: {c['text_secondary']};
+    font-size: 12px;
+}}
 
 /* === Sign-in ============================================================ */
 QFrame#authForm {{ background-color: {c['card']}; border: none; }}
