@@ -40,7 +40,10 @@ class Card(QFrame):
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("cardSubtitle")
         self.subtitle_label.setWordWrap(True)
-        self.subtitle_label.setVisible(bool(subtitle))
+        # Only hide before parenting: showing a parentless widget would briefly
+        # create a top-level window.
+        if not subtitle:
+            self.subtitle_label.hide()
         self.text_col.addWidget(self.title_label)
         self.text_col.addWidget(self.subtitle_label)
         header_row.addLayout(self.text_col)
@@ -54,7 +57,8 @@ class Card(QFrame):
         self.divider = QFrame()
         self.divider.setObjectName("cardDivider")
         self.divider.setFixedHeight(1)
-        self.divider.setVisible(bool(divider and title))
+        if not (divider and title):
+            self.divider.hide()
         outer.addWidget(self.divider)
 
         self.body = QVBoxLayout()

@@ -1,16 +1,14 @@
 """Read-only attendance reporting for the dashboard.
 
-The persistence worker owns the only writing connection. The dashboard opens
-its own connection with ``PRAGMA query_only=ON``, so a report can never record,
-migrate or repair anything. Missing tables/columns (an unmigrated legacy file,
-or a database the engine has not opened yet) degrade to empty results instead
-of an exception.
+Supports SQLite, PostgreSQL, and MySQL via the ``database`` abstraction.
+The dashboard opens a read-only connection so a report can never record,
+migrate or repair anything.  Missing tables/columns degrade to empty results.
 """
 import csv
-import sqlite3
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+from .database import connect, DatabaseError
 from .storage import evidence_files
 
 
@@ -51,7 +49,7 @@ def preset_range(preset, now=None):
 
 
 def punctuality(epoch, work_start):
-    """Opt-in reporting label; it is computed on the fly and never persisted."""
+    """Opt-in reporting label; computed on the fly, never persisted."""
     if not epoch or not work_start:
         return ""
     try:
@@ -63,17 +61,25 @@ def punctuality(epoch, work_start):
 
 
 class AttendanceReader:
-    def __init__(self, path):
-        self.path = Path(path)
+    def __init__(self, settings):
         self.error = ""
         self.connection = None
-        if not self.path.exists():
-            return
+        self._col_cache = None
+        self._time_expr_cache = None
+        self._date_expr_cache = None
+        if isinstance(settings, (str, Path)):
+            backend = "sqlite"
+            if not Path(str(settings)).exists():
+                return
+        else:
+            backend = getattr(settings, "db_backend", "sqlite")
+            if backend == "sqlite":
+                path = Path(str(getattr(settings, "db_path", "attendance.db")))
+                if not path.exists():
+                    return
         try:
-            self.connection = sqlite3.connect(str(self.path), timeout=1.5)
-            self.connection.row_factory = sqlite3.Row
-            self.connection.execute("PRAGMA query_only=ON")
-        except sqlite3.Error as exc:
+            self.connection = connect(settings, readonly=True)
+        except DatabaseError as exc:
             self.error = str(exc)
             self.connection = None
 
@@ -82,18 +88,33 @@ class AttendanceReader:
         return self.connection is not None
 
     def _columns(self):
+        if self._col_cache is not None:
+            return self._col_cache
         if self.connection is None:
             return set()
         try:
-            return {row["name"] for row in self.connection.execute("PRAGMA table_info(attendance)")}
-        except sqlite3.Error:
+            self._col_cache = self.connection.get_columns("attendance")
+            return self._col_cache
+        except DatabaseError:
             return set()
 
     def _time_expression(self):
+        if self._time_expr_cache is not None:
+            return self._time_expr_cache
         columns = self._columns()
         parts = [name for name in ("recorded_at_epoch", "captured_at_epoch") if name in columns]
         parts.append("0")
-        return f"COALESCE({', '.join(parts)})"
+        self._time_expr_cache = f"COALESCE({', '.join(parts)})"
+        return self._time_expr_cache
+
+    def _date_expression(self, time_column):
+        if self._date_expr_cache is not None:
+            return self._date_expr_cache
+        if self.connection is not None:
+            self._date_expr_cache = self.connection.date_from_epoch(time_column)
+        else:
+            self._date_expr_cache = f"date({time_column}, 'unixepoch', 'localtime')"
+        return self._date_expr_cache
 
     def _filters(self, start=None, end=None, employee_id=None, search=None):
         time_column = self._time_expression()
@@ -120,14 +141,13 @@ class AttendanceReader:
             return []
         try:
             return self.connection.execute(sql, params).fetchall()
-        except sqlite3.Error as exc:
+        except DatabaseError as exc:
             self.error = str(exc)
             return []
 
     def _one(self, sql, params):
         rows = self._rows(sql, params)
         return rows[0] if rows else None
-
 
     def records(self, start=None, end=None, employee_id=None, search=None,
                 limit=100, offset=0):
@@ -153,12 +173,13 @@ class AttendanceReader:
 
     def summary(self, start=None, end=None, employee_id=None, search=None):
         where, params, time_column, _ = self._filters(start, end, employee_id, search)
+        date_expr = self._date_expression(time_column)
         row = self._one(f"""SELECT COUNT(*) AS records,
             COUNT(DISTINCT employee_id) AS employees,
             MIN(CASE WHEN {time_column} > 0 THEN {time_column} END) AS first_epoch,
             MAX({time_column}) AS last_epoch, SUM(COALESCE(duration, 0)) AS duration,
             COUNT(DISTINCT CASE WHEN {time_column} > 0
-                THEN date({time_column}, 'unixepoch', 'localtime') END) AS days
+                THEN {date_expr} END) AS days
             FROM attendance{where}""", params)
         if not row:
             return {"records": 0, "employees": 0, "first": None, "last": None,
@@ -169,8 +190,9 @@ class AttendanceReader:
 
     def daily(self, start=None, end=None, employee_id=None, search=None, limit=60):
         where, params, time_column, _ = self._filters(start, end, employee_id, search)
+        date_expr = self._date_expression(time_column)
         joiner = " AND " if where else " WHERE "
-        rows = self._rows(f"""SELECT date({time_column}, 'unixepoch', 'localtime') AS day,
+        rows = self._rows(f"""SELECT {date_expr} AS day,
             COUNT(*) AS records, COUNT(DISTINCT employee_id) AS employees,
             MIN({time_column}) AS first_epoch, MAX({time_column}) AS last_epoch
             FROM attendance{where}{joiner}{time_column} > 0
@@ -203,17 +225,20 @@ class AttendanceReader:
             self.connection = None
 
 
-def delete_records(db_path, record_ids, delete_snapshots=True, progress_cb=None):
-    """Delete attendance rows by id and optionally their snapshot files.
-
-    *progress_cb(done, total)* is called after each row so the UI can update a
-    progress bar.  Returns ``(deleted_rows, deleted_files)``.
-    """
-    db_path = Path(db_path)
-    if not db_path.exists() or not record_ids:
+def delete_records(settings, record_ids, delete_snapshots=True, progress_cb=None):
+    """Delete attendance rows by id and optionally their snapshot files."""
+    if not record_ids:
         return 0, 0
-    conn = sqlite3.connect(str(db_path), timeout=5)
-    conn.row_factory = sqlite3.Row
+    if isinstance(settings, (str, Path)):
+        if not Path(str(settings)).exists():
+            return 0, 0
+    else:
+        backend = getattr(settings, "db_backend", "sqlite")
+        if backend == "sqlite":
+            path = Path(str(getattr(settings, "db_path", "attendance.db")))
+            if not path.exists():
+                return 0, 0
+    conn = connect(settings)
     total = len(record_ids)
     deleted_rows = 0
     deleted_files = 0
@@ -238,7 +263,7 @@ def delete_records(db_path, record_ids, delete_snapshots=True, progress_cb=None)
             if progress_cb:
                 progress_cb(i + 1, total)
         conn.commit()
-    except sqlite3.Error:
+    except DatabaseError:
         conn.rollback()
         raise
     finally:

@@ -303,6 +303,38 @@ def _user_plus(p, pen):
     p.drawLine(QPointF(15.2, 12.2), QPointF(22.0, 12.2))
 
 
+def _user_x(p, pen):
+    p.setPen(pen)
+    p.drawEllipse(QRectF(3.8, 3.6, 8.0, 8.0))
+    path = QPainterPath()
+    path.arcMoveTo(QRectF(1.6, 12.4, 12.4, 12.4), 180)
+    path.arcTo(QRectF(1.6, 12.4, 12.4, 12.4), 180, -180)
+    p.drawPath(path)
+    p.drawLine(QPointF(16.2, 9.6), QPointF(21.0, 14.4))
+    p.drawLine(QPointF(21.0, 9.6), QPointF(16.2, 14.4))
+
+
+def _user_check(p, pen):
+    p.setPen(pen)
+    p.drawEllipse(QRectF(3.8, 3.6, 8.0, 8.0))
+    path = QPainterPath()
+    path.arcMoveTo(QRectF(1.6, 12.4, 12.4, 12.4), 180)
+    path.arcTo(QRectF(1.6, 12.4, 12.4, 12.4), 180, -180)
+    p.drawPath(path)
+    p.drawLine(QPointF(15.4, 12.2), QPointF(17.6, 14.4))
+    p.drawLine(QPointF(17.6, 14.4), QPointF(21.8, 9.4))
+
+
+def _power(p, pen):
+    p.setPen(pen)
+    path = QPainterPath()
+    ring = QRectF(4.2, 4.8, 15.6, 15.6)
+    path.arcMoveTo(ring, 122)
+    path.arcTo(ring, 122, 296)
+    p.drawPath(path)
+    p.drawLine(QPointF(12.0, 3.0), QPointF(12.0, 11.2))
+
+
 def _trash(p, pen):
     p.setPen(pen)
     p.drawLine(QPointF(4.0, 6.6), QPointF(20.0, 6.6))
@@ -386,6 +418,144 @@ def _dot(p, pen):
     p.setBrush(Qt.BrushStyle.NoBrush)
 
 
+def _log_out(p, pen):
+    p.setPen(pen)
+    path = QPainterPath()
+    path.moveTo(9, 21)
+    path.lineTo(5, 21)
+    path.arcTo(QRectF(3, 19, 4, 4), -90, -90)
+    path.lineTo(3, 5)
+    path.arcTo(QRectF(3, 3, 4, 4), 180, -90)
+    path.lineTo(9, 3)
+    p.drawPath(path)
+    p.drawLine(QPointF(9, 12), QPointF(21, 12))
+    p.drawLine(QPointF(17, 8), QPointF(21, 12))
+    p.drawLine(QPointF(17, 16), QPointF(21, 12))
+
+
+def _key(p, pen):
+    p.setPen(pen)
+    p.drawEllipse(QRectF(3.5, 10, 9, 9))
+    p.drawLine(QPointF(12, 14.5), QPointF(20.5, 14.5))
+    p.drawLine(QPointF(20.5, 14.5), QPointF(20.5, 11))
+    p.drawLine(QPointF(17, 14.5), QPointF(17, 11.5))
+
+
+def _lock(p, pen):
+    p.setPen(pen)
+    p.drawRoundedRect(QRectF(5, 11, 14, 10), 2, 2)
+    path = QPainterPath()
+    path.moveTo(8, 11)
+    path.lineTo(8, 8)
+    path.arcTo(QRectF(8, 4, 8, 8), 180, -180)
+    path.lineTo(16, 11)
+    p.drawPath(path)
+
+
+def _eye(p, pen):
+    p.setPen(pen)
+    path = QPainterPath()
+    path.moveTo(2.2, 12.0)
+    path.quadTo(12.0, 1.8, 21.8, 12.0)
+    path.quadTo(12.0, 22.2, 2.2, 12.0)
+    p.drawPath(path)
+    p.drawEllipse(QPointF(12.0, 12.0), 3.1, 3.1)
+
+
+def _eye_off(p, pen):
+    _eye(p, pen)
+    p.drawLine(QPointF(4.2, 3.8), QPointF(19.8, 20.2))
+
+
+def _mail(p, pen):
+    p.setPen(pen)
+    p.drawRoundedRect(QRectF(2.8, 5.2, 18.4, 13.6), 2.4, 2.4)
+    path = QPainterPath()
+    path.moveTo(3.6, 6.6)
+    path.lineTo(12.0, 12.8)
+    path.lineTo(20.4, 6.6)
+    p.drawPath(path)
+
+
+def _phone(p, pen):
+    p.setPen(pen)
+    p.drawRoundedRect(QRectF(6.4, 2.6, 11.2, 18.8), 2.6, 2.6)
+    p.drawLine(QPointF(10.6, 17.6), QPointF(13.4, 17.6))
+
+
+def _at(p, pen):
+    p.setPen(pen)
+    p.drawEllipse(QPointF(12.0, 12.0), 3.5, 3.5)
+    path = QPainterPath()
+    path.moveTo(15.5, 8.4)
+    path.lineTo(15.5, 13.4)
+    path.quadTo(15.5, 16.0, 18.0, 16.0)
+    path.quadTo(20.6, 16.0, 20.6, 12.0)
+    path.arcTo(QRectF(3.4, 3.4, 17.2, 17.2), 0, 290)
+    p.drawPath(path)
+
+
+def _edit(p, pen):
+    p.setPen(pen)
+    path = QPainterPath()
+    path.moveTo(4.2, 19.8)
+    path.lineTo(4.8, 15.6)
+    path.lineTo(15.6, 4.8)
+    path.lineTo(19.2, 8.4)
+    path.lineTo(8.4, 19.2)
+    path.closeSubpath()
+    p.drawPath(path)
+    p.drawLine(QPointF(13.2, 7.2), QPointF(16.8, 10.8))
+
+
+def _arrow_right(p, pen):
+    p.setPen(pen)
+    p.drawLine(QPointF(4.6, 12.0), QPointF(19.0, 12.0))
+    p.drawLine(QPointF(13.6, 6.6), QPointF(19.0, 12.0))
+    p.drawLine(QPointF(13.6, 17.4), QPointF(19.0, 12.0))
+
+
+def _check_all(p, pen):
+    p.setPen(pen)
+    p.drawLine(QPointF(2.2, 12.6), QPointF(6.6, 17.0))
+    p.drawLine(QPointF(6.6, 17.0), QPointF(15.2, 7.0))
+    p.drawLine(QPointF(11.2, 15.8), QPointF(12.4, 17.0))
+    p.drawLine(QPointF(12.4, 17.0), QPointF(21.0, 7.0))
+
+
+def _minus(p, pen):
+    p.setPen(pen)
+    p.drawLine(QPointF(6.4, 12.0), QPointF(17.6, 12.0))
+
+
+def _info(p, pen):
+    p.setPen(pen)
+    p.drawEllipse(QPointF(12.0, 12.0), 8.8, 8.8)
+    p.drawLine(QPointF(12.0, 11.2), QPointF(12.0, 16.4))
+    p.drawLine(QPointF(12.0, 7.8), QPointF(12.0, 7.9))
+
+
+def _inbox(p, pen):
+    p.setPen(pen)
+    path = QPainterPath()
+    path.moveTo(3.0, 13.0)
+    path.lineTo(6.2, 5.4)
+    path.lineTo(17.8, 5.4)
+    path.lineTo(21.0, 13.0)
+    path.lineTo(21.0, 18.6)
+    path.lineTo(3.0, 18.6)
+    path.closeSubpath()
+    p.drawPath(path)
+    path = QPainterPath()
+    path.moveTo(3.0, 13.0)
+    path.lineTo(8.2, 13.0)
+    path.lineTo(9.6, 15.4)
+    path.lineTo(14.4, 15.4)
+    path.lineTo(15.8, 13.0)
+    path.lineTo(21.0, 13.0)
+    p.drawPath(path)
+
+
 _GLYPHS = {
     "monitor": _monitor,
     "list": _list,
@@ -393,6 +563,9 @@ _GLYPHS = {
     "users": _users,
     "user": _user,
     "user-plus": _user_plus,
+    "user-x": _user_x,
+    "user-check": _user_check,
+    "power": _power,
     "grid": _grid,
     "dot": _dot,
     "gear": _gear,
@@ -429,6 +602,21 @@ _GLYPHS = {
     "send": _send,
     "bolt": _bolt,
     "face-id": _face_id,
+    "log-out": _log_out,
+    "logout": _log_out,
+    "key": _key,
+    "lock": _lock,
+    "eye": _eye,
+    "eye-off": _eye_off,
+    "mail": _mail,
+    "phone": _phone,
+    "at": _at,
+    "edit": _edit,
+    "arrow-right": _arrow_right,
+    "check-all": _check_all,
+    "minus": _minus,
+    "info": _info,
+    "inbox": _inbox,
 }
 
 

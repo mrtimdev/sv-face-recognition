@@ -9,8 +9,12 @@ from .status_pill import StatusPill
 from .toast import ToastBar
 from .toggle import ToggleSwitch
 from .video_view import VideoView
+from .loading import LoadingButton, ProgressLine
+from .notifications import NotificationButton, NotificationCenter, NotificationPanel
+from .user_menu import UserChip, UserMenuPanel
 
 __all__ = ["ActivityFeed", "ActivityRow", "Avatar", "Card", "EmptyState", "IconTile",
-           "PageHeader", "StatCard", "StatusPill", "ToastBar", "ToggleSwitch",
-           "VideoView", "initials"]
+           "LoadingButton", "NotificationButton", "NotificationCenter", "NotificationPanel",
+           "PageHeader", "ProgressLine", "StatCard", "StatusPill", "ToastBar", "ToggleSwitch",
+           "UserChip", "UserMenuPanel", "VideoView", "initials"]
 

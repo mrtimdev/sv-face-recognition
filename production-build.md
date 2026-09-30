@@ -68,6 +68,9 @@ Push a version tag to automatically build both platforms and create a GitHub Rel
     git tag v1.0.3
     git push origin v1.0.3
 
+    git tag v1.0.4
+    git push origin v1.0.4
+
 This triggers `.github/workflows/build-release.yml` which:
 - Builds macOS `.app` and packages it as a `.dmg`
 - Builds Windows `.exe` and creates an Inno Setup installer

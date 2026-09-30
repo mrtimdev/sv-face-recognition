@@ -91,7 +91,7 @@ class PersistenceWorker:
         try:
             while not self.stop_event.is_set():
                 try:
-                    repository = self.repository_factory(self.config.db_path, self.employee_map,
+                    repository = self.repository_factory(self.config, self.employee_map,
                                                          self.config.cooldown_sec)
                     self._refresh_totals(repository)
                     self.startup.put((repository.load_cooldowns(), ""))

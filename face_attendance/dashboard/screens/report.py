@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboB
                              QProgressBar, QPushButton, QSizePolicy, QSpinBox,
                              QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
+from ..access import guard
 from ...report import (AttendanceReader, delete_records, export_excel, export_rows,
                        local_text)
 from ...storage import context_path
@@ -432,7 +433,7 @@ class ReportScreen(QWidget):
         self.engine = engine
         self.settings = settings
         self._theme = settings.theme if hasattr(settings, "theme") else "dark"
-        self.reader = AttendanceReader(self.settings.db_path)
+        self.reader = AttendanceReader(self.settings)
         self.page = 0
         self.total = 0
         self.cards = {}
@@ -1035,6 +1036,8 @@ class ReportScreen(QWidget):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _export(self, scope):
+        if not guard(self, "export_data", "export attendance records"):
+            return
         start, end = self.selected_range()
         search = self.search_edit.text().strip() or None
         size = max(1, self.page_size_box.value())
@@ -1098,6 +1101,8 @@ class ReportScreen(QWidget):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _delete_selected(self):
+        if not guard(self, "manage_employees", "delete attendance records"):
+            return
         indices = self._selected_indices()
         if not indices:
             self.toast.show_message("No rows selected.", "warn")
@@ -1125,7 +1130,7 @@ class ReportScreen(QWidget):
 
         try:
             deleted_rows, deleted_files = delete_records(
-                self.settings.db_path, record_ids,
+                self.settings, record_ids,
                 delete_snapshots=True,
                 progress_cb=dlg.update_progress)
             dlg.set_finished(deleted_rows, deleted_files)
@@ -1136,7 +1141,7 @@ class ReportScreen(QWidget):
             for r in rows:
                 self._thumb_cache.pop(r.get("snapshot", ""), None)
             self.reader.close()
-            self.reader = AttendanceReader(self.settings.db_path)
+            self.reader = AttendanceReader(self.settings)
             self.reload()
             self.toast.show_message(
                 f"Deleted {deleted_rows} records and {deleted_files} snapshot files.", "ok")
@@ -1156,7 +1161,7 @@ class ReportScreen(QWidget):
         self.settings = settings
         self._theme = settings.theme if hasattr(settings, "theme") else "dark"
         self.reader.close()
-        self.reader = AttendanceReader(self.settings.db_path)
+        self.reader = AttendanceReader(self.settings)
         self._thumb_cache.clear()
         self.reload()
 

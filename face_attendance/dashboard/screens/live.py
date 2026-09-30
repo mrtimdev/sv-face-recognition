@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QF
 from ...settings import describe_source
 from ...config import ATTENDANCE_MODES
 from ...storage import context_path
+from ..access import guard
 from ..icons import IconLabel, apply_button_icon
 from ..bridge import to_pixmap
 from ...sound_events import EventSounds, SOUND_LABELS
@@ -202,6 +203,8 @@ class LiveScreen(QWidget):
             "Face recognition and anti-spoof checks remain required.")
 
     def _apply_requirements(self):
+        if not guard(self, "manage_settings", "change the attendance requirements"):
+            return
         mode = self.requirement_group.checkedButton().property("attendance_mode")
         candidate = replace(self.settings, attendance_mode=mode)
         try:
@@ -326,7 +329,7 @@ class LiveScreen(QWidget):
         menu = QMenu(self)
         menu.addAction("Open captures folder", self._open_captures)
         menu.addAction("Restart the engine", self._restart)
-        menu.addAction("Camera settings", self._open_settings)
+        self.camera_settings_action = menu.addAction("Camera settings", self._open_settings)
         menu.addAction("Toggle picture guide", self._toggle_guide)
         self.fullscreen_action = menu.addAction("Enter full screen", self._toggle_fullscreen)
         menu.addAction("Preview capture flash", self.flashPreviewRequested.emit)
@@ -475,6 +478,8 @@ class LiveScreen(QWidget):
         self.viewAllRequested.emit()
 
     def _toggle_engine(self):
+        if not guard(self, "control_engine", "start or stop the engine"):
+            return
         try:
             if self.engine.running:
                 self.engine.stop()
@@ -484,10 +489,14 @@ class LiveScreen(QWidget):
             self.on_error(str(exc))
 
     def _toggle_pause(self):
+        if not guard(self, "control_engine", "pause or resume attendance recording"):
+            return
         self.engine.toggle_paused()
         self._update_pause_button()
 
     def _restart(self):
+        if not guard(self, "control_engine", "restart the engine"):
+            return
         try:
             self.engine.restart()
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
@@ -503,6 +512,8 @@ class LiveScreen(QWidget):
         self.log_toggle.setText("Hide" if visible else "Show")
 
     def _save_snapshot(self):
+        if not guard(self, "export_data", "save camera snapshots"):
+            return
         frame = self.engine.grab_clean_frame()
         if frame is None:
             self.toast.show_message("No camera frame yet - start the engine first.", "warn")
@@ -517,6 +528,8 @@ class LiveScreen(QWidget):
                                 "ok" if ok else "bad")
 
     def _open_captures(self):
+        if not guard(self, "export_data", "open the captures folder"):
+            return
         directory = Path(self.settings.capture_dir)
         directory.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
@@ -524,6 +537,13 @@ class LiveScreen(QWidget):
     def clear_logs(self):
         self.log_list.clear()
         self._log_rows = []
+
+    def apply_access(self, access):
+        """Hide shortcuts into screens this account cannot open."""
+        self.view_all_button.setVisible(access.allows_nav("Attendance Report"))
+        can_configure = access.allows_nav("Settings")
+        self.preview_hud.settings.setVisible(can_configure)
+        self.camera_settings_action.setVisible(can_configure)
 
     # ── slots ────────────────────────────────────────────────────────────
 

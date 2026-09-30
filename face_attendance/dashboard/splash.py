@@ -1,7 +1,6 @@
 """Animated splash screen with real environment checks and loading progress."""
 import math
 import random
-import sqlite3
 from pathlib import Path
 
 from PyQt6.QtCore import (QEasingCurve, QParallelAnimationGroup, QPointF,
@@ -112,17 +111,19 @@ class _CheckWorker(QThread):
 
     def _check_database(self):
         try:
-            db_path = Path(self._settings.db_path)
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(db_path), timeout=1.5)
-            conn.execute("PRAGMA integrity_check")
-            row = conn.execute(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='attendance'"
-            ).fetchone()
+            from ..database import connect
+            backend = getattr(self._settings, "db_backend", "sqlite")
+            if backend == "sqlite":
+                db_path = Path(self._settings.db_path)
+                db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = connect(self._settings, readonly=True)
+            conn.integrity_check()
+            exists = conn.table_exists("attendance")
             conn.close()
-            if row[0]:
-                return True, "Database OK"
-            return True, "New database (will be created)"
+            label = backend.upper() if backend != "sqlite" else "Database"
+            if exists:
+                return True, f"{label} OK"
+            return True, f"{label} — new (will be created)"
         except Exception as exc:
             return False, str(exc)[:60]
 
@@ -472,14 +473,15 @@ class SplashScreen(QWidget):
 
     def _on_relaunch(self):
         import os
-        import sys
         self.hide()
         if self._worker:
             self._worker.wait(2000)
         app = QApplication.instance()
         if app:
             app.quit()
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        from .shutdown import relaunch_command
+        program, arguments = relaunch_command()
+        os.execv(program, [program] + arguments)
 
     def _on_continue(self):
         self._btn_quit.hide()
@@ -503,6 +505,17 @@ class SplashScreen(QWidget):
             self._worker.wait(2000)
         if self._finished_callback:
             self._finished_callback()
+
+    def cancel(self):
+        """Stop for good without running the finished callback (the app is quitting)."""
+        from .threads import settle
+        self._finished_callback = None
+        self._sequence.stop()
+        self._fade_anim.stop()
+        self._tick_timer.stop()
+        # A slow camera probe may outlive the splash; it must not die mid-run.
+        settle(self._worker)
+        self.hide()
 
     def _tick(self):
         self._particle_time += 0.016

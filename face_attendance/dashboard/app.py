@@ -8,26 +8,35 @@ from datetime import datetime
 
 from PyQt6.QtCore import QSize, Qt, QTimer
 from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel,
-                             QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-                             QMessageBox, QPushButton, QSizePolicy, QStackedWidget, QStatusBar,
-                             QVBoxLayout, QWidget)
+                             QListWidget, QListWidgetItem, QMainWindow,
+                             QMessageBox, QPushButton, QSizePolicy,
+                             QStackedWidget, QStatusBar, QVBoxLayout, QWidget)
 
-from ..settings import SETTINGS_PATH, Settings, describe_source, hash_pin
+from ..settings import SETTINGS_PATH, Settings, describe_source
 from ..config import ROOT
+from ..storage import context_path
+from .access import AccessControl, AccountWatcher, NAV_PERMISSIONS
+from .bridge import to_pixmap
 from .engine import AttendanceEngine
 from .errors import DashboardErrorHandler
 from .icons import IconLabel, apply_button_icon, make_icon
+from .login import LoginDialog, UserLoginDialog
 from .screens.employees import EmployeesScreen
 from .screens.live import LiveScreen
 from .screens.report import ReportScreen
 from .screens.settings import SettingsScreen
 from .screens.usage import UsageScreen
+from .screens.users import UsersScreen, ProfileDialog
+from .shutdown import ShutdownSequence, relaunch_command
 from .sysmon import Monitor as SysMonitor, Snapshot as SysSnapshot
 from .telegram import TelegramService
 from .theme import palette, stylesheet
-from .widgets import Avatar, StatusPill
+from .widgets import (IconTile, NotificationButton, NotificationCenter, NotificationPanel,
+                      StatusPill, UserChip, UserMenuPanel)
 from .splash import SplashScreen
+from .widgets.activity_detail import load_photo
 from .widgets.capture_flash import CaptureFlash
+from .widgets.user_menu import role_title
 
 APP_VERSION = "v2.0.0"
 SIDEBAR_WIDTH = 244
@@ -37,6 +46,7 @@ NAV = (
     ("chart", "Attendance Report"),
     ("users", "Enrolled Employees"),
     ("bolt", "Live Usage"),
+    ("shield", "Users & Access"),
     ("gear", "Settings"),
 )
 
@@ -64,133 +74,12 @@ class HeaderDetails(QLabel):
         self._elide()
 
 
-class NotificationButton(QPushButton):
-    """Round icon button that can carry an unread-count bubble."""
-
-    def __init__(self, icon_name="bell", parent=None):
-        super().__init__(parent)
-        self.setObjectName("headerIconButton")
-        self.setFixedSize(42, 42)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._icon_label = IconLabel(icon_name, 20, palette("light")["muted"], parent=self)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._icon_label, 0, Qt.AlignmentFlag.AlignCenter)
-        self.badge = QLabel("", self)
-        self.badge.setObjectName("badge")
-        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.badge.setVisible(False)
-
-    def set_icon_name(self, name, color):
-        self._icon_label.set_icon(name)
-        self._icon_label.set_icon_color(color)
-
-    def set_count(self, count):
-        count = int(count or 0)
-        self.badge.setText(str(count) if count < 100 else "99+")
-        self.badge.setVisible(count > 0)
-        self._place_badge()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._place_badge()
-
-    def _place_badge(self):
-        width = max(16, self.badge.fontMetrics().horizontalAdvance(self.badge.text()) + 8)
-        self.badge.setFixedSize(width, 16)
-        self.badge.move(self.width() - width - 5, 3)
-
-
-class LoginDialog(QDialog):
-    """Blocks dashboard access until the correct PIN is entered."""
-
-    def __init__(self, pin_hash, parent=None):
-        super().__init__(parent)
-        self._pin_hash = pin_hash
-        self._attempts = 0
-        self.setWindowTitle("Face ID Attendance - Login")
-        self.setFixedSize(400, 320)
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 24, 24, 24)
-        card = QFrame()
-        card.setObjectName("loginCard")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(24, 26, 24, 22)
-        layout.setSpacing(10)
-
-        brand_row = QHBoxLayout()
-        brand_row.setSpacing(10)
-        tile = QFrame()
-        tile.setObjectName("brandTile")
-        tile.setFixedSize(40, 40)
-        tile_layout = QHBoxLayout(tile)
-        tile_layout.setContentsMargins(0, 0, 0, 0)
-        self._brand_icon = IconLabel("face-id", 22, "#FFFFFF")
-        tile_layout.addWidget(self._brand_icon, 0, Qt.AlignmentFlag.AlignCenter)
-        brand_row.addWidget(tile)
-        brand_text = QVBoxLayout()
-        brand_text.setSpacing(0)
-        brand_title = QLabel("Face ID Attendance")
-        brand_title.setObjectName("appTitle")
-        brand_note = QLabel("Administrator sign-in")
-        brand_note.setObjectName("brandMark")
-        brand_text.addWidget(brand_title)
-        brand_text.addWidget(brand_note)
-        brand_row.addLayout(brand_text)
-        brand_row.addStretch(1)
-        layout.addLayout(brand_row)
-        layout.addSpacing(6)
-
-        title = QLabel("Unlock the dashboard")
-        title.setObjectName("loginTitle")
-        layout.addWidget(title)
-        hint = QLabel("Enter the dashboard PIN to continue.")
-        hint.setObjectName("emptyBody")
-        layout.addWidget(hint)
-        layout.addSpacing(4)
-
-        self._pin = QLineEdit()
-        self._pin.setEchoMode(QLineEdit.EchoMode.Password)
-        self._pin.setPlaceholderText("PIN")
-        self._pin.setMinimumHeight(38)
-        self._pin.returnPressed.connect(self._check)
-        layout.addWidget(self._pin)
-        self._message = QLabel("")
-        self._message.setObjectName("emptyBody")
-        self._message.setWordWrap(True)
-        layout.addWidget(self._message)
-        layout.addStretch(1)
-
-        self._button = QPushButton("Unlock dashboard")
-        self._button.setObjectName("primary")
-        self._button.setMinimumHeight(38)
-        self._button.clicked.connect(self._check)
-        layout.addWidget(self._button)
-        outer.addWidget(card)
-        self._pin.setFocus()
-
-    def _check(self):
-        if hash_pin(self._pin.text()) == self._pin_hash:
-            self.accept()
-            return
-        self._attempts += 1
-        remaining = max(0, 5 - self._attempts)
-        if remaining == 0:
-            self._message.setText("Too many failed attempts.")
-            self.reject()
-            return
-        self._message.setText(f"Incorrect PIN. {remaining} attempt(s) remaining.")
-        self._pin.clear()
-        self._pin.setFocus()
-
-
 class MainWindow(QMainWindow):
     def __init__(self, settings, backend=None, capture_factory=None, use_lock=True,
-                 autostart=False):
+                 autostart=False, current_user=None):
         super().__init__()
         self.settings = settings
+        self.current_user = current_user
         self.engine = AttendanceEngine(settings, self, backend=backend,
                                       capture_factory=capture_factory, use_lock=use_lock)
         self.telegram = TelegramService(
@@ -202,16 +91,31 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Face ID Attendance - Admin Dashboard")
         self.resize(1280, 800)
         self.setMinimumSize(1100, 680)
-        self._pending_notifications = 0
+        self.notifications = NotificationCenter(self)
+        self.access = AccessControl(current_user, settings.theme, self)
+        self._last_row = -1
+        self._exit = None
+        self._exit_done = False
         self._build()
+        self.access.changed.connect(self._apply_access)
         self.capture_flash = CaptureFlash(self.centralWidget())
         self._connect()
         self.apply_theme(settings.theme)
+        self.account_watcher = None
+        if current_user is not None:
+            self.account_watcher = AccountWatcher(settings, current_user, self)
+            self.account_watcher.changed.connect(self._apply_account)
+            self.account_watcher.start()
         self.engine.logMessage.connect(self._note)
         self.engine.errorRaised.connect(lambda message: self._note(f"ERROR: {message}"))
         self.engine.catalogChanged.connect(lambda rows: self._refresh_header())
         self.engine.attendanceSaved.connect(self._telegram_on_saved)
         self.engine.unknownFaceAlert.connect(self._telegram_on_unknown)
+        self.engine.attendanceSaved.connect(self._notify_saved)
+        self.engine.attendanceFailed.connect(self._notify_failed)
+        self.engine.unknownFaceAlert.connect(self._notify_unknown)
+        self.engine.errorRaised.connect(self._notify_error)
+        self.notifications.changed.connect(self._on_notifications_changed)
         if autostart:
             QTimer.singleShot(0, self._autostart)
 
@@ -237,18 +141,20 @@ class MainWindow(QMainWindow):
             ReportScreen(self.engine, self.settings),
             EmployeesScreen(self.engine, self.settings),
             UsageScreen(self.engine, self.settings),
+            UsersScreen(self.engine, self.settings, current_user=self.current_user),
             SettingsScreen(self.engine, self.settings),
         ]
         for screen in self.screens:
             self.stack.addWidget(screen)
+        self.no_access_page = self._build_no_access_page()
+        self.stack.addWidget(self.no_access_page)
         body.addWidget(self.stack, 1)
         root.addLayout(body, 1)
 
         self.setCentralWidget(central)
         self._build_status_bar()
-        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
-        self.nav.currentRowChanged.connect(self._refresh_header)
-        self.nav.setCurrentRow(0)
+        self.nav.currentRowChanged.connect(self._on_nav_changed)
+        self._apply_access()
         self._refresh_header()
 
     def _build_header(self):
@@ -307,14 +213,30 @@ class MainWindow(QMainWindow):
         clock.addWidget(self.date_label)
         row.addLayout(clock)
 
-        self.notif_button = NotificationButton("bell")
-        self.notif_button.setToolTip("Notifications")
-        self.notif_button.clicked.connect(self._show_notifications)
-        row.addWidget(self.notif_button)
+        # ── notifications + account ──────────────────────────────────────
+        account = QHBoxLayout()
+        account.setSpacing(10)
+        theme = self.settings.theme
+        self.notif_button = NotificationButton(theme)
+        self.notif_button.clicked.connect(self._toggle_notifications)
+        account.addWidget(self.notif_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.notification_panel = NotificationPanel(self.notifications, theme, self)
+        self.notification_panel.activated.connect(self._open_notification)
+        self.notification_panel.reportRequested.connect(lambda: self._go("Attendance Report"))
+        self.notification_panel.closed.connect(self._notifications_closed)
 
-        self.avatar = Avatar("Admin", size=36)
-        self.avatar.setToolTip("Signed in as Admin")
-        row.addWidget(self.avatar)
+        self.user_chip = UserChip(theme=theme)
+        self.user_chip.clicked.connect(self._toggle_user_menu)
+        account.addWidget(self.user_chip, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.avatar = self.user_chip.avatar
+        self.user_menu = UserMenuPanel(theme, self)
+        self.user_menu.profileRequested.connect(self._show_profile)
+        self.user_menu.usersRequested.connect(lambda: self._go("Users & Access"))
+        self.user_menu.settingsRequested.connect(lambda: self._go("Settings"))
+        self.user_menu.signOutRequested.connect(self._logout)
+        self.user_menu.closed.connect(lambda: self.user_chip.set_open(False))
+        row.addLayout(account)
+        self._sync_identity()
         return header
 
     def _build_sidebar(self):
@@ -331,6 +253,7 @@ class MainWindow(QMainWindow):
         section.setObjectName("brandMark")
         section.setContentsMargins(28, 20, 18, 6)
         column.addWidget(section)
+        self.nav_section = section
 
         self.nav = QListWidget()
         self.nav.setObjectName("nav")
@@ -375,12 +298,14 @@ class MainWindow(QMainWindow):
         self.btn_relaunch.setObjectName("controlButton")
         self.btn_relaunch.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_button_icon(self.btn_relaunch, "restart", 14)
-        self.btn_relaunch.clicked.connect(self._relaunch_app)
+        self.btn_relaunch.setToolTip("Restart the application")
+        self.btn_relaunch.clicked.connect(lambda: self._relaunch_app())
         self.btn_quit = QPushButton("  Quit")
         self.btn_quit.setObjectName("controlButtonDanger")
         self.btn_quit.setCursor(Qt.CursorShape.PointingHandCursor)
-        apply_button_icon(self.btn_quit, "x", 14)
-        self.btn_quit.clicked.connect(self._quit_app)
+        apply_button_icon(self.btn_quit, "power", 14)
+        self.btn_quit.setToolTip("Shut down the application")
+        self.btn_quit.clicked.connect(lambda: self._quit_app())
         btn_row.addWidget(self.btn_relaunch)
         btn_row.addWidget(self.btn_quit)
         footer_layout.addLayout(btn_row)
@@ -406,7 +331,7 @@ class MainWindow(QMainWindow):
         usage_widget = QWidget()
         usage_widget.setCursor(Qt.CursorShape.PointingHandCursor)
         usage_widget.setToolTip("Click to open Live Usage")
-        usage_widget.mousePressEvent = lambda _: self.nav.setCurrentRow(3)
+        usage_widget.mousePressEvent = lambda _: self._go("Live Usage")
         row = QHBoxLayout(usage_widget)
         row.setContentsMargins(8, 0, 8, 0)
         row.setSpacing(14)
@@ -446,13 +371,13 @@ class MainWindow(QMainWindow):
         self.engine.attendanceFailed.connect(lambda _: self.capture_flash.cancel())
         live = self.screens[0]
         live.flashPreviewRequested.connect(lambda: self.capture_flash.trigger(preview=True))
-        live.viewAllRequested.connect(lambda: self.nav.setCurrentRow(1))
-        live.settingsRequested.connect(lambda: self.nav.setCurrentRow(4))
+        live.viewAllRequested.connect(lambda: self._go("Attendance Report"))
+        live.settingsRequested.connect(lambda: self._go("Settings"))
         live.settingsApplied.connect(self._broadcast_settings)
-        ctx = self.screens[4]
+        ctx = self.screens[5]
         ctx.settingsApplied.connect(
             lambda settings, restart: self._broadcast_settings(settings, restart))
-        self.nav.currentRowChanged.connect(lambda row: self._refresh_nav_icons())
+        self.screens[4].usersChanged.connect(self._on_users_changed)
         self.clock_timer = QTimer(self)
         self.clock_timer.setInterval(1000)
         self.clock_timer.timeout.connect(self._tick)
@@ -479,8 +404,10 @@ class MainWindow(QMainWindow):
             enrolled = self.engine.catalog.enrolled_count
         except Exception:
             enrolled = 0
-        current = max(0, self.nav.currentRow())
-        self.page_title.setText(NAV[current][1])
+        if self.stack.currentWidget() is self.no_access_page:
+            self.page_title.setText("No access")
+        else:
+            self.page_title.setText(NAV[max(0, self.nav.currentRow())][1])
         details = (f"{enrolled} {'employee' if enrolled == 1 else 'employees'} enrolled"
                    f"  \u2022  {describe_source(self.settings.source)}")
         self.header_details.setText(details)
@@ -496,32 +423,284 @@ class MainWindow(QMainWindow):
 
     def _refresh_chrome(self):
         """Re-tint every hand-painted glyph after a theme switch."""
-        colors = palette(self.settings.theme)
-        self.avatar.set_theme(self.settings.theme)
-        self.engine_pill.set_theme(self.settings.theme)
-        self.notif_button.set_icon_name("bell", colors["text_secondary"])
-        self.notif_button.badge.setStyleSheet(
-            f"background-color: {colors['badge_bg']}; color: {colors['badge_fg']};"
-            "border-radius: 8px; font-size: 10px; font-weight: 700;")
+        theme = self.settings.theme
+        self.engine_pill.set_theme(theme)
+        self.no_access_tile.set_tone("orange", theme)
+        apply_button_icon(self.no_access_sign_out, "log-out", palette(theme)["danger"], 14)
+        self.notif_button.set_theme(theme)
+        self.user_chip.set_theme(theme)
+        self.notification_panel.set_theme(theme)
+        self.user_menu.set_theme(theme)
         self._refresh_nav_icons()
         self._style_status_labels()
         self._engine_state(self.engine.running)
 
-    def notify(self, count=1):
-        """Bump the notification badge in the header."""
-        self._pending_notifications += count
-        self.notif_button.set_count(self._pending_notifications)
+    def _go(self, title):
+        """Switch to the navigation entry labelled *title* (refused without access)."""
+        for row, (_icon, label) in enumerate(NAV):
+            if label == title:
+                self.nav.setCurrentRow(row)
+                return
 
-    def _show_notifications(self):
-        if not self._pending_notifications:
-            self._note("No new notifications.")
+    # --- role-based access ----------------------------------------------------
+    def _build_no_access_page(self):
+        page = QWidget()
+        page.setObjectName("plain")
+        column = QVBoxLayout(page)
+        column.setContentsMargins(40, 40, 40, 40)
+        column.setSpacing(0)
+        column.addStretch(1)
+        self.no_access_tile = IconTile("lock", tone="orange", size=72, theme=self.settings.theme)
+        column.addWidget(self.no_access_tile, 0, Qt.AlignmentFlag.AlignHCenter)
+        column.addSpacing(18)
+        title = QLabel("No areas available")
+        title.setObjectName("dialogTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        column.addWidget(title)
+        column.addSpacing(6)
+        body = QLabel("Your account is signed in but has no permissions yet.\n"
+                      "Ask an administrator to grant access in Users & Access.")
+        body.setObjectName("dialogSubtitle")
+        body.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        column.addWidget(body)
+        column.addSpacing(8)
+        self.no_access_account = QLabel("")
+        self.no_access_account.setObjectName("fieldHelp")
+        self.no_access_account.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        column.addWidget(self.no_access_account)
+        column.addSpacing(20)
+        self.no_access_sign_out = QPushButton("  Sign out")
+        self.no_access_sign_out.setObjectName("controlButton")
+        self.no_access_sign_out.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.no_access_sign_out.setMinimumHeight(36)
+        self.no_access_sign_out.clicked.connect(self._logout)
+        column.addWidget(self.no_access_sign_out, 0, Qt.AlignmentFlag.AlignHCenter)
+        column.addStretch(1)
+        return page
+
+    def _on_nav_changed(self, row):
+        if row < 0:
             return
-        self._note(f"{self._pending_notifications} new event(s) since the last check.")
-        self._pending_notifications = 0
-        self.notif_button.set_count(0)
+        title = NAV[row][1]
+        if not self.access.allows_nav(title):
+            # Hidden entries can still be reached programmatically: refuse and explain.
+            self.nav.blockSignals(True)
+            self.nav.setCurrentRow(self._last_row)
+            self.nav.blockSignals(False)
+            self._refresh_nav_icons()
+            self.access.deny(NAV_PERMISSIONS[title], f"open {title}", self)
+            return
+        self._last_row = row
+        self.stack.setCurrentIndex(row)
+        self._refresh_header()
+        self._refresh_nav_icons()
+
+    def _apply_access(self):
+        """Show only what the signed-in account may open; move off a screen it lost."""
+        access = self.access
+        allowed = [row for row, (_icon, title) in enumerate(NAV) if access.allows_nav(title)]
+        for row in range(self.nav.count()):
+            self.nav.item(row).setHidden(row not in allowed)
+        self.nav_section.setVisible(bool(allowed))
+        self.no_access_account.setText(access.account_label())
+        self.user_menu.set_shortcuts(users=access.allows_nav("Users & Access"),
+                                     settings=access.allows_nav("Settings"))
+        live_events = access.allows("view_dashboard")
+        if not live_events:
+            self.notification_panel.close()
+        self.notif_button.setVisible(live_events)
+        self.notification_panel.set_report_link_visible(access.allows_nav("Attendance Report"))
+        for screen in self.screens:
+            hook = getattr(screen, "apply_access", None)
+            if callable(hook):
+                hook(access)
+        if not allowed:
+            self._last_row = -1
+            self.nav.blockSignals(True)
+            self.nav.setCurrentRow(-1)
+            self.nav.blockSignals(False)
+            self.stack.setCurrentWidget(self.no_access_page)
+            self._refresh_header()
+            self._refresh_nav_icons()
+        elif self.nav.currentRow() not in allowed:
+            self._last_row = allowed[0]
+            self.nav.setCurrentRow(allowed[0])
+        elif self.stack.currentWidget() is self.no_access_page:
+            self._on_nav_changed(self.nav.currentRow())
+
+    def _apply_account(self, fresh):
+        """The signed-in account changed elsewhere: sign out, or update access in place."""
+        if self.current_user is None:
+            return
+        if fresh is None or fresh.disabled:
+            self._force_sign_out("Your account was removed." if fresh is None
+                                 else "Your account was disabled by an administrator.")
+            return
+        access_changed = ((fresh.role, sorted(fresh.permissions))
+                          != (self.current_user.role, sorted(self.current_user.permissions)))
+        self.current_user = fresh
+        if self.account_watcher is not None:
+            self.account_watcher.set_user(fresh)
+        self.screens[4].set_current_user(fresh)
+        self._sync_identity()
+        self.access.set_user(fresh)
+        if access_changed:
+            self._note("Your access was updated by an administrator.")
+
+    def _force_sign_out(self, reason):
+        if getattr(self, "_signing_out", False):
+            return
+        self._signing_out = True
+        if self.account_watcher is not None:
+            self.account_watcher.stop()
+        from ..users import clear_session
+        clear_session()
+        box = QMessageBox(QMessageBox.Icon.Information, "Signed out", reason,
+                          QMessageBox.StandardButton.Ok, self)
+        box.setInformativeText("The dashboard will restart at the sign-in screen.")
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.finished.connect(lambda _result: self._relaunch_app(mode="signout"))
+        box.open()
+
+    # --- signed-in identity -------------------------------------------------
+    def _identity(self):
+        """(name, role subtitle, avatar path, menu meta line, role) for the header."""
+        user = self.current_user
+        if user is not None:
+            return (user.full_name or user.username, role_title(user.role), user.avatar_path,
+                    user.email or f"@{user.username}", role_title(user.role))
+        mode = "PIN access" if self.settings.dashboard_pin_hash else "Local access"
+        return "Administrator", mode, None, "Signed in on this computer", ""
+
+    def _sync_identity(self):
+        name, subtitle, image, meta, role = self._identity()
+        self.user_chip.set_user(name, subtitle, image)
+        self.user_menu.set_user(name, meta, role, image,
+                                can_sign_out=bool(self.current_user or self.settings.dashboard_pin_hash),
+                                has_profile=self.current_user is not None)
+
+    def _on_users_changed(self, users):
+        if self.current_user is None:
+            return
+        fresh = next((user for user in users if user.uuid == self.current_user.uuid), None)
+        self._apply_account(fresh)
+
+    def _toggle_user_menu(self):
+        menu = self.user_menu
+        if menu.isVisible():
+            menu.close()
+            return
+        if menu.recently_closed():
+            return
+        self._sync_identity()
+        self.user_chip.set_open(True)
+        menu.open_below(self.user_chip)
+
+    def _show_profile(self):
+        if not self.current_user:
+            self._note("No user session active.")
+            return
+        try:
+            from ..users import UserRepository
+            repo = UserRepository(self.settings)
+            fresh = repo.get_user(self.current_user.uuid)
+            if fresh:
+                self.current_user = fresh
+        except Exception:
+            pass
+        dlg = ProfileDialog(self.current_user, self.settings,
+                            theme=self.settings.theme, parent=self)
+        dlg.exec()
+        self._sync_identity()
+
+    def _logout(self):
+        from ..users import clear_session
+        clear_session()
+        self._relaunch_app(mode="signout")
+
+    # --- notifications ------------------------------------------------------
+    def _toggle_notifications(self):
+        panel = self.notification_panel
+        if panel.isVisible():
+            panel.close()
+            return
+        if panel.recently_closed():
+            return
+        self.notifications.mark_seen()
+        self.notif_button.set_open(True)
+        panel.open_below(self.notif_button)
+
+    def _notifications_closed(self):
+        self.notif_button.set_open(False)
+        # Everything shown in the panel has now been read.
+        self.notifications.mark_read()
+
+    def _on_notifications_changed(self):
+        if self.notification_panel.isVisible():
+            self.notifications.mark_seen()
+        self.notif_button.set_count(self.notifications.unseen_count())
+
+    @staticmethod
+    def _face_thumbnail(frame):
+        pixmap = to_pixmap(frame)
+        if pixmap.isNull():
+            return None
+        return pixmap.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                             Qt.TransformationMode.SmoothTransformation)
+
+    @staticmethod
+    def _evidence(result, status, detail):
+        """What the capture-detail dialog needs, minus the (large) frames themselves."""
+        job = result.job
+        return {"name": job.employee_name, "employee_id": job.employee_id, "status": status,
+                "detail": detail, "snapshot": result.snapshot or "", "face_box": job.face_box,
+                "captured_at": datetime.fromtimestamp(job.captured_at).strftime("%d %b %Y · %H:%M:%S"),
+                "duration": f"{job.duration:.1f}s", "event_id": job.event_id}
+
+    def _notify_saved(self, result):
+        job = result.job
+        self.notifications.add(
+            "checkin", job.employee_name,
+            f"Checked in • ID {job.employee_id} • {job.duration:.1f}s verified",
+            thumbnail=self._face_thumbnail(job.frame),
+            payload=self._evidence(result, "Check-in saved", f"{job.duration:.1f}s verified presence"))
+
+    def _notify_failed(self, result):
+        job = result.job
+        error = str(result.error or "Unknown error")
+        self.notifications.add(
+            "failed", "Attendance not saved", f"{job.employee_name} • {error}",
+            thumbnail=self._face_thumbnail(job.frame),
+            payload=self._evidence(result, "Save failed", error))
+
+    def _notify_unknown(self, info):
+        seconds = float(info.get("age") or 0)
+        self.notifications.add(
+            "unknown", "Unknown face detected",
+            f"Unrecognized person in view for {seconds:.0f}s • track #{info.get('track_id')}")
+
+    def _notify_error(self, message):
+        self.notifications.add("error", "Engine error", str(message))
+
+    def _open_notification(self, item):
+        payload = dict(item.payload or {})
+        if item.kind not in ("checkin", "failed") or not payload:
+            self._go("Live Monitor")
+            return
+        snapshot = payload.pop("snapshot", "")
+        capture = load_photo(snapshot)
+        if capture.isNull() and item.thumbnail is not None:
+            capture = item.thumbnail
+        context = context_path(snapshot) if snapshot else None
+        payload.update(capture=capture,
+                       context_path=str(context) if context is not None and context.is_file() else "",
+                       context_capture=None, time=item.created.strftime("%H:%M:%S"))
+        self.screens[0]._open_activity_detail(payload)
 
     def _broadcast_settings(self, settings, restart):
         self.settings = settings
+        if self.account_watcher is not None:
+            self.account_watcher.settings = settings
         self.apply_theme(settings.theme)
         self.telegram.reconfigure(
             bot_token=settings.telegram_bot_token,
@@ -540,6 +719,7 @@ class MainWindow(QMainWindow):
                                               "restart" if restart else "no_restart")
 
     def apply_theme(self, theme):
+        self.access.theme = theme
         application = QApplication.instance()
         if application is not None:
             application.setStyleSheet(stylesheet(theme))
@@ -547,7 +727,7 @@ class MainWindow(QMainWindow):
             setter = getattr(screen, "set_theme", None)
             if callable(setter):
                 setter(theme)
-        if hasattr(self, "avatar"):
+        if hasattr(self, "user_chip"):
             self._refresh_chrome()
 
     def _tick(self):
@@ -562,7 +742,6 @@ class MainWindow(QMainWindow):
     # --- telegram handlers ------------------------------------------------
     def _telegram_on_saved(self, result):
         job = result.job
-        self.notify(1)
         self.telegram.send_capture(
             employee_name=job.employee_name,
             employee_id=job.employee_id,
@@ -571,7 +750,6 @@ class MainWindow(QMainWindow):
         )
 
     def _telegram_on_unknown(self, info):
-        self.notify(1)
         self.telegram.send_unknown_alert(
             track_id=info["track_id"],
             age=info["age"],
@@ -604,20 +782,62 @@ class MainWindow(QMainWindow):
             logging.exception("Could not display dashboard error")
 
     def _quit_app(self):
+        self._begin_exit("quit")
+
+    def _relaunch_app(self, mode="restart"):
+        self._begin_exit(mode)
+
+    def _begin_exit(self, mode):
+        """Stop everything behind a progress card, then quit or restart (see shutdown.py)."""
+        if self._exit is not None or self._exit_done:
+            return
+        if self.account_watcher is not None:
+            self.account_watcher.stop()
+        self.notification_panel.close()
+        self.user_menu.close()
+        self.capture_flash.cancel()
+        self._note({"quit": "Shutting down\u2026", "signout": "Signing out\u2026"}.get(
+            mode, "Restarting\u2026"))
+        self._exit = ShutdownSequence(self, mode, services=(self.telegram, self._sys_monitor))
+        self._exit.finished.connect(self._complete_exit)
+        self._exit.start()
+
+    def _complete_exit(self, mode):
+        self._exit_done = True
+        if mode != "quit":
+            # Only now: the engine lock is released, so the new instance can take it.
+            self._spawn_replacement()
+        self._exit.overlay.done(0)
         self.close()
 
-    def _relaunch_app(self):
-        import sys
+    def _spawn_replacement(self):
         from PyQt6.QtCore import QProcess
-        QProcess.startDetached(sys.executable, sys.argv)
-        self.close()
+        program, arguments = relaunch_command()
+        started, _pid = QProcess.startDetached(program, arguments)
+        if not started:
+            logging.error("Could not restart the dashboard: %s %s", program, arguments)
 
     def closeEvent(self, event):
+        if not self._exit_done:
+            if self._exit is not None:
+                event.ignore()       # already stopping; the sequence closes the window
+                return
+            if event.spontaneous():
+                # The title-bar close button: stop gracefully behind the progress card.
+                event.ignore()
+                self._begin_exit("quit")
+                return
+        if self.account_watcher is not None:
+            self.account_watcher.stop()
+        self.notification_panel.close()
+        self.user_menu.close()
         self.capture_flash.cancel()
         self.clock_timer.stop()
-        self._sys_monitor.stop()
-        self.telegram.stop()
-        self.engine.shutdown()
+        if not self._exit_done:
+            # Programmatic close (tests, error paths): stop synchronously.
+            self._sys_monitor.stop()
+            self.telegram.stop()
+            self.engine.shutdown()
         for screen in self.screens:
             try:
                 screen.close()
@@ -637,13 +857,55 @@ def run_dashboard(settings_path=None, autostart=False, argv=None):
         settings = Settings.load(settings_path)
 
         def _show_main():
-            if settings.dashboard_pin_hash:
-                dialog = LoginDialog(settings.dashboard_pin_hash)
-                application.setStyleSheet(stylesheet(settings.theme))
+            from ..users import (UserRepository, accounts_expected, clear_session, load_session,
+                                 remember_accounts_exist, save_session)
+            application.setStyleSheet(stylesheet(settings.theme))
+            current_user = None
+            repo = UserRepository(settings)
+            try:
+                has_users = repo.has_users()
+            except Exception:
+                logging.exception("Could not check user accounts")
+                # An unreachable database must not switch sign-in off on a machine
+                # that has had accounts; the sign-in dialog reports the problem.
+                has_users = accounts_expected()
+            else:
+                if has_users:
+                    remember_accounts_exist()
+
+            if has_users:
+                notice = ""
+                session = load_session()
+                if session:
+                    try:
+                        user = repo.get_user(session.user_uuid)
+                    except Exception:
+                        logging.exception("Could not restore the remembered session")
+                    else:
+                        if user is not None and not user.disabled:
+                            current_user = user
+                        else:
+                            clear_session()
+                            if user is not None:
+                                notice = "Your account has been disabled. Ask an administrator to enable it again."
+                if not current_user:
+                    dialog = UserLoginDialog(settings, theme=settings.theme, version=APP_VERSION,
+                                             notice=notice)
+                    if dialog.exec() != QDialog.DialogCode.Accepted:
+                        application.quit()
+                        return
+                    current_user = dialog.current_user
+                    if dialog.remember and current_user:
+                        save_session(current_user)
+            elif settings.dashboard_pin_hash:
+                dialog = LoginDialog(settings.dashboard_pin_hash, theme=settings.theme,
+                                     version=APP_VERSION)
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     application.quit()
                     return
-            window = MainWindow(settings, autostart=autostart)
+
+            window = MainWindow(settings, autostart=autostart,
+                                current_user=current_user)
             errors.errorRaised.connect(window.on_unhandled_error)
             window.show()
             _show_main.window = window
@@ -657,7 +919,10 @@ def run_dashboard(settings_path=None, autostart=False, argv=None):
             application.setQuitOnLastWindowClosed(True)
 
         splash.start(on_finished=_on_splash_done)
-        return application.exec()
+        result = application.exec()
+        # Quitting mid-splash must not let a late animation open the sign-in flow.
+        splash.cancel()
+        return result
     finally:
         errors.close()
 

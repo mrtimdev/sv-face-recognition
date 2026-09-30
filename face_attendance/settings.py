@@ -72,6 +72,13 @@ class Settings:
     camera_timeout_ms: int = 2500
     reconnect_sec: float = 1.0
     persistence_queue_size: int = 8
+    db_backend: str = "sqlite"
+    db_host: str = ""
+    db_port: int = 0
+    db_user: str = ""
+    db_password: str = ""
+    db_name: str = ""
+    db_sslmode: str = ""
     db_path: str = str(Config().db_path)
     capture_dir: str = str(Config().capture_dir)
     encodings_path: str = str(Config().encodings_path)

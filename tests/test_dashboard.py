@@ -188,7 +188,7 @@ class WindowTests(unittest.TestCase):
             window = MainWindow(temp_settings(directory), use_lock=False)
             window.show()
             try:
-                self.assertEqual(window.nav.count(), 4)
+                self.assertEqual(window.nav.count(), 6)
                 for row in range(window.nav.count()):
                     window.nav.setCurrentRow(row)
                     application.processEvents()
@@ -203,6 +203,9 @@ class WindowTests(unittest.TestCase):
         application = _app()
         with tempfile.TemporaryDirectory() as directory:
             settings_path = Path(directory) / "settings.json"
+            # Never the real database, and a stream source so the splash's camera
+            # check does not open the webcam (or ask macOS for camera access).
+            replace(temp_settings(directory), source="rtsp://camera.test/stream").save(settings_path)
             QTimer.singleShot(50, application.quit)  # unblock the event loop
             result = run_dashboard(settings_path)    # loads settings, shows the window
             self.assertEqual(result, 0)

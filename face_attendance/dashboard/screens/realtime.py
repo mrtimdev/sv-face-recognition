@@ -26,7 +26,7 @@ class RealtimeScreen(QWidget):
         super().__init__(parent)
         self.engine = engine
         self.settings = settings
-        self.reader = AttendanceReader(self.settings.db_path)
+        self.reader = AttendanceReader(self.settings)
         self.tracks = []
         self.unknown_seen = set()
         self.records = []
@@ -259,7 +259,7 @@ class RealtimeScreen(QWidget):
         """Reopen the database when the dashboard points at another file."""
         self.settings = settings
         self.reader.close()
-        self.reader = AttendanceReader(self.settings.db_path)
+        self.reader = AttendanceReader(self.settings)
         self._sound = SoundPlayer(settings.alert_path, cooldown_sec=1.5)
         self.reload()
 

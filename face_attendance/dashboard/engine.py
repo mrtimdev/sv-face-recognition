@@ -149,7 +149,14 @@ class AttendanceEngine(QObject):
                                    f"source={describe_source(self.settings.source)}, "
                                    f"enrolled={self.catalog.enrolled_count}")
 
-    def stop(self):
+    def stop(self, on_stage=None):
+        """Stop the loop, then close camera, recognition and persistence.
+
+        *on_stage* (optional, called from this thread) hears ``"capture"`` once
+        the camera and recognition are closed and ``"saved"`` once queued
+        attendance is committed, so a caller can show real shutdown progress.
+        """
+        report = on_stage or (lambda _stage: None)
         self._stop.set()
         thread, self._thread = self._thread, None
         if thread is not None:
@@ -160,7 +167,9 @@ class AttendanceEngine(QObject):
         # jobs are committed before the database connection closes.
         self.camera.close()
         self.recognition.close()
+        report("capture")
         self.persistence.close()
+        report("saved")
         with self._clean_lock:
             self._clean = None
         self._stats = {}
@@ -173,8 +182,8 @@ class AttendanceEngine(QObject):
         self.stop()
         self.start()
 
-    def shutdown(self):
-        self.stop()
+    def shutdown(self, on_stage=None):
+        self.stop(on_stage)
         if self._lock is not None:
             self._lock.release()
 

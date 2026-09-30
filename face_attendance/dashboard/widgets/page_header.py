@@ -12,17 +12,22 @@ class PageHeader(QWidget):
 
         column = QVBoxLayout()
         column.setSpacing(2)
+        # Only hide before parenting: showing a parentless label would briefly
+        # create a top-level window.
         self.title_label = QLabel(title)
         self.title_label.setObjectName("pageTitle")
-        self.title_label.setVisible(bool(title))
+        if not title:
+            self.title_label.hide()
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("pageSubtitle")
         self.subtitle_label.setWordWrap(True)
-        self.subtitle_label.setVisible(bool(subtitle))
+        if not subtitle:
+            self.subtitle_label.hide()
         column.addWidget(self.title_label)
         column.addWidget(self.subtitle_label)
-        row.addLayout(column)
-        row.addStretch(1)
+        # The text column takes the free width; a trailing stretch would squeeze
+        # the word-wrapped subtitle down to its minimum and break it mid-sentence.
+        row.addLayout(column, 1)
 
         self.actions = QHBoxLayout()
         self.actions.setSpacing(8)

@@ -66,6 +66,10 @@ faces/
 settings.json
 attendance.lock
 logs/
+# Remembered sign-in token, the "accounts exist" marker and account profile photos
+.session
+.accounts
+avatars/
 
 # IDE / editor
 .vscode/

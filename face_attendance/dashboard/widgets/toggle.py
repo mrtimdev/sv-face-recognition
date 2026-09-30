@@ -58,6 +58,8 @@ class ToggleSwitch(QAbstractButton):
         )
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if not self.isEnabled():
+            painter.setOpacity(0.45)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(track)
         painter.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), 12, 12)

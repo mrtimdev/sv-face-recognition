@@ -7,15 +7,18 @@ through ``Config`` itself (``Settings.to_config``) exactly like the CLI does.
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, QTime, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
+                             QFileDialog, QFormLayout, QFrame,
                              QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                             QPushButton, QScrollArea, QSpinBox, QTimeEdit, QVBoxLayout,
-                             QWidget)
+                             QPushButton, QScrollArea, QSpinBox, QStackedWidget,
+                             QTimeEdit, QVBoxLayout, QWidget)
 
+from ..access import guard
+from ..threads import settle
 from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source, hash_pin
 from ..icons import apply_button_icon
 from ..theme import palette
-from ..widgets import Card, PageHeader, ToastBar
+from ..widgets import Card, PageHeader, StatCard, ToastBar
 
 
 class SettingsScreen(QWidget):
@@ -55,6 +58,66 @@ class SettingsScreen(QWidget):
         self.subtitle.setWordWrap(True)
         outer.addWidget(self.subtitle)
 
+        content = QHBoxLayout()
+        content.setSpacing(14)
+        self._tab_strip = self._build_tab_strip()
+        content.addWidget(self._tab_strip)
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._make_page(
+            self._build_camera_group(), self._build_sound_group()))
+        self._stack.addWidget(self._make_page(self._build_recognition_group()))
+        self._stack.addWidget(self._make_page(
+            self._build_storage_group(), self._build_database_group()))
+        self._stack.addWidget(self._make_page(self._build_report_group()))
+        self._stack.addWidget(self._make_page(self._build_telegram_group()))
+        self._stack.addWidget(self._make_page(self._build_security_group()))
+        self._stack.addWidget(self._build_backup_page())
+        content.addWidget(self._stack, 1)
+        outer.addLayout(content, 1)
+
+        self.toast = ToastBar(theme=self._theme)
+        outer.addWidget(self.toast)
+
+        self._apply_icons()
+        self._select_tab(0)
+
+    def _build_tab_strip(self):
+        strip = QFrame()
+        strip.setObjectName("settingsStrip")
+        strip.setFixedWidth(180)
+        layout = QVBoxLayout(strip)
+        layout.setContentsMargins(8, 12, 8, 12)
+        layout.setSpacing(2)
+
+        self._tab_group = QButtonGroup(self)
+        self._tab_group.setExclusive(True)
+        self._tab_buttons = []
+
+        tabs = [
+            ("camera", "Camera & Capture"),
+            ("face-id", "Recognition"),
+            ("database", "Data & Storage"),
+            ("sliders", "Appearance"),
+            ("send", "Notifications"),
+            ("shield", "Security"),
+            ("download", "Backup"),
+        ]
+        for i, (icon_name, label) in enumerate(tabs):
+            btn = QPushButton(f"  {label}")
+            btn.setObjectName("settingsTab")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._tab_group.addButton(btn, i)
+            self._tab_buttons.append((btn, icon_name))
+            layout.addWidget(btn)
+
+        layout.addStretch(1)
+        self._tab_buttons[0][0].setChecked(True)
+        self._tab_group.idClicked.connect(self._select_tab)
+        return strip
+
+    def _make_page(self, *cards):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(scroll.Shape.NoFrame)
@@ -62,21 +125,26 @@ class SettingsScreen(QWidget):
         column = QVBoxLayout(holder)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(14)
-        column.addWidget(self._build_camera_group())
-        column.addWidget(self._build_recognition_group())
-        column.addWidget(self._build_sound_group())
-        column.addWidget(self._build_storage_group())
-        column.addWidget(self._build_report_group())
-        column.addWidget(self._build_telegram_group())
-        column.addWidget(self._build_security_group())
+        for card in cards:
+            column.addWidget(card)
         column.addStretch(1)
         scroll.setWidget(holder)
-        outer.addWidget(scroll, 1)
+        return scroll
 
-        self.toast = ToastBar(theme=self._theme)
-        outer.addWidget(self.toast)
+    def _select_tab(self, index):
+        self._stack.setCurrentIndex(index)
+        self._update_tab_icons()
+        if index == 6:
+            self._refresh_backup_info()
 
-        self._apply_icons()
+    def _update_tab_icons(self):
+        colors = palette(self._theme)
+        checked_id = self._tab_group.checkedId()
+        for i, (btn, icon_name) in enumerate(self._tab_buttons):
+            color = colors["primary_soft_fg"] if i == checked_id else colors["muted"]
+            apply_button_icon(btn, icon_name, color)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
     def _card_form(self, title, subtitle="", icon=""):
         card = Card(title, subtitle, icon=icon, theme=self._theme)
@@ -208,6 +276,175 @@ class SettingsScreen(QWidget):
                        self._spin(1, 64))
         return card
 
+    def _build_database_group(self):
+        card, form = self._card_form("Remote Database",
+                                     "Connect to a remote PostgreSQL or MySQL server. "
+                                     "Leave on SQLite for local-only operation.", icon="database")
+        backend = QComboBox()
+        backend.addItem("SQLite (local file)", "sqlite")
+        backend.addItem("PostgreSQL (remote)", "postgresql")
+        backend.addItem("MySQL (remote)", "mysql")
+        self._register(form, "db_backend", "Backend", backend)
+
+        self._db_remote_widgets = []
+
+        host = QLineEdit()
+        host.setPlaceholderText("e.g. 192.168.1.100 or db.example.com")
+        self._register(form, "db_host", "Host", host)
+        self._db_remote_widgets.append(("db_host", host))
+
+        port = QSpinBox()
+        port.setRange(1, 65535)
+        port.setValue(3306)
+        self._register(form, "db_port", "Port", port)
+        self._db_remote_widgets.append(("db_port", port))
+
+        user = QLineEdit()
+        user.setPlaceholderText("database username")
+        self._register(form, "db_user", "User", user)
+        self._db_remote_widgets.append(("db_user", user))
+
+        password = QLineEdit()
+        password.setEchoMode(QLineEdit.EchoMode.Password)
+        password.setPlaceholderText("database password")
+        self._register(form, "db_password", "Password", password)
+        self._db_remote_widgets.append(("db_password", password))
+
+        db_name = QLineEdit()
+        db_name.setPlaceholderText("sv_attendance")
+        self._register(form, "db_name", "Database name", db_name)
+        self._db_remote_widgets.append(("db_name", db_name))
+
+        self.db_test_button = QPushButton("Test Connection")
+        self.db_test_button.setObjectName("softButton")
+        self.db_test_result = QLabel("")
+        self.db_test_result.setObjectName("screenSubtitle")
+        self.db_test_result.setWordWrap(True)
+        row = QHBoxLayout()
+        row.addWidget(self.db_test_button)
+        row.addWidget(self.db_test_result, 1)
+        container = QWidget()
+        container.setLayout(row)
+        form.addRow("", container)
+        self._db_remote_widgets.append(("_test", container))
+
+        backend.currentIndexChanged.connect(self._db_backend_changed)
+        self.db_test_button.clicked.connect(self._test_db_connection)
+        self._db_backend_changed()
+        return card
+
+    def _db_backend_changed(self):
+        is_remote = self.fields["db_backend"].currentData() != "sqlite"
+        for _key, widget in self._db_remote_widgets:
+            widget.setVisible(is_remote)
+            label = self._find_form_label(widget)
+            if label:
+                label.setVisible(is_remote)
+        if is_remote:
+            backend = self.fields["db_backend"].currentData()
+            port_widget = self.fields["db_port"]
+            if backend == "postgresql" and port_widget.value() in (0, 3306):
+                port_widget.setValue(5432)
+            elif backend == "mysql" and port_widget.value() in (0, 5432):
+                port_widget.setValue(3306)
+
+    @staticmethod
+    def _find_form_label(widget):
+        parent = widget.parentWidget()
+        if parent is None:
+            return None
+        for child_layout in parent.findChildren(QFormLayout):
+            for i in range(child_layout.rowCount()):
+                field_item = child_layout.itemAt(i, QFormLayout.ItemRole.FieldRole)
+                if field_item and field_item.widget() is widget:
+                    label_item = child_layout.itemAt(i, QFormLayout.ItemRole.LabelRole)
+                    return label_item.widget() if label_item else None
+        return None
+
+    def _test_db_connection(self):
+        backend = self.fields["db_backend"].currentData()
+        if backend == "sqlite":
+            self.db_test_result.setText("SQLite is local — no remote connection to test.")
+            return
+        self.db_test_button.setEnabled(False)
+        self.db_test_result.setText("Connecting...")
+
+        class _Cfg:
+            pass
+        cfg = _Cfg()
+        cfg.db_backend = backend
+        cfg.db_host = self.fields["db_host"].text().strip()
+        cfg.db_port = self.fields["db_port"].value()
+        cfg.db_user = self.fields["db_user"].text().strip()
+        cfg.db_password = self.fields["db_password"].text()
+        cfg.db_name = self.fields["db_name"].text().strip() or "sv_attendance"
+        cfg.db_sslmode = ""
+
+        self._db_test_worker = _DbTestWorker(cfg)
+        self._db_test_worker.finished.connect(self._on_db_test_done)
+        self._db_test_worker.start()
+
+    def _on_db_test_done(self, result):
+        self.db_test_result.setText(result)
+        self.db_test_button.setEnabled(True)
+        tone = "ok" if "success" in result.lower() else "bad"
+        self.toast.show_message(result, tone)
+
+    # --- backup ---------------------------------------------------------------
+
+    def _refresh_backup_info(self):
+        for sc in self._backup_stats:
+            sc.set_value("…")
+            sc.set_hint("scanning…")
+        self._backup_scan_worker = _BackupScanWorker(self.settings)
+        self._backup_scan_worker.finished.connect(self._on_backup_scan_done)
+        self._backup_scan_worker.start()
+
+    def _on_backup_scan_done(self, info):
+        self._bk_backend.set_value(info["backend_label"], "ok")
+        self._bk_backend.set_hint(info["backend_hint"])
+        tc = info["table_count"]
+        self._bk_tables.set_value(str(tc), "ok" if tc else "idle")
+        self._bk_tables.set_hint(f"{tc} of 4 found" if tc else "none found")
+        tr = info["total_rows"]
+        self._bk_records.set_value(f"{tr:,}", "ok" if tr else "idle")
+        self._bk_records.set_hint("total across tables")
+        self._bk_size.set_value(info["size_str"], "idle")
+        self._bk_size.set_hint(info["size_hint"])
+
+    def closeEvent(self, event):
+        # A connection test or backup still running must not be destroyed mid-run.
+        for name in ("_db_test_worker", "_backup_scan_worker", "_backup_worker", "_tg_worker"):
+            settle(getattr(self, name, None), 0)
+        super().closeEvent(event)
+
+    def _export_backup(self):
+        if not guard(self, "export_data", "export database backups"):
+            return
+        from datetime import datetime as _dt
+        default_name = f"sv_attendance_backup_{_dt.now().strftime('%Y%m%d_%H%M%S')}.sql"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export database backup",
+            str(Path.home() / default_name),
+            "SQL files (*.sql);;All files (*)")
+        if not path:
+            return
+        self._backup_button.setEnabled(False)
+        self._backup_status.setText("Exporting…")
+        self._backup_worker = _BackupWorker(self.settings, path)
+        self._backup_worker.progress.connect(self._on_backup_progress)
+        self._backup_worker.finished.connect(self._on_backup_done)
+        self._backup_worker.start()
+
+    def _on_backup_progress(self, message):
+        self._backup_status.setText(message)
+
+    def _on_backup_done(self, result):
+        self._backup_status.setText(result)
+        self._backup_button.setEnabled(True)
+        tone = "ok" if "failed" not in result.lower() else "bad"
+        self.toast.show_message(result, tone)
+
     def _build_report_group(self):
         card, form = self._card_form("Appearance and reporting",
                                      "Theme, export options and punctuality rules.", icon="sliders")
@@ -299,6 +536,83 @@ class SettingsScreen(QWidget):
         self.pin_set_button.clicked.connect(self._set_pin)
         self.pin_clear_button.clicked.connect(self._clear_pin)
         return card
+
+    def _build_backup_page(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        holder = QWidget()
+        column = QVBoxLayout(holder)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(14)
+
+        # ── overview stat cards ──────────────────────────────────────────
+        overview = Card("Database Overview",
+                        "Current connection and live statistics.",
+                        icon="database", theme=self._theme)
+        self._cards.append(overview)
+
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(10)
+        self._bk_backend = StatCard("Backend", "—", "waiting…",
+                                    icon="database", tone="blue", theme=self._theme)
+        self._bk_tables = StatCard("Tables", "—", "waiting…",
+                                   icon="list", tone="green", theme=self._theme)
+        self._bk_records = StatCard("Total Rows", "—", "waiting…",
+                                    icon="chart", tone="orange", theme=self._theme)
+        self._bk_size = StatCard("Size", "—", "waiting…",
+                                 icon="folder", tone="purple", theme=self._theme)
+        self._backup_stats = [self._bk_backend, self._bk_tables,
+                              self._bk_records, self._bk_size]
+        for sc in self._backup_stats:
+            stats_row.addWidget(sc, 1)
+        overview.add_layout(stats_row)
+        column.addWidget(overview)
+
+        # ── export card ──────────────────────────────────────────────────
+        export_card = Card("Export Backup",
+                           "Create a portable SQL dump of your attendance data.",
+                           icon="download", theme=self._theme)
+        self._cards.append(export_card)
+
+        panel = QFrame()
+        panel.setObjectName("subtlePanel")
+        panel_lay = QVBoxLayout(panel)
+        panel_lay.setContentsMargins(16, 14, 16, 14)
+        panel_lay.setSpacing(10)
+
+        title = QLabel("SQL Dump (.sql)")
+        title.setObjectName("sectionTitle")
+        panel_lay.addWidget(title)
+
+        desc = QLabel(
+            "Standard INSERT statements for all attendance tables — "
+            "attendance, cooldowns, outbox and audit log. Compatible with "
+            "SQLite, PostgreSQL and MySQL.\n"
+            "Settings and Telegram tokens are never included.")
+        desc.setObjectName("screenSubtitle")
+        desc.setWordWrap(True)
+        panel_lay.addWidget(desc)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+        self._backup_button = QPushButton("  Export as .sql")
+        self._backup_button.setObjectName("primary")
+        self._backup_status = QLabel("")
+        self._backup_status.setObjectName("screenSubtitle")
+        self._backup_status.setWordWrap(True)
+        btn_row.addWidget(self._backup_button)
+        btn_row.addWidget(self._backup_status, 1)
+        panel_lay.addLayout(btn_row)
+
+        export_card.add(panel)
+        column.addWidget(export_card)
+
+        column.addStretch(1)
+        scroll.setWidget(holder)
+
+        self._backup_button.clicked.connect(self._export_backup)
+        return scroll
 
     def _set_pin(self):
         pin = self.pin_edit.text()
@@ -427,6 +741,7 @@ class SettingsScreen(QWidget):
                     widget.setValue(float(value) if value is not None else 0.0)
                 else:
                     widget.setValue(int(value) if value is not None else 0)
+        self._db_backend_changed()
         self.subtitle.setText(f"Stored in {SETTINGS_PATH.name}. "
                               f"Active source: {describe_source(settings.source)}")
 
@@ -505,6 +820,11 @@ class SettingsScreen(QWidget):
         self.toast.set_theme(theme)
         for card in self._cards:
             card.set_theme(theme)
+        for sc in self._backup_stats:
+            sc.set_theme(theme)
+        self._tab_strip.style().unpolish(self._tab_strip)
+        self._tab_strip.style().polish(self._tab_strip)
+        self._update_tab_icons()
         self._apply_icons()
 
     def _apply_icons(self):
@@ -512,6 +832,7 @@ class SettingsScreen(QWidget):
         apply_button_icon(self.apply_button, "check", colors["muted"])
         apply_button_icon(self.apply_restart_button, "restart", "#FFFFFF")
         apply_button_icon(self.reset_button, "refresh", colors["danger"])
+        apply_button_icon(self._backup_button, "download", "#FFFFFF")
 
 
 class _TelegramTestWorker(QThread):
@@ -528,3 +849,187 @@ class _TelegramTestWorker(QThread):
         result = service.send_test()
         service.stop()
         self.finished.emit(result)
+
+
+class _DbTestWorker(QThread):
+    finished = pyqtSignal(str)
+
+    def __init__(self, cfg):
+        super().__init__()
+        self._cfg = cfg
+
+    def run(self):
+        try:
+            from ...database import connect
+            conn = connect(self._cfg)
+            conn.integrity_check()
+            tables = []
+            for t in ("attendance", "attendance_cooldowns", "attendance_outbox", "audit_log", "users"):
+                if conn.table_exists(t):
+                    tables.append(t)
+            conn.close()
+            backend = self._cfg.db_backend.upper()
+            if tables:
+                self.finished.emit(
+                    f"Success! Connected to {backend} at {self._cfg.db_host}:{self._cfg.db_port}. "
+                    f"Found {len(tables)} table(s).")
+            else:
+                self.finished.emit(
+                    f"Success! Connected to {backend} at {self._cfg.db_host}:{self._cfg.db_port}. "
+                    f"No tables yet — they will be created on first engine start.")
+        except Exception as exc:
+            self.finished.emit(f"Connection failed: {exc}")
+
+
+class _BackupScanWorker(QThread):
+    finished = pyqtSignal(object)
+
+    def __init__(self, settings):
+        super().__init__()
+        self._settings = settings
+
+    def run(self):
+        from pathlib import Path as _P
+        info = {"backend_label": "—", "backend_hint": "", "table_count": 0,
+                "total_rows": 0, "size_str": "—", "size_hint": ""}
+        backend = getattr(self._settings, "db_backend", "sqlite")
+
+        if backend == "sqlite":
+            info["backend_label"] = "SQLite"
+            db_path = _P(str(getattr(self._settings, "db_path", "attendance.db")))
+            info["backend_hint"] = db_path.name
+            if db_path.exists():
+                sz = db_path.stat().st_size
+                info["size_str"] = self._fmt(sz)
+                info["size_hint"] = "database file"
+            else:
+                info["size_str"] = "N/A"
+                info["size_hint"] = "file not found"
+                self.finished.emit(info)
+                return
+        else:
+            info["backend_label"] = backend.upper()
+            host = getattr(self._settings, "db_host", "")
+            port = getattr(self._settings, "db_port", 0)
+            info["backend_hint"] = f"{host}:{port}"
+            info["size_hint"] = "remote"
+
+        try:
+            from ...database import connect
+            conn = connect(self._settings, readonly=True)
+            tables = ["attendance", "attendance_cooldowns", "attendance_outbox", "audit_log", "users"]
+            existing = [t for t in tables if conn.table_exists(t)]
+            info["table_count"] = len(existing)
+
+            total = 0
+            for t in existing:
+                row = conn.execute(f"SELECT COUNT(*) AS c FROM {t}").fetchone()
+                if row:
+                    total += int(row["c"])
+            info["total_rows"] = total
+
+            if backend == "mysql":
+                row = conn.execute(
+                    "SELECT SUM(data_length + index_length) AS s "
+                    "FROM information_schema.tables WHERE table_schema = ?",
+                    (getattr(self._settings, "db_name", ""),)).fetchone()
+                if row and row["s"]:
+                    info["size_str"] = self._fmt(float(row["s"]))
+                    info["size_hint"] = "data + index"
+            elif backend == "postgresql":
+                row = conn.execute(
+                    "SELECT pg_database_size(current_database()) AS s").fetchone()
+                if row and row["s"]:
+                    info["size_str"] = self._fmt(float(row["s"]))
+                    info["size_hint"] = "total database"
+            conn.close()
+        except Exception:
+            pass
+
+        self.finished.emit(info)
+
+    @staticmethod
+    def _fmt(size):
+        if size >= 1024 * 1024:
+            return f"{size / (1024 * 1024):.1f} MB"
+        return f"{size / 1024:.1f} KB"
+
+
+class _BackupWorker(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(str)
+
+    def __init__(self, settings, output_path):
+        super().__init__()
+        self._settings = settings
+        self._path = output_path
+
+    def run(self):
+        from datetime import datetime as _dt
+        from pathlib import Path as _P
+        try:
+            from ...database import connect
+            conn = connect(self._settings, readonly=True)
+            backend = conn.backend
+
+            tables = ["attendance", "attendance_cooldowns", "attendance_outbox", "audit_log", "users"]
+            existing = [t for t in tables if conn.table_exists(t)]
+
+            lines = [
+                "-- ═══════════════════════════════════════════════════════════",
+                "-- SV Face Attendance — Database Backup",
+                f"-- Backend : {backend}",
+                f"-- Date    : {_dt.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"-- Tables  : {', '.join(existing) or '(none)'}",
+                "-- ═══════════════════════════════════════════════════════════",
+                "",
+            ]
+
+            total_rows = 0
+            for table in existing:
+                self.progress.emit(f"Exporting {table}…")
+                columns = sorted(conn.get_columns(table))
+                rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+
+                lines.append(f"-- Table: {table} ({len(rows)} rows)")
+                lines.append("")
+
+                for row in rows:
+                    values = []
+                    for col in columns:
+                        try:
+                            val = row[col]
+                        except (KeyError, IndexError):
+                            values.append("NULL")
+                            continue
+                        if val is None:
+                            values.append("NULL")
+                        elif isinstance(val, (int, float)):
+                            values.append(str(val))
+                        else:
+                            escaped = str(val).replace("\\", "\\\\").replace("'", "''")
+                            values.append(f"'{escaped}'")
+                    cols_str = ", ".join(columns)
+                    vals_str = ", ".join(values)
+                    lines.append(f"INSERT INTO {table} ({cols_str}) VALUES ({vals_str});")
+
+                lines.append("")
+                total_rows += len(rows)
+
+            conn.close()
+
+            with open(self._path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+
+            size = _P(self._path).stat().st_size
+            if size > 1024 * 1024:
+                size_str = f"{size / (1024 * 1024):.1f} MB"
+            elif size > 1024:
+                size_str = f"{size / 1024:.1f} KB"
+            else:
+                size_str = f"{size} bytes"
+
+            self.finished.emit(
+                f"Exported {total_rows} rows from {len(existing)} tables ({size_str})")
+        except Exception as exc:
+            self.finished.emit(f"Backup failed: {exc}")
