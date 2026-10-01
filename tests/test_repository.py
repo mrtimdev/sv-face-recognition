@@ -71,7 +71,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(self.count("attendance"), 2)
 
     def test_snapshot_failure_rolls_back_everything(self):
-        with patch("face_attendance.storage.cv2.imwrite", return_value=False):
+        with patch("face_attendance.storage.cv2.imencode", return_value=(False, None)):
             result = self.repo.record(self.job, self.snapshots)
         self.assertEqual(result.outcome, "error")
         for table in ("attendance", "attendance_cooldowns", "attendance_outbox"):

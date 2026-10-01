@@ -52,7 +52,7 @@ class GuardTests(unittest.TestCase):
 class ModelTests(unittest.TestCase):
     def test_upstream_live_print_and_screen_with_real_models_and_detector(self):
         from face_attendance.face_backend import OpenCVFaceBackend
-        root = Path(__file__).parent / 'fixtures' / 'anti_spoof'
+        from face_attendance.samples import SAMPLES_DIR as root
         detector, model = OpenCVFaceBackend(), AntiSpoofService()
         for name, expected in (('live', True), ('print', False), ('screen', False)):
             frame = cv2.imread(str(root / (name + '.jpg')))

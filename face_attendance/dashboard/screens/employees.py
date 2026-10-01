@@ -4,7 +4,6 @@ Encoding is CPU work, so it runs on a short-lived worker thread and reports
 back through a Qt signal. The catalog is reloaded into the engine afterwards,
 which is why enrollment pauses recording and restarts the engine on save.
 """
-import hashlib
 import threading
 import time
 from datetime import datetime
@@ -13,7 +12,7 @@ from pathlib import Path
 import cv2
 from PyQt6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPainterPath, QPixmap
-from PyQt6.QtWidgets import (QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                              QLabel, QLineEdit, QListWidget, QListWidgetItem, QComboBox, QDialog,
                              QHeaderView, QInputDialog, QMenu, QTableWidget, QTableWidgetItem,
                              QAbstractItemView, QMessageBox, QPushButton, QScrollArea, QSpinBox,
@@ -21,8 +20,10 @@ from PyQt6.QtWidgets import (QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxL
 
 from ...camera import CameraManager
 from ...enrollment import EnrollmentOutcome, EnrollmentService, FACE_BACKEND_LOCK, _atomic_write
-from ...storage import delete_capture
-from ...enrollment_photos import sample_photo_map
+from ...storage import delete_capture, read_image
+from ...enrollment_photos import portrait_name, sample_photo_map
+from ...transfer import TransferError, export_employees, import_employees
+from ..access import guard
 from ..bridge import to_pixmap
 from ..icons import apply_button_icon, make_icon
 from ..theme import palette
@@ -30,6 +31,7 @@ from ..widgets import Avatar, Card, PageHeader, StatCard, StatusPill, ToastBar, 
 
 
 PHOTO_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.tiff)"
+EXPORT_FILTER = "SV Face ID employees (*.zip)"
 SAMPLE_LIMIT = 8
 AUTO_CAPTURE_COOLDOWN = 1.5
 PREVIEW_INTERVAL_MS = 33
@@ -243,7 +245,15 @@ class EmployeesScreen(QWidget):
         self.folder_button.hide()
         self.enroll_cta = QPushButton("Add employee")
         self.enroll_cta.setObjectName("primary")
+        self.more_button = QPushButton("More")
+        self.more_button.setProperty("overflowMenu", True)
+        self.more_button.setToolTip("Import or export enrolled employees")
+        more = QMenu(self)
+        self.import_action = more.addAction("Import employees…", self._import_employees)
+        self.export_action = more.addAction("Export employees…", self._export_employees)
+        self.more_button.setMenu(more)
         self.header.add_action(self.reload_button)
+        self.header.add_action(self.more_button)
         self.header.add_action(self.enroll_cta)
         root.addWidget(self.header)
 
@@ -658,6 +668,7 @@ class EmployeesScreen(QWidget):
     def _apply_icons(self):
         colors = palette(self._theme)
         apply_button_icon(self.reload_button, "refresh", colors["muted"])
+        apply_button_icon(self.more_button, "more", colors["muted"])
         apply_button_icon(self.folder_button, "folder", colors["muted"])
         apply_button_icon(self.enroll_cta, "user-plus", "#FFFFFF")
 
@@ -672,8 +683,7 @@ class EmployeesScreen(QWidget):
 
     def _enrollment_photo_path(self, label):
         """Canonical path for a saved enrollment photo by enrollment label."""
-        digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:12]
-        return self._enrollment_photo_dir() / f"{_safe_name(label)}_{digest}.jpg"
+        return self._enrollment_photo_dir() / portrait_name(label)
 
     def _save_enrollment_photo(self, label, samples):
         """Keep the directory photo tied to this exact enrollment label."""
@@ -1215,7 +1225,7 @@ class EmployeesScreen(QWidget):
             self._load_photo(path)
 
     def _load_photo(self, path):
-        image = cv2.imread(path)
+        image = read_image(path)
         if image is None:
             self._notify(f"Could not read {path}", "bad")
             return
@@ -1483,6 +1493,50 @@ class EmployeesScreen(QWidget):
     def _open_folder(self):
         folder = Path(self.settings.encodings_path).parent
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    # --- moving employees between computers ----------------------------------
+    def _export_employees(self):
+        if not guard(self, "export_data", "export employees"):
+            return
+        desktop = Path.home() / "Desktop"
+        default = (desktop if desktop.is_dir() else Path.home()) / \
+            f"SV-Face-ID-employees-{datetime.now():%Y-%m-%d}.zip"
+        path, _ = QFileDialog.getSaveFileName(self, "Export employees", str(default), EXPORT_FILTER)
+        if not path:
+            return
+        if not path.lower().endswith(".zip"):
+            path += ".zip"
+        try:
+            employees, samples = export_employees(path, self.settings.encodings_path,
+                                                  self.settings.employees_path)
+        except (TransferError, OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Couldn't export employees", str(exc))
+            return
+        self._notify(f"Exported {employees} employee(s) and {samples} face sample(s) to "
+                     f"{Path(path).name}. Keep it private: it contains face photos.", "ok")
+
+    def _import_employees(self):
+        if not guard(self, "manage_employees", "import employees"):
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Import employees", str(Path.home()), EXPORT_FILTER)
+        if not path:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            report = import_employees(path, self.settings.encodings_path, self.settings.employees_path)
+        except (TransferError, OSError, ValueError) as exc:
+            report, error = None, str(exc)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if report is None:
+            QMessageBox.warning(self, "Couldn't import employees", error)
+            return
+        if report.changed:
+            self.engine.reload_catalog()
+        if report.skipped:
+            QMessageBox.warning(self, "Imported with some skipped", report.summary())
+        else:
+            self._notify(report.summary(), "ok" if report.changed else "info")
 
     # =======================================================================
     #  Settings / lifecycle

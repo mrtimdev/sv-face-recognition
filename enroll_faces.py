@@ -28,6 +28,7 @@ from face_attendance.face_backend import get_backend
 from face_attendance import enrollment
 from face_attendance.catalog import load_employee_map
 from face_attendance.config import Config, parse_source
+from face_attendance.storage import read_image
 
 
 # Kept at module level so existing callers can redirect the catalog paths and
@@ -84,7 +85,7 @@ def enroll(name: str, image_path: str = None, employee_id=None, source=0, check_
         if previous and previous.employee_id != employee_id:
             raise ValueError(f"{name!r} is already mapped to {previous.employee_id}")
     if image_path:
-        image = cv2.imread(image_path)
+        image = read_image(image_path)
         if image is None:
             raise FileNotFoundError(f"Could not read image: {image_path}")
     else:

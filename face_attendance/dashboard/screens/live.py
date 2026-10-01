@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QF
 
 from ...settings import describe_source
 from ...config import ATTENDANCE_MODES
-from ...storage import context_path
+from ...storage import context_path, write_jpeg
 from ..access import guard
 from ..icons import IconLabel, apply_button_icon
 from ..bridge import to_pixmap
@@ -333,6 +333,7 @@ class LiveScreen(QWidget):
         menu.addAction("Toggle picture guide", self._toggle_guide)
         self.fullscreen_action = menu.addAction("Enter full screen", self._toggle_fullscreen)
         menu.addAction("Preview capture flash", self.flashPreviewRequested.emit)
+        menu.addAction("Liveness test…", self._open_liveness_test)
         self.more_button.setMenu(menu)
         self.fullscreen_button = QPushButton("Full Screen")
         self.fullscreen_button.setObjectName("controlButton")
@@ -523,9 +524,21 @@ class LiveScreen(QWidget):
         target, _ = QFileDialog.getSaveFileName(self, "Save snapshot", default, "JPEG image (*.jpg)")
         if not target:
             return
-        ok = cv2.imwrite(target, frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        try:
+            write_jpeg(target, frame)
+            ok = True
+        except OSError:
+            ok = False
         self.toast.show_message(f"Snapshot saved to {target}" if ok else "Could not write the snapshot",
                                 "ok" if ok else "bad")
+
+    def _open_liveness_test(self):
+        """Run the liveness check on the bundled sample photos (and offer the demo employee)."""
+        from .liveness import LivenessTestDialog
+        dialog = LivenessTestDialog(self.settings, self.engine, self._theme, self.window())
+        dialog.finished.connect(dialog.deleteLater)
+        self.liveness_dialog = dialog
+        dialog.open()
 
     def _open_captures(self):
         if not guard(self, "export_data", "open the captures folder"):

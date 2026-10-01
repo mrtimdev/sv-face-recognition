@@ -6,8 +6,38 @@ import shutil
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 MIN_DISK_MB = 100
+
+
+def read_image(path):
+    """Decode an image file (BGR), or None when it can't be read.
+
+    Unlike ``cv2.imread``, this opens any path on Windows, including folders
+    with non-ASCII names.  EXIF orientation is applied the same way.
+    """
+    try:
+        data = np.frombuffer(Path(path).read_bytes(), dtype=np.uint8)
+    except OSError:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
+
+
+def write_jpeg(path, frame, quality=92):
+    """Write *frame* as a JPEG and flush it to disk through one writable handle.
+
+    Windows can only fsync a handle opened for writing (a read-only one fails
+    with "[Errno 9] Bad file descriptor"), and ``cv2.imwrite`` can't open
+    non-ASCII paths there, so the image is encoded in memory first.
+    """
+    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise OSError("OpenCV could not encode the image")
+    with open(path, "wb") as handle:
+        handle.write(encoded.tobytes())
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def context_path(snapshot):
@@ -105,10 +135,7 @@ class SnapshotService:
     def _write_image(path, frame):
         temporary = path.with_suffix(".part.jpg")
         try:
-            if not cv2.imwrite(str(temporary), frame, [cv2.IMWRITE_JPEG_QUALITY, 92]):
-                raise OSError("OpenCV could not write the evidence image")
-            with temporary.open("rb") as handle:
-                os.fsync(handle.fileno())
+            write_jpeg(temporary, frame)
             os.replace(temporary, path)
         except Exception:
             temporary.unlink(missing_ok=True)

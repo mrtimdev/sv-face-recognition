@@ -40,7 +40,8 @@ checked 2026-09-25 (scores rounded):
 - Upstream image_T1.jpg: conservative live score 0.99996 (sample accepted).
 - Upstream image_F1.jpg (printed photo): 0.00456 (rejected).
 - Upstream image_F2.jpg (screen): 0.00034 (rejected).
-These fixtures are included under `tests/fixtures/anti_spoof` for offline tests.
+These images ship in `face_attendance/assets/samples` (Live Monitor › More ›
+Liveness test, the optional demo employee, and the offline tests).
 - Earlier dlib-detector check of the supplied original selfie MOV: seven sampled face frames scored above 0.9999.
   This file contains the source recording, not a camera recapture of a screen,
   and is NOT a successful replay-rejection test.

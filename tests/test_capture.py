@@ -111,10 +111,10 @@ class EvidenceStorageTests(unittest.TestCase):
         self.assertTrue(all(not p.exists() for p in evidence_files(snapshot)))
 
     def test_failed_crop_write_removes_context_and_metadata(self):
-        real_write = cv2.imwrite
-        def write(path, frame, options):
-            return False if frame.shape == self.job.frame.shape else real_write(path, frame, options)
-        with patch('face_attendance.storage.cv2.imwrite', side_effect=write):
+        real_encode = cv2.imencode
+        def encode(extension, frame, options):
+            return (False, None) if frame.shape == self.job.frame.shape else real_encode(extension, frame, options)
+        with patch('face_attendance.storage.cv2.imencode', side_effect=encode):
             with self.assertRaises(OSError):
                 self.storage.save(self.job)
         self.assertFalse(any(p.is_file() for p in self.storage.directory.rglob('*')))

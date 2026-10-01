@@ -2,9 +2,8 @@
 from collections import Counter
 from pathlib import Path
 
-import cv2
-
 from .enrollment import EnrollmentService, write_encodings
+from .storage import read_image
 from .template_store import read_templates
 
 
@@ -41,7 +40,7 @@ def migrate_photos(legacy_path, output_path, employees_path, photo_dir=None, bac
         if not path.is_file():
             report[label] = 'Re-enroll: no saved enrollment photo'
             continue
-        frame = cv2.imread(str(path))
+        frame = read_image(path)
         if frame is None:
             report[label] = 'Re-enroll: unreadable enrollment photo'
             continue

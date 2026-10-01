@@ -62,7 +62,7 @@ class EnrollmentTests(unittest.TestCase):
                     enroll_faces.save_employee("Old Name", "E2")
 
     def test_multiple_faces_are_not_silently_enrolled_as_first_face(self):
-        with patch.object(enroll_faces.cv2, "imread", return_value=np.zeros((20, 20, 3), np.uint8)), \
+        with patch.object(enroll_faces, "read_image", return_value=np.zeros((20, 20, 3), np.uint8)), \
                 patch.object(enroll_faces, "get_backend", return_value=Mock(
                     face_locations=Mock(return_value=[(0, 10, 10, 0)] * 2))), \
                 patch.object(enroll_faces, "save_encodings") as save:

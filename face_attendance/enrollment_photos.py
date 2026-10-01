@@ -1,4 +1,5 @@
 """Original enrollment sample photos, referenced atomically by the face catalog."""
+import hashlib
 import logging
 from pathlib import Path
 import re
@@ -10,6 +11,26 @@ from .template_store import read_template_bundle
 
 def photo_directory(encodings_path):
     return Path(encodings_path).parent / 'enrollment_photos' / 'samples'
+
+
+def safe_label(label):
+    return ''.join(c if c.isalnum() or c in '-_' else '_' for c in str(label))[:60]
+
+
+def portrait_name(label):
+    """File name of the directory portrait the dashboard saves for an enrollment label."""
+    return f"{safe_label(label)}_{hashlib.sha256(str(label).encode('utf-8')).hexdigest()[:12]}.jpg"
+
+
+def portrait_path(encodings_path, label, labels=()):
+    """The existing portrait for *label*: the exact name, or an unambiguous legacy one."""
+    directory = Path(encodings_path).parent / 'enrollment_photos'
+    path = directory / portrait_name(label)
+    if path.is_file():
+        return path
+    legacy = directory / f"{safe_label(label)}.jpg"
+    same = sum(safe_label(other).casefold() == safe_label(label).casefold() for other in labels)
+    return legacy if same <= 1 and legacy.is_file() else None
 
 
 def photo_path(encodings_path, reference):

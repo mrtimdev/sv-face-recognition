@@ -264,6 +264,28 @@ Only load trusted pickle files. Employee mappings, face encodings, captures and
 the attendance database are local data and are ignored by Git. Back them up
 together.
 
+## Trying liveness and moving employees
+
+Every installer includes these optional tools; none of them changes anything
+until used.
+
+- **Live Monitor › More › Liveness test** runs this computer's detector and
+  liveness models on three sample photos shipped with the app: a real face, a
+  printed photo and a phone screen (Apache-2.0 upstream examples, see
+  `face_attendance/assets/samples/NOTICE.md`). The real face must pass and both
+  photos must be blocked. No camera or enrolled employees are needed, so it is
+  the first check to run on a new installation.
+- **Demo employee** (in the same window) enrolls the real-face sample as
+  "Demo employee (sample)", ID `DEMO-0001`. Show any sample photo to the camera
+  on a phone or on paper: Live Monitor recognizes the demo employee but blocks
+  attendance as a photo. Remove it when you're done.
+- **Enrolled Employees › More › Export / Import employees** moves enrolled
+  employees between computers in one `.zip`: face vectors as JSON plus the
+  enrollment photos, with no pickle, so importing a file can't run code. Import
+  adds new employees and new samples, and skips conflicts, for example an
+  employee ID that already belongs to someone else on this computer. The file
+  contains face photos: keep it private. Releases never include employee data.
+
 ## Architecture
 
 ```text
@@ -470,7 +492,7 @@ can help locate distant faces, but cannot recover missing detail for recognition
 lighting. Do not assume a higher camera FPS improves recognition.
 
 An offline benchmark is available with
-`python scripts/benchmark_detection.py --image tests/fixtures/anti_spoof/live.jpg`.
+`python scripts/benchmark_detection.py --image face_attendance/assets/samples/live.jpg`.
 It repeats a portrait to compare 1/3/5-face processing load at scales 0.25 and 0.5;
 it is not a live camera accuracy or spoof-resistance evaluation. In one local
 run, median analysis times at scale 0.5 were 38/67/107 ms for 1/3/5 faces (12
@@ -539,7 +561,7 @@ phone playing a video**, plus a separate genuine-person recording. A source
 selfie clip lacks the print/display artifacts needed to evaluate a replay.
 
 The real-model regression tests include the upstream live, printed-photo and
-screen examples, with provenance in `tests/fixtures/anti_spoof/NOTICE.md`.
+screen examples, with provenance in `face_attendance/assets/samples/NOTICE.md`.
 Passing these three examples does not validate arbitrary prints, video replays,
 paper masks or 3D masks. The implementation follows [UniFace's MiniFASNet
 documentation](https://yakhyo.github.io/uniface/modules/spoofing/) and centered,

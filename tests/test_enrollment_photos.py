@@ -115,7 +115,7 @@ class EnrollmentPhotoTests(unittest.TestCase):
         with patch.object(enroll_faces, 'ENCODINGS_PATH', str(self.catalog)), \
                 patch.object(enroll_faces, 'EMPLOYEES_PATH', self.root / 'employees.json'), \
                 patch.object(enroll_faces, 'get_backend', return_value=PhotoBackend()), \
-                patch.object(enroll_faces.cv2, 'imread', return_value=frame(80)):
+                patch.object(enroll_faces, 'read_image', return_value=frame(80)):
             enroll_faces.enroll('Alice', 'input.jpg')
         self.assertEqual(len(sample_photos(self.catalog, 'Alice')), 1)
         self.assertTrue(sample_photos(self.catalog, 'Alice')[0].exists())
