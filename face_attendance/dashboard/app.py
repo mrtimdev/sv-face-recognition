@@ -27,6 +27,7 @@ from .icons import IconLabel, apply_button_icon, make_icon
 from .login import LoginDialog, UserLoginDialog
 from .screens.employees import EmployeesScreen
 from .screens.live import LiveScreen
+from license_plate.screen import LicensePlateScreen
 from .screens.report import ReportScreen
 from .screens.settings import SettingsScreen
 from .screens.usage import UsageScreen
@@ -54,6 +55,7 @@ NAV = (
     ("bolt", "Live Usage"),
     ("shield", "Users & Access"),
     ("gear", "Settings"),
+    ("monitor", "License Plates"),
 )
 
 
@@ -166,6 +168,7 @@ class MainWindow(QMainWindow):
             UsageScreen(self.engine, self.settings),
             UsersScreen(self.engine, self.settings, current_user=self.current_user),
             SettingsScreen(self.engine, self.settings),
+            LicensePlateScreen(self.engine, self.settings),
         ]
         for screen in self.screens:
             self.stack.addWidget(screen)
@@ -827,6 +830,7 @@ class MainWindow(QMainWindow):
         self.capture_flash.cancel()
         self._note({"quit": "Shutting down\u2026", "signout": "Signing out\u2026",
                     "update": "Installing update\u2026"}.get(mode, "Restarting\u2026"))
+        self.screens[6].stop()
         self._exit = ShutdownSequence(self, mode, services=(self.telegram, self._sys_monitor),
                                       detail=detail)
         self._exit.finished.connect(self._complete_exit)

@@ -34,6 +34,7 @@ NAV_PERMISSIONS = {
     "Live Usage": "view_dashboard",
     "Users & Access": "manage_users",
     "Settings": "manage_settings",
+    "License Plates": "view_dashboard",
 }
 
 ROLE_TITLES = {"admin": "Administrator", "user": "Standard user"}

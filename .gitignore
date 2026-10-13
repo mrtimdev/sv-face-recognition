@@ -66,6 +66,7 @@ faces/
 settings.json
 attendance.lock
 logs/
+plate_captures/
 # Remembered sign-in token, the "accounts exist" marker and account profile photos
 .session
 .accounts

@@ -48,7 +48,7 @@ class AccessControlTests(unittest.TestCase):
         access = AccessControl(self._user(STANDARD))
         self.assertEqual(set(NAV_PERMISSIONS), {title for _icon, title in NAV})
         self.assertEqual([title for _icon, title in NAV if access.allows_nav(title)],
-                         ["Live Monitor", "Attendance Report", "Live Usage"])
+                         ["Live Monitor", "Attendance Report", "Live Usage", "License Plates"])
         self.assertFalse(access.allows("control_engine"))
         self.assertEqual(access.account_label(), "Signed in as Dara Kim • Standard user")
 
@@ -98,7 +98,7 @@ class RestrictedWindowTests(_TempAccounts, unittest.TestCase):
     def test_menus_show_only_permitted_areas(self):
         window = self._window(STANDARD)
         self.assertEqual(self._visible_nav(window),
-                         ["Live Monitor", "Attendance Report", "Live Usage"])
+                         ["Live Monitor", "Attendance Report", "Live Usage", "License Plates"])
         self.assertEqual(window.page_title.text(), "Live Monitor")
         self.assertTrue(window.user_menu.users_item.isHidden())
         self.assertTrue(window.user_menu.settings_item.isHidden())
@@ -163,7 +163,7 @@ class RestrictedWindowTests(_TempAccounts, unittest.TestCase):
         demoted = self.repo.get_user(window.current_user.uuid)
         demoted.permissions = ["view_dashboard"]
         window._apply_account(demoted)
-        self.assertEqual(self._visible_nav(window), ["Live Monitor", "Live Usage"])
+        self.assertEqual(self._visible_nav(window), ["Live Monitor", "Live Usage", "License Plates"])
         self.assertEqual(window.page_title.text(), "Live Monitor")
 
     def test_disabling_the_signed_in_account_signs_it_out(self):

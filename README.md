@@ -566,3 +566,31 @@ Passing these three examples does not validate arbitrary prints, video replays,
 paper masks or 3D masks. The implementation follows [UniFace's MiniFASNet
 documentation](https://yakhyo.github.io/uniface/modules/spoofing/) and centered,
 clipped crops; it retains the existing local OpenCV runtime and bundled weights.
+
+## Live license plate recognition (optional)
+
+Install the optional CPU dependencies with `python -m pip install -r requirements-plates.txt`,
+then run `python dashboard.py` and select **License Plates**. Plate detection uses FastALPR
+with Fast Plate OCR; models download on first start (internet required), then use the local cache.
+The feature is implemented separately in `license_plate/` and does not write attendance records.
+
+Choose a USB camera index or an RTSP/HTTP stream, confidence threshold, OCR interval,
+consecutive confirmation count, repeat cooldown and output folder. Press **Start camera**.
+If attendance is already running on the same configured source, its clean frames are shared.
+Otherwise the plate screen opens its own camera with the existing reconnect and timeout handling.
+Stop plate recognition before switching attendance to that camera. A camera state change stops
+plate recognition; start it again to use the new state.
+
+**Capture plate** saves plates meeting the confidence threshold on the next reading.
+Enable **Automatic capture** to save a plate after consecutive matching readings, with
+a cooldown per recognized plate. Manual captures bypass stability and cooldown checks.
+Each saved event includes the full frame, a plate crop and a row in `captures.jsonl`;
+the default folder is `plate_captures/`. The screen shows the latest 200 captures in the
+current session; the JSONL file retains the complete saved history. Times are recorded in UTC.
+The live view includes recognition details, the most recent saved crop and session totals.
+Use the gear button in the camera header to expand camera and capture settings.
+Camera controls require **Control engine** access; saving requires **Export data** access.
+
+Recognition depends on plate visibility, lighting and the model's regional coverage.
+Validate results against your local plates before relying on automatic captures.
+See the [Fast Plate OCR documentation](https://ankandrew.github.io/fast-plate-ocr/latest/).
