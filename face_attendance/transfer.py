@@ -26,7 +26,8 @@ import cv2
 import numpy as np
 
 from .catalog import legacy_employee_id, load_employee_map
-from .enrollment import _atomic_write, write_encodings
+from .enrollment import _atomic_write, _catalog_locked, find_face_duplicate, write_encodings
+from .models import Employee
 from .enrollment_photos import photo_directory, photo_path, portrait_name, portrait_path
 from .template_store import TEMPLATE_MODEL, read_template_bundle
 from .version import __version__
@@ -120,7 +121,7 @@ def export_employees(destination, encodings_path, employees_path):
 
 # --- import ------------------------------------------------------------------
 
-def import_employees(source, encodings_path, employees_path):
+def import_employees(source, encodings_path, employees_path, duplicate_distance=.5):
     """Add the employees in *source* to this computer's catalog; returns an ``ImportReport``."""
     try:
         archive = zipfile.ZipFile(source)
@@ -130,7 +131,7 @@ def import_employees(source, encodings_path, employees_path):
         if len(archive.infolist()) > MAX_MEMBERS:
             raise TransferError("This file has too many entries to be an employee export.")
         manifest = _read_manifest(archive)
-        return _merge(archive, manifest["employees"], Path(encodings_path), Path(employees_path))
+        return _merge(archive, manifest["employees"], Path(encodings_path), Path(employees_path), duplicate_distance)
 
 
 def _read_member(archive, name):
@@ -187,7 +188,8 @@ def _write_file(path, data):
     _atomic_write(path, lambda handle: handle.write(data))
 
 
-def _merge(archive, items, encodings_path, employees_path):
+@_catalog_locked
+def _merge(archive, items, encodings_path, employees_path, duplicate_distance=.5):
     samples, refs = read_template_bundle(encodings_path)
     records = load_employee_map(employees_path)
     owners = {}             # employee ID -> display name already enrolled here
@@ -221,12 +223,23 @@ def _merge(archive, items, encodings_path, employees_path):
             known = {np.asarray(vector, dtype=np.float64).reshape(-1).tobytes()
                      for vector in samples.get(label, [])}
             fresh = []
+            duplicate = None
             for entry in item.get("samples") or []:
                 vector = _vector(entry.get("vector")) if isinstance(entry, dict) else None
-                if vector is None or vector.tobytes() in known:
+                if vector is None:
+                    continue
+                duplicate = find_face_duplicate(vector, samples, records, employee_id, duplicate_distance)
+                if duplicate is not None:
+                    break
+                if vector.tobytes() in known:
                     continue
                 known.add(vector.tobytes())
                 fresh.append((vector, entry.get("photo")))
+            if duplicate is not None:
+                report.skipped.append(
+                    f"{name}: face already enrolled as {duplicate.matched_employee_name} "
+                    f"(ID {duplicate.matched_employee_id})")
+                continue
             if not fresh:
                 if id_here is None:
                     report.skipped.append(f"{name}: no usable face samples")
@@ -256,6 +269,7 @@ def _merge(archive, items, encodings_path, employees_path):
                     written.append(target)
             if given_id and here is None:
                 new_records[label] = {"employee_id": given_id, "name": name}
+                records[label] = Employee(given_id, name)
             owners.setdefault(employee_id, name)
             (report.updated if id_here is not None else report.added).append(name)
             report.samples += len(fresh)

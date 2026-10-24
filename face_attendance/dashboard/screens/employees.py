@@ -6,6 +6,7 @@ which is why enrollment pauses recording and restarts the engine on save.
 """
 import threading
 import time
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QFrame, QGrid
                              QStackedWidget, QVBoxLayout, QWidget)
 
 from ...camera import CameraManager
-from ...enrollment import EnrollmentOutcome, EnrollmentService, FACE_BACKEND_LOCK, _atomic_write
+from ...enrollment import EnrollmentOutcome, EnrollmentService, FACE_BACKEND_LOCK, MAX_ENROLLMENT_SAMPLES, _atomic_write
 from ...storage import delete_capture, read_image
 from ...enrollment_photos import portrait_name, sample_photo_map
 from ...transfer import TransferError, export_employees, import_employees
@@ -33,6 +34,7 @@ from ..widgets import Avatar, Card, PageHeader, StatCard, StatusPill, ToastBar, 
 PHOTO_FILTER = "Images (*.jpg *.jpeg *.png *.bmp *.tiff)"
 EXPORT_FILTER = "SV Face ID employees (*.zip)"
 SAMPLE_LIMIT = 8
+MAX_PENDING_SAMPLES = MAX_ENROLLMENT_SAMPLES
 AUTO_CAPTURE_COOLDOWN = 1.5
 PREVIEW_INTERVAL_MS = 33
 THUMB_SIZE = 56
@@ -110,13 +112,13 @@ class EnrollmentRunner(QObject):
     def submit(self, images, name, employee_id, check_quality=True):
         copies = [image.copy() for image in images if image is not None]
         thread = threading.Thread(target=self._work,
-                                  args=(copies, name, employee_id, check_quality),
+                                  args=(self.service, copies, name, employee_id, check_quality),
                                   name="enrollment", daemon=True)
         thread.start()
 
-    def _work(self, images, name, employee_id, check_quality):
+    def _work(self, service, images, name, employee_id, check_quality):
         try:
-            outcome = self.service.enroll_many(images, name, employee_id, check_quality)
+            outcome = service.enroll_many(images, name, employee_id, check_quality)
         except Exception as exc:
             outcome = EnrollmentOutcome("error", str(exc), name=name, employee_id=employee_id or "")
         self.finished.emit(outcome)
@@ -125,7 +127,7 @@ class EnrollmentRunner(QObject):
 class SampleRunner(QObject):
     """Validates one prospective sample off the Qt thread."""
 
-    validated = pyqtSignal(object, object)
+    validated = pyqtSignal(object, object, object)
 
     def __init__(self, service, parent=None):
         super().__init__(parent)
@@ -136,22 +138,22 @@ class SampleRunner(QObject):
     def busy(self):
         return self._busy
 
-    def submit(self, frame, check_quality):
+    def submit(self, frame, check_quality, context=None):
         if self._busy or frame is None:
             return False
         self._busy = True
-        thread = threading.Thread(target=self._work, args=(frame.copy(), check_quality),
+        thread = threading.Thread(target=self._work, args=(frame.copy(), check_quality, context, self.service),
                                   name="enroll-sample", daemon=True)
         thread.start()
         return True
 
-    def _work(self, frame, check_quality):
+    def _work(self, frame, check_quality, context, service):
         try:
-            status, message, issues = self.service.inspect(frame, check_quality)
+            status, message, issues = service.inspect(frame, check_quality)
         except Exception as exc:
             status, message, issues = "error", str(exc), ()
-        self.validated.emit((status, message, issues), frame)
         self._busy = False
+        self.validated.emit((status, message, issues), frame, context)
 
 
 class DropLabel(QLabel):
@@ -185,7 +187,7 @@ class DropLabel(QLabel):
 class EmployeeDialog(QDialog):
     def reject(self):
         owner = self.parent()
-        if owner.saving or owner.validating or owner.probing:
+        if owner.saving:
             owner.editor_toast.show_message("Please wait for the current photo check to finish.", "info")
             return
         super().reject()
@@ -193,13 +195,21 @@ class EmployeeDialog(QDialog):
 
 class EmployeesScreen(QWidget):
     probeReady = pyqtSignal(object)
+    duplicatesReady = pyqtSignal(object)
 
     def __init__(self, engine, settings, parent=None, preview_capture_factory=None):
         super().__init__(parent)
         self.engine = engine
         self.settings = settings
         self._preview_factory = preview_capture_factory
-        self.service = EnrollmentService(settings.encodings_path, settings.employees_path)
+        self.service = EnrollmentService(settings.encodings_path, settings.employees_path,
+                                         duplicate_distance=settings.face_tolerance)
+        self._duplicates_cached_key = None
+        self._duplicates_cache = ()
+        self._duplicates_by_label = {}
+        self._duplicates_scan = None
+        self._duplicates_closed = False
+        self._duplicates_error = ""
         self.runner = EnrollmentRunner(self.service, self)
         self.pending = []
         self.saving = False
@@ -209,7 +219,13 @@ class EmployeesScreen(QWidget):
         self.countdown = 0
         self.probing = False
         self.validating = False
-        self._sample_source = "live"
+        self._sample_context = None
+        self._probe_context = None
+        self._probe_busy = False
+        self._preview_stale_sec = 2.0
+        self._preview_sequence = None
+        self._probe_sequence = None
+        self._sample_digests = set()
         self.sample_runner = SampleRunner(self.service, self)
         self.last_auto_capture = 0.0
         self.preview_on = False
@@ -306,6 +322,7 @@ class EmployeesScreen(QWidget):
         self.search_edit.setPlaceholderText("Search by name or employee ID")
         self.status_filter = QComboBox()
         self.status_filter.addItems(["All employees", "Ready for attendance", "Needs enrollment"])
+        self.status_filter.addItem("Possible duplicate faces")
         self.status_filter.setMinimumWidth(180)
         tools.addWidget(self.search_edit, 1)
         tools.addWidget(self.status_filter)
@@ -335,6 +352,10 @@ class EmployeesScreen(QWidget):
         self.result_count = QLabel()
         self.result_count.setObjectName("screenSubtitle")
         card.add(self.result_count)
+        self.duplicate_review = QLabel()
+        self.duplicate_review.setObjectName("screenSubtitle")
+        self.duplicate_review.setWordWrap(True)
+        card.add(self.duplicate_review)
         return card
 
     def _build_wizard(self):
@@ -345,10 +366,12 @@ class EmployeesScreen(QWidget):
         form.setSpacing(8)
         form.addWidget(QLabel("Display name"), 0, 0)
         self.name_edit = QLineEdit()
+        self.name_edit.setMaxLength(100)
         self.name_edit.setPlaceholderText("Required, e.g. Jane Smith")
         form.addWidget(self.name_edit, 0, 1)
         form.addWidget(QLabel("Employee ID"), 1, 0)
         self.id_edit = QLineEdit()
+        self.id_edit.setMaxLength(100)
         self.id_edit.setPlaceholderText("Optional, e.g. EMP-125")
         form.addWidget(self.id_edit, 1, 1)
         self.quality_check = QCheckBox("Reject low-quality samples")
@@ -385,7 +408,9 @@ class EmployeesScreen(QWidget):
 
         self.hint = QLabel("Add front-facing, slight left/right, and slight up/down views of the same person. "
                            "Keep both eyes visible. Auto stops at 8 samples; Add samples appends more. "
-                           "Every accepted photo is saved; the first available sample is the directory image.")
+                           "Identity consistency is always checked when saving, even with quality checks off. "
+                           "Samples from another person are rejected. Every accepted photo is saved; "
+                           "the first available sample is the directory image.")
         self.hint.setObjectName("screenSubtitle")
         self.hint.setWordWrap(True)
         card.add(self.hint)
@@ -581,6 +606,7 @@ class EmployeesScreen(QWidget):
         self.runner.finished.connect(self.on_enrollment_finished)
         self.sample_runner.validated.connect(self.on_sample_validated)
         self.probeReady.connect(self.on_probe)
+        self.duplicatesReady.connect(self._on_duplicates_ready)
 
         # Timers
         self.preview_timer = QTimer(self)
@@ -601,7 +627,7 @@ class EmployeesScreen(QWidget):
         self.choose_button.clicked.connect(self._choose_photo)
         self.drop.dropped.connect(self._load_photo)
         self.add_upload_button.clicked.connect(self._add_upload_sample)
-        self.reload_button.clicked.connect(self.reload)
+        self.reload_button.clicked.connect(self._refresh_directory)
         self.folder_button.clicked.connect(self._open_folder)
         self.enroll_cta.clicked.connect(self._switch_to_wizard)
 
@@ -637,6 +663,8 @@ class EmployeesScreen(QWidget):
             self._toggle_preview()
 
     def _switch_segment(self, index):
+        if self.capture_stack.currentIndex() != index:
+            self._invalidate_checks()
         self.capture_stack.setCurrentIndex(index)
         if index == 0:
             self.seg_capture.setObjectName("softButton")
@@ -657,7 +685,8 @@ class EmployeesScreen(QWidget):
                                      for key in ("employee_name", "employee_id", "name"))
             status = self.status_filter.currentIndex()
             visible = matches and (status == 0 or (status == 1 and row["samples"] > 0)
-                                   or (status == 2 and row["samples"] == 0))
+                                   or (status == 2 and row["samples"] == 0)
+                                   or (status == 3 and row["name"] in self._duplicates_by_label))
             self.employee_table.setRowHidden(index, not visible)
             shown += visible
         self.result_count.setText(f"Showing {shown} of {len(self.rows)} enrollment records • Double-click a row to view details")
@@ -768,8 +797,10 @@ class EmployeesScreen(QWidget):
         self._open_enrollment()
 
     def _open_enrollment(self, row=None):
-        if self.saving or self.validating:
+        if self.saving:
             return
+        if self.preview_on:
+            self._stop_preview()
         self._clear_samples()
         self.editor_toast.hide_message()
         self.editor_toast.hide_message()
@@ -800,6 +831,9 @@ class EmployeesScreen(QWidget):
         self._editing_label = None
 
     def _switch_to_profile(self):
+        self._invalidate_checks()
+        if self.preview_on:
+            self._stop_preview()
         self.right_stack.setCurrentIndex(1)
 
     def _show_profile(self):
@@ -810,7 +844,7 @@ class EmployeesScreen(QWidget):
             self.editor.setWindowTitle("Employee details")
             self.editor.show()
 
-    def _populate_profile(self, row):
+    def _populate_profile(self, row, refresh_photos=True):
         """Fill the profile card from a row dict, enrollment photo and captures."""
         if row is None:
             return
@@ -839,10 +873,14 @@ class EmployeesScreen(QWidget):
         self.profile_name.setText(row["employee_name"])
         self.profile_id_label.setText(
             f"ID: {row['employee_id']}" if row["employee_id"] else "No employee ID")
+        duplicates = self._duplicates_by_label.get(row["name"], [])
         self.profile_pill.set_status(
-            "Enrolled" if row["samples"] else "Needs enrollment",
-            "ok" if row["samples"] else "warn")
+            "Review face match" if duplicates else ("Enrolled" if row["samples"] else "Needs enrollment"),
+            "warn" if duplicates or not row["samples"] else "ok")
         lines = [f"{row['samples']} enrolled sample(s)"]
+        if duplicates:
+            lines.append("Possible duplicate face with " + "; ".join(owner for _, owner in duplicates))
+            lines.append("Compare both profiles. Delete only a confirmed mistaken enrollment using its directory action.")
         if enrollment_photo:
             lines.append(f"Enrollment photo: {enrollment_photo.name}")
         else:
@@ -860,10 +898,10 @@ class EmployeesScreen(QWidget):
         # -- enable/disable actions --
         self.p_del_btn.setEnabled(row["samples"] > 0)
 
-        self._populate_enrolled_samples(row)
-
-        # -- gallery shows evidence captures --
-        self._populate_gallery(captures)
+        if refresh_photos:
+            self._populate_enrolled_samples(row)
+            # -- gallery shows evidence captures --
+            self._populate_gallery(captures)
 
     def _populate_enrolled_samples(self, row):
         while self.enrolled_layout.count():
@@ -1013,16 +1051,27 @@ class EmployeesScreen(QWidget):
     def on_frame(self, frame):
         """Unused: the preview pulls frames from its own camera, not the engine."""
 
-    def _latest_preview_frame(self):
+    def _latest_preview_packet(self):
         packet = self.preview_camera.frames.get() if self.preview_camera is not None else None
+        if packet is None or time.monotonic() - packet.captured_at > self._preview_stale_sec:
+            return None
+        return packet
+
+    def _latest_preview_frame(self):
+        packet = self._latest_preview_packet()
         return None if packet is None else packet.frame
 
     def _pull_preview(self):
         if not self.preview_on:
             return
-        frame = self._latest_preview_frame()
-        if frame is not None:
-            self.capture_video.set_frame(frame)
+        packet = self._latest_preview_packet()
+        if packet is None:
+            self.capture_video.show_message("Waiting for camera", "No fresh camera frame available")
+            return
+        sequence = (packet.generation, packet.sequence)
+        if sequence != self._preview_sequence:
+            self._preview_sequence = sequence
+            self.capture_video.set_frame(packet.frame)
 
     def _toggle_preview(self):
         if self.preview_on:
@@ -1047,6 +1096,8 @@ class EmployeesScreen(QWidget):
             self._notify("Attendance paused while the enrollment camera is open; "
                                     "it resumes when the preview closes.", "warn")
         self.preview_camera = CameraManager(config, capture_factory=self._preview_factory)
+        self._preview_stale_sec = config.camera_stale_sec
+        self._preview_sequence = self._probe_sequence = None
         self.preview_camera.start()
         self.preview_on = True
         self.preview_button.setText("Stop preview")
@@ -1057,6 +1108,7 @@ class EmployeesScreen(QWidget):
                            "Face the camera, then capture samples.")
 
     def _stop_preview(self, resume=True):
+        self._invalidate_checks()
         self.preview_on = False
         self.probe_timer.stop()
         self.preview_timer.stop()
@@ -1079,47 +1131,64 @@ class EmployeesScreen(QWidget):
             self._engine_was_running = False
 
     def _probe_now(self):
-        if (self.saving or self.probing or self.validating or not self.preview_on
+        if (self.saving or self._probe_busy or self.probing or self.validating or not self.preview_on
                 or self.preview_camera is None):
             return
-        frame = self._latest_preview_frame()
-        if frame is None:
+        packet = self._latest_preview_packet()
+        if packet is None or (packet.generation, packet.sequence) == self._probe_sequence:
             return
+        self._probe_sequence = (packet.generation, packet.sequence)
+        context = (object(), packet.captured_at, packet.generation)
+        self._probe_context = context
         self.probing = True
-        threading.Thread(target=self._probe, args=(frame.copy(),), name="enroll-probe",
+        self._probe_busy = True
+        # Snapshot every UI/config value here; workers never access Qt widgets.
+        threading.Thread(target=self._probe, args=(packet.frame.copy(), context,
+                         max(0.1, float(self.settings.detection_scale)),
+                         self.quality_check.isChecked(), self.service), name="enroll-probe",
                          daemon=True).start()
 
-    def _probe(self, frame):
-        scale = max(0.1, float(self.settings.detection_scale))
+    def _probe(self, frame, context, scale, check_quality, service):
+        def emit(payload):
+            self._probe_busy = False
+            self.probeReady.emit((context, payload))
         try:
             small = cv2.resize(frame, (max(1, round(frame.shape[1] * scale)),
                                        max(1, round(frame.shape[0] * scale))),
                                interpolation=cv2.INTER_AREA)
             with FACE_BACKEND_LOCK:
-                boxes = self.service._detector().face_locations(
+                boxes = service._detector().face_locations(
                     cv2.cvtColor(small, cv2.COLOR_BGR2RGB), model="yunet")
+            if not boxes:
+                emit(("no_face", "No face detected. Step into the frame.", None, (), None))
+                return
+            if len(boxes) > 1:
+                emit(("multiple_faces",
+                                      f"{len(boxes)} faces in view. Enroll one person per sample.",
+                                      None, (), None))
+                return
+            top, right, bottom, left = boxes[0]
+            box = (top / scale, right / scale, bottom / scale, left / scale)
+            issues = ()
+            if check_quality:
+                from ...enrollment import frame_quality
+                issues = frame_quality(frame, box)
+            emit(("ok", "", box, issues, frame))
+
         except Exception as exc:
-            self.probeReady.emit(("error", f"Face detection failed: {exc}", None, (), None))
-            return
-        if not boxes:
-            self.probeReady.emit(("no_face", "No face detected. Step into the frame.", None, (), None))
-            return
-        if len(boxes) > 1:
-            self.probeReady.emit(("multiple_faces",
-                                  f"{len(boxes)} faces in view. Enroll one person per sample.",
-                                  None, (), None))
-            return
-        top, right, bottom, left = boxes[0]
-        box = (top / scale, right / scale, bottom / scale, left / scale)
-        issues = ()
-        if self.quality_check.isChecked():
-            from ...enrollment import frame_quality
-            issues = frame_quality(frame, box)
-        self.probeReady.emit(("ok", "", box, issues, frame))
+            emit(("error", f"Face detection failed: {exc}", None, (), None))
 
     def on_probe(self, payload):
+        context, payload = payload
+        if context is not self._probe_context:
+            return
+        self._probe_context = None
         self.probing = False
         if self.saving or not self.preview_on:
+            return
+        latest = self._latest_preview_packet()
+        if (latest is None or latest.generation != context[2]
+                or time.monotonic() - context[1] > self._preview_stale_sec):
             return
         status, message, _box, issues, frame = payload
         if status != "ok":
@@ -1133,7 +1202,7 @@ class EmployeesScreen(QWidget):
         self._auto_capture(frame)
 
     def _auto_capture(self, frame):
-        if not self.preview_on or self.saving or not self.auto_check.isChecked() or self.validating:
+        if not self.preview_on or self.saving or not self.auto_check.isChecked() or self.validating or self.countdown:
             return
         if len(self.pending) >= SAMPLE_LIMIT:
             return
@@ -1143,7 +1212,7 @@ class EmployeesScreen(QWidget):
         self._submit_sample(frame)
 
     def _start_countdown(self):
-        if self.countdown:
+        if self.countdown or self.saving or self.validating or not self.preview_on:
             return
         seconds = self.countdown_box.value()
         if seconds <= 0:
@@ -1151,24 +1220,21 @@ class EmployeesScreen(QWidget):
             return
         self.countdown = seconds
         self.capture_button.setEnabled(False)
-        self._tick_countdown()
+        self.capture_button.setText(f"Capturing in {self.countdown}...")
         self.countdown_timer.start()
 
     def _tick_countdown(self):
-        if self.countdown <= 0:
-            self.countdown_timer.stop()
-            self.capture_button.setEnabled(self.preview_on)
-            self.capture_button.setText("Capture sample")
+        if not self.preview_on or self.countdown <= 0:
+            self._cancel_countdown()
             return
-        self.capture_button.setText(f"Capturing in {self.countdown}...")
-        if self.countdown == 1:
-            self.countdown = 0
+        self.countdown -= 1
+        if self.countdown <= 0:
             self.countdown_timer.stop()
             self.capture_button.setEnabled(self.preview_on)
             self.capture_button.setText("Capture sample")
             self._grab_sample()
             return
-        self.countdown -= 1
+        self.capture_button.setText(f"Capturing in {self.countdown}...")
 
     def _grab_sample(self):
         if self.saving or self.validating or not self.preview_on:
@@ -1182,14 +1248,36 @@ class EmployeesScreen(QWidget):
         self._submit_sample(frame)
 
     def _submit_sample(self, frame):
-        self._sample_source = "live"
-        if self.sample_runner.submit(frame, self.quality_check.isChecked()):
-            self.validating = True
+        return self._validate_sample(frame, "live")
 
-    def on_sample_validated(self, result, frame):
+    def _validate_sample(self, frame, source):
+        if len(self.pending) >= MAX_PENDING_SAMPLES:
+            self._notify(f"Save these samples before collecting more ({MAX_PENDING_SAMPLES} per save).", "warn")
+            self.capture_button.setText("Capture sample")
+            self.capture_button.setEnabled(self.preview_on and not self.countdown)
+            return False
+        digest = hashlib.sha256(frame.tobytes()).digest()
+        if digest in self._sample_digests:
+            self.coach.setText("This frame is already collected. Change pose and wait for a new frame.")
+            self.capture_button.setText("Capture sample")
+            self.capture_button.setEnabled(self.preview_on and not self.countdown)
+            return False
+        context = (object(), source, digest)
+        if not self.sample_runner.submit(frame, self.quality_check.isChecked(), context):
+            self.capture_button.setText("Capture sample")
+            self.capture_button.setEnabled(self.preview_on and not self.countdown)
+            return False
+        self._sample_context = context
+        self.validating = True
+        return True
+
+    def on_sample_validated(self, result, frame, context):
+        if context is not self._sample_context:
+            return
+        self._sample_context = None
         self.validating = False
         status, message, issues = result
-        upload_mode = self._sample_source == "upload"
+        upload_mode = context[1] == "upload"
         if upload_mode:
             self.add_upload_button.setText("Add photo as sample")
             self.add_upload_button.setEnabled(True)
@@ -1204,6 +1292,7 @@ class EmployeesScreen(QWidget):
             self._notify(text, "warn")
             return
         self.pending.append(frame)
+        self._sample_digests.add(context[2])
         self._refresh_samples()
         if upload_mode:
             self.upload = None
@@ -1229,6 +1318,7 @@ class EmployeesScreen(QWidget):
         if image is None:
             self._notify(f"Could not read {path}", "bad")
             return
+        self._invalidate_checks()
         self.upload = image
         pixmap = to_pixmap(image)
         self.drop.setPixmap(pixmap.scaled(self.drop.size(), Qt.AspectRatioMode.KeepAspectRatio,
@@ -1243,11 +1333,9 @@ class EmployeesScreen(QWidget):
         if self.validating:
             self._notify("A sample check is already running.", "warn")
             return
-        self._sample_source = "upload"
-        self.add_upload_button.setEnabled(False)
-        self.add_upload_button.setText("Checking photo...")
-        self.validating = True
-        self.sample_runner.submit(self.upload, self.quality_check.isChecked())
+        if self._validate_sample(self.upload, "upload"):
+            self.add_upload_button.setEnabled(False)
+            self.add_upload_button.setText("Checking photo...")
 
     # --- samples and saving ----------------------------------------------
     def _refresh_samples(self):
@@ -1261,13 +1349,32 @@ class EmployeesScreen(QWidget):
         self.save_button.setEnabled(bool(self.pending) and not self.saving)
 
     def _clear_samples(self):
+        if self.saving:
+            return
+        self._invalidate_checks()
         self.pending.clear()
+        self._sample_digests.clear()
+        self.last_auto_capture = 0.0
         self.upload = None
         self.drop.clear()
         self.drop.setText("Drop a photo here\nor choose one below")
         self.add_upload_button.setEnabled(False)
         self._refresh_samples()
         self.coach.setText("Samples cleared.")
+
+    def _cancel_countdown(self):
+        self.countdown_timer.stop()
+        self.countdown = 0
+        self.capture_button.setText("Capture sample")
+        self.capture_button.setEnabled(self.preview_on and not self.validating)
+
+    def _invalidate_checks(self):
+        """Ignore queued work belonging to a previous editor/camera state."""
+        self._sample_context = self._probe_context = None
+        self.validating = self.probing = False
+        self._cancel_countdown()
+        self.add_upload_button.setText("Add photo as sample")
+        self.add_upload_button.setEnabled(self.upload is not None)
 
     def _save(self):
         if self.saving or self.validating:
@@ -1286,6 +1393,7 @@ class EmployeesScreen(QWidget):
                 self.editor_toast.show_message("This employee already exists. Use Edit or Update photo in the directory.", "warn")
                 return
         self.saving = True
+        self.clear_button.setEnabled(False)
         self.probe_timer.stop()
         self.countdown_timer.stop()
         self.countdown = 0
@@ -1300,12 +1408,19 @@ class EmployeesScreen(QWidget):
 
     def on_enrollment_finished(self, outcome):
         self.saving = False
+        self.clear_button.setEnabled(True)
         self.right_stack.setEnabled(True)
         self.save_button.setText("Save photos" if self._editing_label else "Add employee")
         self.save_button.setEnabled(bool(self.pending))
         if not outcome.ok:
             self._enrollment_save_samples = []
-            self.editor_toast.show_message(f"{outcome.message}", "bad")
+            message = outcome.message
+            if outcome.status == "duplicate_face" and getattr(outcome, "conflicts", ()):
+                owners = sorted({self._duplicate_owner(match, matched=True) for match in outcome.conflicts})
+                message = ("This face is already enrolled as " + "; ".join(owners) + ". "
+                           "Use Update photo on the existing employee. No enrollment was saved; "
+                           "your collected samples are still available.")
+            self.editor_toast.show_message(message, "bad")
             if self.preview_on:
                 self.probe_timer.start()
             return
@@ -1332,13 +1447,91 @@ class EmployeesScreen(QWidget):
     def _invalidate_captures(self):
         self._captures_dirty = True
 
-    def reload(self):
+    def _duplicate_catalog_key(self):
+        """Cheap identity of the files used by an asynchronous duplicate scan."""
+        signatures = []
+        for value in (self.settings.encodings_path, self.settings.employees_path):
+            path = Path(value).resolve()
+            try:
+                stat = path.stat()
+                signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            except OSError:
+                signature = None
+            signatures.append((str(path), signature))
+        return tuple(signatures), self.settings.face_tolerance
+
+    def _refresh_directory(self):
+        self._duplicates_cached_key = None
+        self.reload()
+
+    @staticmethod
+    def _duplicate_owner(match, matched=False):
+        prefix = "matched_" if matched else ""
+        name = getattr(match, prefix + "employee_name") or getattr(match, prefix + "label")
+        employee_id = getattr(match, prefix + "employee_id")
+        return f"{name} ({employee_id})" if employee_id else name
+
+    def _request_duplicate_scan(self, key):
+        if self._duplicates_closed or self._duplicates_scan is not None or key == self._duplicates_cached_key:
+            return
+        token = object()
+        self._duplicates_scan = token
+        service = self.service
+
+        def work():
+            try:
+                matches, error = tuple(service.duplicate_faces()), ""
+            except Exception as exc:
+                matches, error = (), str(exc)
+            self.duplicatesReady.emit((token, key, matches, error))
+
+        threading.Thread(target=work, name="enrollment-duplicates", daemon=True).start()
+
+    def _on_duplicates_ready(self, payload):
+        token, key, matches, error = payload
+        if token is not self._duplicates_scan or self._duplicates_closed:
+            return
+        self._duplicates_scan = None
+        current = self._duplicate_catalog_key()
+        if key != current:
+            self._request_duplicate_scan(current)
+            return
+        self._duplicates_cached_key = key
+        self._duplicates_cache = matches
+        self._duplicates_error = error
+        self.reload(refresh_profile_photos=False)
+
+    def _show_duplicate_profile(self, label):
+        for index, row in enumerate(self.rows):
+            if row["name"] == label:
+                self.employee_table.selectRow(index)
+                self._populate_profile(row)
+                self._switch_to_profile()
+                self.editor.setWindowTitle("Employee details — duplicate-face review")
+                self.editor.show()
+                return
+        self._notify("This enrollment changed. Refresh the directory and review again.", "warn")
+
+    def reload(self, refresh_profile_photos=True):
+        key = self._duplicate_catalog_key()
+        self._duplicates_by_label = {}
+        if key == self._duplicates_cached_key:
+            for match in self._duplicates_cache:
+                self._duplicates_by_label.setdefault(match.label, []).append((match.matched_label, self._duplicate_owner(match, True)))
+                self._duplicates_by_label.setdefault(match.matched_label, []).append((match.label, self._duplicate_owner(match)))
         self._sample_photos_map = sample_photo_map(self.settings.encodings_path)
         if self._captures_dirty:
             self._captures_map = self._scan_captures()
             self._captures_dirty = False
         self._thumb_cache.clear()
         self.rows = self.service.employees()
+        # Qt defers deleting replaced cell widgets; hide old chips/actions now
+        # so an asynchronous review refresh cannot briefly paint both versions.
+        for index in range(self.employee_table.rowCount()):
+            for column in (3,5):
+                previous = self.employee_table.cellWidget(index,column)
+                if previous is not None:
+                    previous.hide()
         self.employee_table.setRowCount(len(self.rows))
         for index, row in enumerate(self.rows):
             photo = self._find_enrollment_photo(row["name"], row["employee_name"])
@@ -1358,8 +1551,16 @@ class EmployeesScreen(QWidget):
             status = QWidget()
             status_layout = QHBoxLayout(status)
             status_layout.setContentsMargins(8, 0, 8, 0)
-            pill = StatusPill("Enrolled" if row["samples"] else "Needs enrollment",
-                              "ok" if row["samples"] else "warn")
+            duplicates = self._duplicates_by_label.get(row["name"], [])
+            pill = StatusPill("Review match" if duplicates else
+                              ("Enrolled" if row["samples"] else "Needs enrollment"),
+                              "warn" if duplicates or not row["samples"] else "ok")
+            if duplicates:
+                explanation = ("Possible duplicate face with " + "; ".join(owner for _, owner in duplicates)
+                               + ". Review both profiles before making changes. No records were changed.")
+                pill.setToolTip(explanation)
+                pill.setAccessibleName(explanation)
+                status.setToolTip(explanation)
             pill.setFixedHeight(28)
             status_layout.addWidget(pill)
             status_layout.addStretch()
@@ -1386,6 +1587,11 @@ class EmployeesScreen(QWidget):
                 act.setIcon(make_icon(icon_name, 16, palette(self._theme)["text_secondary"]))
                 act.triggered.connect(lambda checked=False, i=index, fn=cb: self._row_action(i, fn))
             menu.addSeparator()
+            for counterpart, owner in duplicates:
+                review = menu.addAction(f"Review match: {owner}")
+                review.triggered.connect(lambda checked=False, label=counterpart: self._show_duplicate_profile(label))
+            if duplicates:
+                menu.addSeparator()
             del_act = menu.addAction("Delete employee")
             del_act.setIcon(make_icon("trash", 16, palette(self._theme)["danger"]))
             del_act.triggered.connect(lambda checked=False, i=index: self._row_action(i, self._remove_employee))
@@ -1394,14 +1600,36 @@ class EmployeesScreen(QWidget):
             action_layout.addStretch()
             self.employee_table.setCellWidget(index, 5, actions)
             self.employee_table.setRowHeight(index, 64)
-        ready = len({row["employee_id"] for row in self.rows if row["samples"]})
+        enrolled = {row["employee_id"] for row in self.rows if row["samples"]}
+        review = {row["employee_id"] for row in self.rows if row["name"] in self._duplicates_by_label}
+        ready = len(enrolled-review)
         pending = len({row["employee_id"] for row in self.rows if not row["samples"]}
                       - {row["employee_id"] for row in self.rows if row["samples"]})
-        self.stat_enrolled.set_value(ready, "ok" if ready else "idle")
+        self.stat_enrolled.set_value(ready, "warn" if review else "ok" if ready else "idle")
+        self.stat_enrolled.set_hint(f"{len(review)} employees need face-match review" if review
+                                    else "Employees with enrolled faces")
         self.stat_latest.set_value(pending, "warn" if pending else "idle")
         self.stat_samples.set_value(sum(row["samples"] for row in self.rows))
-        self.enrolled_pill.set_status(f"{ready} enrolled", "ok" if ready else "idle")
+        self.enrolled_pill.set_status(f"{len(enrolled)} enrolled", "warn" if review else "ok" if ready else "idle")
         self._filter_employees(self.search_edit.text())
+        if key != self._duplicates_cached_key:
+            self.duplicate_review.setText("Checking enrolled faces for possible duplicate employees…")
+        elif self._duplicates_error:
+            self.duplicate_review.setText("Duplicate-face review unavailable: " + self._duplicates_error
+                                          + ". Refresh to retry.")
+        elif self._duplicates_by_label:
+            self.duplicate_review.setText(
+                f"{len(self._duplicates_by_label)} enrollment profiles need face-match review. "
+                "Use Edit → Review match to inspect the other employee. "
+                "No profiles are merged or deleted automatically.")
+        else:
+            self.duplicate_review.setText("No cross-employee face matches found.")
+        self._request_duplicate_scan(key)
+        if self.editor.isVisible() and self.right_stack.currentIndex() == 1:
+            shown = getattr(self, "_profile_row", {}).get("name")
+            current = next((row for row in self.rows if row["name"] == shown), None)
+            if current is not None:
+                self._populate_profile(current, refresh_photos=refresh_profile_photos)
 
     def _row_action(self, index, action):
         self.employee_table.selectRow(index)
@@ -1523,7 +1751,8 @@ class EmployeesScreen(QWidget):
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            report = import_employees(path, self.settings.encodings_path, self.settings.employees_path)
+            report = import_employees(path, self.settings.encodings_path, self.settings.employees_path,
+                                      duplicate_distance=self.settings.face_tolerance)
         except (TransferError, OSError, ValueError) as exc:
             report, error = None, str(exc)
         finally:
@@ -1543,9 +1772,11 @@ class EmployeesScreen(QWidget):
     # =======================================================================
 
     def on_settings_changed(self, settings):
+        self._invalidate_checks()
         self.settings = settings
         self._theme = settings.theme if hasattr(settings, "theme") else "dark"
-        self.service = EnrollmentService(settings.encodings_path, settings.employees_path)
+        self.service = EnrollmentService(settings.encodings_path, settings.employees_path,
+                                         duplicate_distance=settings.face_tolerance)
         self.runner.service = self.service
         self.sample_runner.service = self.service
         if self.preview_on:
@@ -1553,13 +1784,15 @@ class EmployeesScreen(QWidget):
         self.reload()
 
     def closeEvent(self, event):
+        self._duplicates_closed = True
+        self._invalidate_checks()
         self.editor.hide()
         self.probe_timer.stop()
         self.countdown_timer.stop()
         self.preview_timer.stop()
         if self.preview_on:
             self._stop_preview(resume=False)
-        for signal in (self.probeReady, self.runner.finished, self.sample_runner.validated):
+        for signal in (self.probeReady, self.duplicatesReady, self.runner.finished, self.sample_runner.validated):
             try:
                 signal.disconnect()
             except TypeError:

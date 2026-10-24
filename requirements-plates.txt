@@ -1,2 +1,3 @@
-# Optional CPU plate detection + Fast Plate OCR; keeps attendance installs lightweight.
-fast-alpr[onnx]>=0.4.0,<0.5
+# Install in .venv-plates, never in the desktop venv (see OPERATIONS.md).
+# FastALPR requires headless OpenCV; the desktop/terminal uses regular OpenCV.
+-r requirements-plates-isolated.txt

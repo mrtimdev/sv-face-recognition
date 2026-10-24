@@ -28,7 +28,8 @@ console = False          # True → show terminal window (useful for debugging)
 here = os.path.abspath(SPECPATH)
 # Model assets and their licenses are available relative to package __file__.
 datas = [(os.path.join(here, "face_attendance", "assets"),
-          os.path.join("face_attendance", "assets"))]
+          os.path.join("face_attendance", "assets")),
+         (os.path.join(here, "license_plate", "process_worker.py"), "license_plate")]
 
 # ── Hidden imports ───────────────────────────────────────────────────
 hiddenimports = [

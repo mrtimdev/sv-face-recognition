@@ -9,11 +9,12 @@ handed to enrollment through ``grab_clean_frame``.
 """
 from datetime import datetime
 import logging
+from pathlib import Path
 import threading
 import time
 
 import numpy as np
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
 
 from ..attendance import AttendanceService
 from ..anti_spoof import LIVE_THRESHOLD, live_sample
@@ -22,6 +23,7 @@ from ..catalog import FaceCatalog
 from ..enrollment import employee_rows as load_employee_rows
 from ..models import RecognitionRequest
 from ..persistence import PersistenceWorker
+from ..power import SleepInhibitor
 from ..recognition import RecognitionService, RecognitionWorker
 from ..settings import LOCK_PATH, describe_source
 from ..tracking import FaceTracker
@@ -67,6 +69,7 @@ class AttendanceEngine(QObject):
     """Owns the attendance workers; connect to the signals instead of polling."""
 
     frameReady = pyqtSignal(object)          # annotated BGR frame (numpy)
+    _previewAvailable = pyqtSignal()
     tracksReady = pyqtSignal(object)         # list of track snapshots
     statsReady = pyqtSignal(object)          # dict of live statistics
     captureTriggered = pyqtSignal(object)    # CaptureJob when auto-capture fires
@@ -87,7 +90,12 @@ class AttendanceEngine(QObject):
         self._capture_factory = capture_factory
         self._lock = EngineLock(LOCK_PATH) if use_lock else None
         self._clean_lock = threading.Lock()
+        self._preview_lock = threading.Lock()
+        self._preview_pending = False
+        self._preview_values = {}
+        self._previewAvailable.connect(self._deliver_preview, Qt.ConnectionType.QueuedConnection)
         self._stop = threading.Event()
+        self._sleep_inhibitor = SleepInhibitor()
         self._clean = None
         self._paused = False
         self._thread = None
@@ -100,7 +108,11 @@ class AttendanceEngine(QObject):
 
     def _build(self):
         """Construct workers for the current settings; may raise for bad input."""
+        self._assert_workers_stopped()
         self.config = self.settings.to_config()
+        # Taken before loading, so a write racing the load is still seen later.
+        self._catalog_seen = self._catalog_signature()
+        self._catalog_pending = None
         self.catalog = FaceCatalog(self.config.encodings_path, self.config.employees_path,
                                     allow_empty=True)
         self.camera = (CameraManager(self.config) if self._capture_factory is None else
@@ -129,9 +141,20 @@ class AttendanceEngine(QObject):
         """Refuse a second engine on the same data directory."""
         return None if self._lock is None else self._lock.acquire()
 
+    def _assert_workers_stopped(self):
+        if self.running:
+            raise RuntimeError("The previous engine is still stopping. Restart the application if its driver remains blocked.")
+        for name in ('camera', 'recognition', 'persistence'):
+            worker = getattr(self, name, None)
+            if worker is not None and worker.thread.is_alive():
+                raise RuntimeError(f"The previous {name} worker has not stopped. Restart the application before starting again.")
+
     def start(self):
         if self.running:
+            if self._stop.is_set():
+                raise RuntimeError("The previous engine is still stopping. Restart the application if its driver remains blocked.")
             return
+        self._assert_workers_stopped()
         self.acquire_lock()
         self._unknown_alerted = {}
         self._build()
@@ -141,6 +164,7 @@ class AttendanceEngine(QObject):
         self.camera.start()
         self._thread = threading.Thread(target=self._run, name="dashboard-engine", daemon=True)
         self._thread.start()
+        self._sleep_inhibitor.acquire()
         self.runningChanged.emit(True)
         self.catalogChanged.emit(self.employee_rows())
         self.logMessage.emit(f"Engine started: {describe_source(self.settings.source)} | "
@@ -158,11 +182,14 @@ class AttendanceEngine(QObject):
         """
         report = on_stage or (lambda _stage: None)
         self._stop.set()
-        thread, self._thread = self._thread, None
+        self._sleep_inhibitor.release()
+        thread = self._thread
         if thread is not None:
             thread.join(JOIN_TIMEOUT)
             if thread.is_alive():
                 logging.error("Engine loop did not stop within %.1fs", JOIN_TIMEOUT)
+            else:
+                self._thread = None
         # Camera first, then recognition, then persistence: accepted attendance
         # jobs are committed before the database connection closes.
         self.camera.close()
@@ -172,6 +199,8 @@ class AttendanceEngine(QObject):
         report("saved")
         with self._clean_lock:
             self._clean = None
+        with self._preview_lock:
+            self._preview_values.clear()
         self._stats = {}
         if thread is not None:
             self.runningChanged.emit(False)
@@ -205,6 +234,27 @@ class AttendanceEngine(QObject):
         with self._clean_lock:
             return None if self._clean is None else self._clean.copy()
 
+    def _queue_preview(self, **values):
+        """One pending GUI notification, regardless of UI speed or frame rate."""
+        with self._preview_lock:
+            self._preview_values.update(values)
+            if self._preview_pending:
+                return
+            self._preview_pending = True
+        self._previewAvailable.emit()
+
+    @pyqtSlot()
+    def _deliver_preview(self):
+        with self._preview_lock:
+            values, self._preview_values = self._preview_values, {}
+            self._preview_pending = False
+        if 'frame' in values:
+            self.frameReady.emit(values['frame'])
+        if 'tracks' in values:
+            self.tracksReady.emit(values['tracks'])
+        if 'stats' in values:
+            self.statsReady.emit(values['stats'])
+
     def employee_rows(self):
         return load_employee_rows(self.config.encodings_path, self.config.employees_path)
 
@@ -218,10 +268,38 @@ class AttendanceEngine(QObject):
         if self.running:
             self.restart()
         else:
-            self.config = self.settings.to_config()
             self._build()
         self.catalogChanged.emit(self.employee_rows())
         self.logMessage.emit(f"Catalog reloaded: {self.catalog.enrolled_count} employee(s)")
+
+    def _catalog_signature(self):
+        signature = []
+        for path in (self.config.encodings_path, self.config.employees_path):
+            try:
+                stat = Path(path).stat()
+            except OSError:
+                signature.append(None)
+            else:
+                signature.append((stat.st_mtime_ns, stat.st_size))
+        return tuple(signature)
+
+    def reload_if_catalog_changed(self):
+        """Reload when another process (e.g. the mobile API) rewrote the catalog.
+
+        Polled from the GUI thread. A change must be seen on two consecutive
+        polls, so the dashboard's own writes, which call ``reload_catalog``
+        right away, are not reloaded a second time. Returns True on reload.
+        """
+        current = self._catalog_signature()
+        if current == self._catalog_seen:
+            self._catalog_pending = None
+            return False
+        if current != self._catalog_pending:
+            self._catalog_pending = current
+            return False
+        self.logMessage.emit("Employee catalog changed outside the dashboard; reloading")
+        self.reload_catalog()
+        return True
 
     def _run(self):
         """The coordination loop with auto-restart on failure."""
@@ -294,13 +372,13 @@ class AttendanceEngine(QObject):
                 preview_fps, count, fps_since = count / elapsed, 0, now
             image = self.renderer.render_overlay(frame, self.tracker.tracks, now, wall_time,
                                                  status, "" if paused else recognition_error)
-            self.frameReady.emit(image)
+            updates = {'frame': image}
             if now - published >= PUBLISH_INTERVAL:
                 published = now
-                self.tracksReady.emit([track_snapshot(track, now, self.tracker)
-                                       for track in self.tracker.tracks.values()])
+                updates['tracks'] = [track_snapshot(track, now, self.tracker)
+                                     for track in self.tracker.tracks.values()]
                 self._stats = self._statistics(status, preview_fps, recognition_error)
-                self.statsReady.emit(self._stats)
+                updates['stats'] = self._stats
                 if self._stats["liveness_blocked"] and now - last_liveness_log >= 5.0:
                     last_liveness_log = now
                     self.logMessage.emit("Attendance blocked by liveness: " +
@@ -319,6 +397,7 @@ class AttendanceEngine(QObject):
                             "age": round(now - track.first_seen, 1),
                             "frame": snap,
                         })
+            self._queue_preview(**updates)
             delay = 1 / cfg.target_fps - (time.monotonic() - started)
             if delay > 0:
                 self._stop.wait(delay)

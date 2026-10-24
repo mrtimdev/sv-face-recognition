@@ -38,7 +38,10 @@ def static_info() -> StaticInfo:
     info.cpu_cores_physical = psutil.cpu_count(logical=False) or 1
     info.cpu_cores_logical = psutil.cpu_count(logical=True) or 1
     info.ram_total_bytes = psutil.virtual_memory().total
-    info.swap_total_bytes = psutil.swap_memory().total
+    try:
+        info.swap_total_bytes = psutil.swap_memory().total
+    except (OSError, psutil.Error):
+        pass
     info.os_name = platform.system()
     info.os_version = platform.version()
     info.hostname = platform.node()
@@ -157,10 +160,14 @@ def _take_snapshot(prev_disk_io, prev_net_io, prev_time):
     snap.ram_percent = vm.percent
 
     # Swap
-    sw = psutil.swap_memory()
-    snap.swap_used_bytes = sw.used
-    snap.swap_total_bytes = sw.total
-    snap.swap_percent = sw.percent
+    try:
+        sw = psutil.swap_memory()
+        snap.swap_used_bytes = sw.used
+        snap.swap_total_bytes = sw.total
+        snap.swap_percent = sw.percent
+    except (OSError, psutil.Error):
+        # macOS may deny swap statistics in restricted desktop sessions.
+        pass
 
     # Disk
     try:
@@ -190,8 +197,10 @@ def _take_snapshot(prev_disk_io, prev_net_io, prev_time):
         pass
 
     # Uptime
-    snap.uptime_sec = now - psutil.boot_time() if hasattr(psutil, "boot_time") else 0.0
-    snap.uptime_sec = time.time() - psutil.boot_time()
+    try:
+        snap.uptime_sec = max(0, time.time() - psutil.boot_time())
+    except (OSError, psutil.Error):
+        pass
 
     # Battery
     try:

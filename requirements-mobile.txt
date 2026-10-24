@@ -1,0 +1,7 @@
+-r requirements.txt
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+cryptography>=43
+
+uniface[cpu]==4.0.0
+websockets>=12,<18

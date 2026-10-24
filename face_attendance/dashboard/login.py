@@ -15,7 +15,7 @@ from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QRadialG
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
                              QVBoxLayout, QWidget)
 
-from ..settings import hash_pin
+from ..settings import verify_pin
 from ..users import AccountDisabledError, UserRepository
 from .icons import IconLabel, make_pixmap
 from .theme import palette
@@ -631,7 +631,7 @@ class LoginDialog(_SignInDialog):
         return True
 
     def _start_work(self, token):
-        correct = hash_pin(self.pin.text()) == self._pin_hash
+        correct = verify_pin(self.pin.text(), self._pin_hash)
         self._post(token, "verify")
         if correct:
             self._post(token, "success", None)

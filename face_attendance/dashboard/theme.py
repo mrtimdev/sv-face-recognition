@@ -881,6 +881,26 @@ QFrame#headerBar {{
     background-color: {c['header_bg']};
     border-bottom: 1px solid {c['header_border']};
 }}
+QPushButton#detachedReturnButton {{
+    background-color: transparent;
+    color: {c['text_secondary']};
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0px;
+    min-width: 0px;
+    min-height: 0px;
+}}
+QPushButton#detachedReturnButton:hover, QPushButton#detachedReturnButton:focus {{
+    background-color: {c['hover']};
+    color: {c['primary']};
+    border-color: {c['primary']};
+}}
+QPushButton#detachedReturnButton:pressed {{ background-color: {c['primary_soft']}; }}
+QLabel#detachedWindowTitle {{
+    color: {c['text']};
+    font-size: 13px;
+    font-weight: 600;
+}}
 QFrame#headerBrand {{
     background: transparent;
     border-right: 1px solid {c['header_border']};

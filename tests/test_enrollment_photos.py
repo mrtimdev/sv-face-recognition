@@ -11,12 +11,21 @@ from face_attendance.enrollment_photos import photo_directory, sample_photos
 
 
 class PhotoBackend:
+    def __init__(self, identity=None):
+        self.identity = identity
+
     def face_locations(self, image, model=None):
         return [] if int(image[0, 0, 0]) == 0 else [(10, 150, 150, 10)]
 
     def face_encodings(self, image, boxes):
-        vector = np.ones(128, np.float32)
-        vector[0] = float(image[0, 0, 0])
+        if self.identity is None:
+            vector = np.ones(128, np.float32)
+        else:
+            import hashlib
+            seed = int.from_bytes(hashlib.sha256(str(self.identity).encode()).digest()[:8],'little')
+            vector = np.random.default_rng(seed).normal(size=128).astype(np.float32)
+        # Different photos of one identity should remain close in embedding space.
+        vector[0] = float(image[0, 0, 0]) / 255
         return [vector for _ in boxes]
 
 
@@ -68,6 +77,7 @@ class EnrollmentPhotoTests(unittest.TestCase):
 
     def test_delete_sample_and_employee_remove_only_their_linked_photos(self):
         self.service.enroll_many([frame(60), frame(140)], 'Alice')
+        self.service.backend = PhotoBackend(identity='Bob')
         self.service.enroll(frame(160), 'Bob')
         a, b = sample_photos(self.catalog, 'Alice'), sample_photos(self.catalog, 'Bob')
         self.assertEqual(self.service.delete_sample('Alice', 0), 1)

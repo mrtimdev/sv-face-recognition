@@ -5,8 +5,10 @@ handles CRUD against the ``users`` table through the ``database`` abstraction.
 """
 import hashlib
 import json
+import logging
 import os
 import secrets
+import tempfile
 import uuid as _uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -46,19 +48,31 @@ class AccountDisabledError(Exception):
         self.user = user
 
 
+PASSWORD_ITERATIONS = 600_000
+
+
 def hash_password(password: str) -> str:
     salt = os.urandom(16)
-    key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100_000)
-    return salt.hex() + ":" + key.hex()
+    key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PASSWORD_ITERATIONS)
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt.hex()}${key.hex()}"
 
 
 def verify_password(password: str, stored: str) -> bool:
     try:
-        salt_hex, key_hex = stored.split(":", 1)
+        if stored.startswith("pbkdf2_sha256$"):
+            _, iterations, salt_hex, key_hex = stored.split("$")
+            iterations = int(iterations)
+            if not 100_000 <= iterations <= 2_000_000:
+                return False
+        else:
+            salt_hex, key_hex = stored.split(":", 1)
+            iterations = 100_000  # Backward compatible; upgraded on sign-in.
         salt = bytes.fromhex(salt_hex)
-        key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 100_000)
-        return key.hex() == key_hex
-    except (ValueError, AttributeError):
+        if len(salt) != 16 or len(bytes.fromhex(key_hex)) != 32:
+            return False
+        key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+        return secrets.compare_digest(key.hex(), key_hex)
+    except (ValueError, AttributeError, TypeError):
         return False
 
 
@@ -107,14 +121,30 @@ def save_session(user: User) -> Session:
         token=token, created_at=now,
     )
     SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SESSION_PATH.write_text(json.dumps({
+    payload = json.dumps({
         "user_uuid": session.user_uuid,
         "username": session.username,
         "full_name": session.full_name,
         "role": session.role,
         "token": session.token,
         "created_at": session.created_at,
-    }), encoding="utf-8")
+    })
+    # The temporary file is private from creation, and replacement is atomic.
+    # A crash cannot leave a truncated session or a briefly public token.
+    with tempfile.NamedTemporaryFile(mode="w", dir=SESSION_PATH.parent,
+                                     encoding="utf-8", delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, SESSION_PATH)
+    finally:
+        temporary.unlink(missing_ok=True)
     try:
         os.chmod(SESSION_PATH, 0o600)
     except OSError:
@@ -126,15 +156,44 @@ def load_session() -> Session | None:
     if not SESSION_PATH.exists():
         return None
     try:
-        data = json.loads(SESSION_PATH.read_text(encoding="utf-8"))
+        with SESSION_PATH.open(encoding="utf-8") as handle:
+            payload = handle.read(65_537)
+        if len(payload) > 65_536:
+            raise ValueError("Session file too large")
+        data = json.loads(payload)
+        if not isinstance(data, dict) or not all(
+                isinstance(data.get(key), str) and data[key]
+                for key in ('user_uuid', 'username', 'token', 'created_at')):
+            raise ValueError("Invalid session")
+        if len(data['token']) != 64 or len(bytes.fromhex(data['token'])) != 32:
+            raise ValueError("Invalid session token")
+        created = datetime.fromisoformat(data['created_at'])
+        age = (datetime.now(timezone.utc) - created).total_seconds()
+        if not -300 <= age <= 30 * 86400:
+            raise ValueError("Remembered session expired")
         return Session(
             user_uuid=data["user_uuid"], username=data["username"],
             full_name=data.get("full_name", ""), role=data.get("role", "user"),
             token=data["token"], created_at=data["created_at"],
         )
-    except (json.JSONDecodeError, KeyError, OSError):
-        clear_session()
+    except (ValueError, TypeError, KeyError, OSError):
+        try:
+            clear_session()
+        except OSError:
+            pass
         return None
+
+
+def account_login_required(repository):
+    """A failed account query cannot grant an unauthenticated dashboard."""
+    try:
+        required = repository.has_users()
+    except Exception:
+        logging.exception("Could not check user accounts; requiring sign-in")
+        return True
+    if required:
+        remember_accounts_exist()
+    return required
 
 
 def clear_session():
@@ -230,6 +289,12 @@ class UserRepository:
                 user = self._to_user(row)
                 if user.disabled:
                     raise AccountDisabledError(user)
+                if not row["password_hash"].startswith(f"pbkdf2_sha256${PASSWORD_ITERATIONS}$"):
+                    upgraded = hash_password(password)
+                    conn.execute("UPDATE users SET password_hash=? WHERE uuid=? AND password_hash=?",
+                                 (upgraded, user.uuid, row["password_hash"]))
+                    conn.commit()
+                    user.password_hash = upgraded
                 return user
             return None
         finally:

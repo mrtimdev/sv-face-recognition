@@ -1,6 +1,7 @@
 # Virtual environment
 venv/
 .venv/
+.venv-plates/
 env/
 .env/
 
@@ -88,3 +89,11 @@ avatars/
 !tests/fixtures/anti_spoof/live.jpg
 !tests/fixtures/anti_spoof/print.jpg
 !tests/fixtures/anti_spoof/screen.jpg
+
+# Mobile enrollment sessions and encrypted pending templates
+mobile_enrollment.db
+mobile_enrollment.db-wal
+mobile_enrollment.db-shm
+.mobile_api.key
+.cache/uniface/
+*.ses

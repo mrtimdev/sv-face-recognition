@@ -5,7 +5,7 @@ from pathlib import Path
 
 import cv2
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
                              QHBoxLayout, QLabel,
                              QListWidget, QListWidgetItem, QMenu, QPushButton,
@@ -63,6 +63,7 @@ class LogRow(QWidget):
 
 
 class LiveScreen(QWidget):
+    detachRequested = pyqtSignal()
     flashPreviewRequested = pyqtSignal()
     viewAllRequested = pyqtSignal()
     settingsRequested = pyqtSignal()
@@ -81,6 +82,10 @@ class LiveScreen(QWidget):
         self._sound = EventSounds(settings)
         self._build()
         self._connect()
+        self.escape_shortcut = QShortcut(QKeySequence("Escape"), self)
+        self.escape_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.escape_shortcut.activated.connect(self._exit_fullscreen)
+        self.escape_shortcut.setEnabled(False)
         self._sync_running(engine.running)
 
     # ── build ────────────────────────────────────────────────────────────
@@ -282,6 +287,7 @@ class LiveScreen(QWidget):
         self.preview_hud.settings.clicked.connect(self._open_settings)
         self.preview_hud.captures.clicked.connect(self._open_captures)
         self.preview_hud.fullscreen.clicked.connect(self._toggle_fullscreen)
+        self.preview_hud.detach.clicked.connect(self.detachRequested.emit)
         self.preview_hud.more.setMenu(self.more_button.menu())
         self.preview_hud.more.setPopupMode(self.preview_hud.more.ToolButtonPopupMode.InstantPopup)
         frame = QFrame()
@@ -332,6 +338,7 @@ class LiveScreen(QWidget):
         self.camera_settings_action = menu.addAction("Camera settings", self._open_settings)
         menu.addAction("Toggle picture guide", self._toggle_guide)
         self.fullscreen_action = menu.addAction("Enter full screen", self._toggle_fullscreen)
+        self.detach_action = menu.addAction("Open in new window", self.detachRequested.emit)
         menu.addAction("Preview capture flash", self.flashPreviewRequested.emit)
         menu.addAction("Liveness test…", self._open_liveness_test)
         self.more_button.setMenu(menu)
@@ -485,7 +492,8 @@ class LiveScreen(QWidget):
             if self.engine.running:
                 self.engine.stop()
             else:
-                self.engine.start()
+                from ..camera_permission import with_camera_permission
+                with_camera_permission(self.settings.source, self.engine.start, self.on_error, context=self)
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             self.on_error(str(exc))
 
@@ -499,7 +507,8 @@ class LiveScreen(QWidget):
         if not guard(self, "control_engine", "restart the engine"):
             return
         try:
-            self.engine.restart()
+            from ..camera_permission import with_camera_permission
+            with_camera_permission(self.settings.source, self.engine.restart, self.on_error, context=self)
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             self.on_error(str(exc))
         self._update_pause_button()
@@ -863,6 +872,10 @@ class LiveScreen(QWidget):
 
     # ── fullscreen ────────────────────────────────────────────────────────
 
+    def set_detached(self, detached):
+        self.preview_hud.set_detached(detached)
+        self.detach_action.setText("Return to dashboard" if detached else "Open in new window")
+
     def _toggle_fullscreen(self):
         win = self.window()
         if not win:
@@ -873,11 +886,14 @@ class LiveScreen(QWidget):
             self._enter_fullscreen()
 
     def _enter_fullscreen(self):
+        if getattr(self, "_fs_active", False):
+            return
         win = self.window()
         self._fs_active = True
         self._was_maximized = win.isMaximized()
         self.fullscreen_action.setText("Exit full screen")
         self.preview_hud.set_fullscreen(True)
+        self.escape_shortcut.setEnabled(True)
 
         # remember which panels to hide
         self._fs_hidden = []
@@ -898,8 +914,11 @@ class LiveScreen(QWidget):
         win.showFullScreen()
 
     def _exit_fullscreen(self):
+        if not getattr(self, "_fs_active", False):
+            return
         win = self.window()
         self._fs_active = False
+        self.escape_shortcut.setEnabled(False)
 
         self.fullscreen_action.setText("Enter full screen")
         self.preview_hud.set_fullscreen(False)
@@ -933,6 +952,10 @@ class LiveScreen(QWidget):
             return
         super().keyPressEvent(event)
 
+    def hideEvent(self, event):
+        self._exit_fullscreen()
+        super().hideEvent(event)
+
     def on_settings_changed(self, settings):
         self.settings = settings
         self.preview_hud.set_source(describe_source(settings.source))
@@ -960,5 +983,6 @@ class LiveScreen(QWidget):
         self._retint_buttons()
 
     def close(self):
+        self._exit_fullscreen()
         self._sound.stop()
         super().close()

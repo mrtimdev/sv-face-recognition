@@ -134,6 +134,7 @@ class PreviewHUD(QWidget):
         self._source = ""
         self._status = "STOPPED"
         self._state = None
+        self._plate_mode = False
         self.top = QFrame(self)
         self.top.setObjectName("previewTop")
         row = QHBoxLayout(self.top)
@@ -151,7 +152,8 @@ class PreviewHUD(QWidget):
         self.settings = self._button("gear", "Camera settings")
         self.captures = self._button("folder", "Open captures folder")
         self.fullscreen = self._button("expand", "Enter full screen")
-        for button in (self.flash, self.snapshot, self.captures, self.settings, self.fullscreen):
+        self.detach = self._button("arrow-right", "Open in new window")
+        for button in (self.flash, self.snapshot, self.captures, self.settings, self.detach, self.fullscreen):
             row.addWidget(button)
 
         self.dock = QFrame(self)
@@ -257,6 +259,12 @@ class PreviewHUD(QWidget):
         self.fullscreen.setToolTip(label)
         self.fullscreen.setAccessibleName(label)
 
+    def set_detached(self, detached):
+        label = "Return to dashboard" if detached else "Open in new window"
+        self.detach.set_glyph("chevron-left" if detached else "arrow-right")
+        self.detach.setToolTip(label)
+        self.detach.setAccessibleName(label)
+
     def _elide_source(self):
         self.source.setText(self.source.fontMetrics().elidedText(
             self._source, Qt.TextElideMode.ElideRight, max(0, self.source.width())))
@@ -295,12 +303,45 @@ class PreviewHUD(QWidget):
         if not running:
             self.metrics.setText("No camera feed")
 
+    def set_plate_state(self, running, automatic, status, has_frame=False, can_control=True, can_capture=True):
+        """Use the shared monitor controls with plate-specific actions and labels."""
+        state = ("plate", running, automatic, status, has_frame, can_control, can_capture)
+        if state == self._state:
+            return
+        self._state = state
+        self._plate_mode = True
+        self._status = status
+        self.status.setText(f"●  {status}")
+        self.status.setToolTip(status)
+        self.record.setText("Stop" if running else "Start")
+        self.record.set_glyph("stop" if running else "play")
+        self.record._recording = running
+        self.record.setEnabled(can_control)
+        self.pause.setText("Auto on" if automatic else "Auto off")
+        self.pause.set_glyph("check-circle" if automatic else "bolt")
+        self.pause._primary = False
+        self.pause.setEnabled(can_capture)
+        self.capture.setText("Capture")
+        self.capture._primary = False
+        self.capture.setEnabled(running and has_frame and can_capture)
+        self.snapshot.setEnabled(self.capture.isEnabled())
+        self.restart.setEnabled(running and can_control)
+        for button, label in ((self.record, "Stop plate recognition" if running else "Start plate recognition"),
+                              (self.capture, "Save plate capture"), (self.snapshot, "Save plate capture"),
+                              (self.pause, "Turn off automatic capture" if automatic else "Turn on automatic capture"),
+                              (self.restart, "Restart plate recognition")):
+            button.setToolTip(label)
+            button.setAccessibleName(label)
+        self.flash.hide()
+        if not has_frame:
+            self.metrics.setText("No camera feed")
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         width, height = self.width(), self.height()
         margin = 12
         self.metrics.setVisible(width >= 760)
-        self.flash.setVisible(width >= 530)
+        self.flash.setVisible(width >= 530 and not self._plate_mode)
         self.snapshot.setVisible(width >= 650)
         self.captures.setVisible(width >= 380)
         self.top.setGeometry(margin, margin, max(0, width - margin * 2), 54)

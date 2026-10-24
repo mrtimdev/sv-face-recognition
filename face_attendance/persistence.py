@@ -1,15 +1,21 @@
 """Bounded attendance jobs, CSV observations and cached nonblocking audio."""
 import csv
 import logging
+import os
 import queue
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 from .channels import LatestValue
 from .audio import SoundPlayer
 from .repository import AttendanceRepository
+from .models import SaveResult
 from .storage import SnapshotService
+
+OBSERVATION_LOG_BYTES = 10 * 1024 * 1024
+OBSERVATION_LOG_BACKUPS = 3
 
 
 class PersistenceWorker:
@@ -66,8 +72,15 @@ class PersistenceWorker:
     def _observe(self, event):
         try:
             path = self.config.log_path
+            if path.exists() and path.stat().st_size >= OBSERVATION_LOG_BYTES:
+                for index in range(OBSERVATION_LOG_BACKUPS, 0, -1):
+                    source = path if index == 1 else Path(f"{path}.{index - 1}")
+                    if source.exists():
+                        source.replace(Path(f"{path}.{index}"))
             exists = path.exists() and path.stat().st_size > 0
-            with path.open("a", newline="", encoding="utf-8") as handle:
+            # Observations contain names; create private files from the outset.
+            descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            with os.fdopen(descriptor, "a", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
                 if not exists:
                     writer.writerow(["timestamp", "name", "status"])
@@ -76,83 +89,123 @@ class PersistenceWorker:
         except OSError:
             logging.exception("Optional CSV observation log failed")
         if event.alert:
-            self._alert()
+            try:
+                self._alert()
+            except Exception:
+                logging.debug("Optional observation sound failed", exc_info=True)
 
     def _refresh_totals(self, repository):
-        try:
-            self.daily_totals = repository.verified_today()
-        except Exception:
-            logging.debug("Daily attendance count unavailable", exc_info=True)
-            self.daily_totals = {}
+        self.daily_totals = repository.verified_today()
+
+    @staticmethod
+    def _close_repository(repository):
+        if repository is not None:
+            try:
+                repository.close()
+            except Exception:
+                logging.warning("Storage connection cleanup failed", exc_info=True)
+
+    def _connect_repository(self):
+        while not self.stop_event.is_set():
+            repository = None
+            try:
+                repository = self.repository_factory(self.config, self.employee_map,
+                                                     self.config.cooldown_sec)
+                self._refresh_totals(repository)
+                self.startup.put((repository.load_cooldowns(), ""))
+                return repository
+            except Exception as exc:
+                self._close_repository(repository)
+                self.daily_totals = {}
+                self.startup.put((None, str(exc)))
+                self.stop_event.wait(self.config.retry_sec)
+        return None
 
     def _run(self):
         repository = None
-        self._init_audio()
         try:
-            while not self.stop_event.is_set():
-                try:
-                    repository = self.repository_factory(self.config, self.employee_map,
-                                                         self.config.cooldown_sec)
-                    self._refresh_totals(repository)
-                    self.startup.put((repository.load_cooldowns(), ""))
-                    break
-                except Exception as exc:
-                    if repository is not None:
-                        repository.close()
-                        repository = None
-                    self.startup.put((None, str(exc)))
-                    self.stop_event.wait(self.config.retry_sec)
-            if repository is None:
-                return
-            last_checkpoint = time.monotonic()
-            last_totals = last_checkpoint
+            try:
+                self._init_audio()
+            except Exception:
+                # Optional sound must never disable attendance persistence.
+                logging.warning("Audio initialization failed; continuing silently", exc_info=True)
+            repository = self._connect_repository()
+            last_checkpoint = last_totals = time.monotonic()
             while not self.stop_event.is_set() or not self.jobs.empty():
+                if repository is None:
+                    repository = self._connect_repository()
+                    if repository is None:
+                        # Shutdown during an outage: report every accepted job
+                        # as failed instead of silently abandoning pending IDs.
+                        while not self.jobs.empty():
+                            job = self.jobs.get_nowait()
+                            try:
+                                self.results.put_nowait(SaveResult(job, "error", error="Storage unavailable during shutdown"))
+                            except queue.Full:
+                                logging.error("Cannot deliver shutdown failure for %s", job.event_id)
+                            self.jobs.task_done()
+                        break
+                    last_checkpoint = last_totals = time.monotonic()
                 self.wake.clear()
-                now = time.monotonic()
-                if now - last_totals >= 5.:
-                    self._refresh_totals(repository)
-                    last_totals = now
-                if now - last_checkpoint >= 3600:
-                    repository.checkpoint()
-                    last_checkpoint = now
                 try:
-                    job = self.jobs.get_nowait()
-                except queue.Empty:
-                    job = None
-                if job is not None:
-                    result = repository.record(job, self.snapshots)
-                    while True:
-                        try:
-                            self.results.put(result, timeout=0.1)
-                            break
-                        except queue.Full:
-                            if self.stop_event.is_set():
-                                break
-                    if result.outcome == "saved":
+                    now = time.monotonic()
+                    if now - last_totals >= 5.:
                         self._refresh_totals(repository)
-                        self._alert()
-                        logging.info("Attendance saved for employee %s: %s", job.employee_id, result.snapshot)
-                        repository.audit("attendance_saved",
-                                         f"{job.employee_name} ({job.employee_id}), {job.duration:.1f}s")
-                    elif result.outcome == "error":
-                        logging.error("Attendance save failed: %s", result.error)
-                        repository.audit("attendance_error", result.error)
-                    self.jobs.task_done()
-                    continue
-                try:
-                    self._observe(self.observations.get_nowait())
-                except queue.Empty:
-                    pass
-                try:
-                    action, detail, actor = self._audit_queue.get_nowait()
-                    repository.audit(action, detail, actor)
-                except queue.Empty:
-                    self.wake.wait(0.1)
+                        last_totals = now
+                    if now - last_checkpoint >= 3600:
+                        repository.checkpoint()
+                        last_checkpoint = now
+                    try:
+                        job = self.jobs.get_nowait()
+                    except queue.Empty:
+                        job = None
+                    if job is not None:
+                        try:
+                            result = repository.record(job, self.snapshots)
+                        except Exception as exc:
+                            result = SaveResult(job, "error", error=str(exc))
+                        while True:
+                            try:
+                                self.results.put(result, timeout=0.1)
+                                break
+                            except queue.Full:
+                                if self.stop_event.is_set():
+                                    break
+                        self.jobs.task_done()
+                        if result.outcome == "saved":
+                            try:
+                                self._alert()
+                            except Exception:
+                                logging.debug("Optional attendance sound failed", exc_info=True)
+                            repository.audit("attendance_saved",
+                                             f"{job.employee_name} ({job.employee_id}), {job.duration:.1f}s")
+                            self._refresh_totals(repository)
+                        elif result.outcome == "error":
+                            raise RuntimeError(result.error)
+                        continue
+                    try:
+                        self._observe(self.observations.get_nowait())
+                    except queue.Empty:
+                        pass
+                    try:
+                        action, detail, actor = self._audit_queue.get_nowait()
+                        repository.audit(action, detail, actor)
+                    except queue.Empty:
+                        self.wake.wait(0.1)
+                except Exception as exc:
+                    logging.warning("Storage interrupted; reconnecting: %s", exc)
+                    self.daily_totals = {}
+                    self.startup.put((None, str(exc)))
+                    self._close_repository(repository)
+                    repository = None
+                    self.stop_event.wait(self.config.retry_sec)
         finally:
-            if repository is not None:
-                repository.close()
+            self._close_repository(repository)
             if self.sound is not None:
-                self.sound.stop()
+                try:
+                    self.sound.stop()
+                except Exception:
+                    logging.debug("Audio cleanup failed", exc_info=True)
 
     def close(self):
         self.stop_event.set()

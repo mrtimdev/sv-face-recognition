@@ -135,6 +135,7 @@ class OpenCVFaceBackend:
             result.append({'left_eye': select([33, 160, 158, 133, 153, 144]),
                            'right_eye': select([362, 385, 387, 263, 373, 380]),
                            'nose_bridge': select([168, 6, 197, 1]),
+                           'chin': select([152]),
                            'top_lip': top, 'bottom_lip': bottom})
         return result
 

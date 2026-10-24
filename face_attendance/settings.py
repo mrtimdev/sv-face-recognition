@@ -8,7 +8,9 @@ changes take effect when the engine is restarted.
 import hashlib
 import json
 import os
+import secrets
 import tempfile
+from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
@@ -21,20 +23,37 @@ THEMES = ("dark", "light")
 
 
 def hash_pin(pin):
-    return hashlib.sha256(pin.encode("utf-8")).hexdigest()
+    from .users import hash_password
+    return hash_password(pin)
+
+
+def verify_pin(pin, stored):
+    from .users import verify_password
+    if stored.startswith("pbkdf2_sha256$"):
+        return verify_password(pin, stored)
+    # Existing installations can still unlock their legacy PIN configuration.
+    return secrets.compare_digest(hashlib.sha256(pin.encode("utf-8")).hexdigest(), stored)
 
 
 def mask_url_credentials(value):
     """Never show an RTSP password on screen or in a log line."""
     text = str(value)
-    if "://" not in text or "@" not in text:
+    if "://" not in text:
         return text
-    scheme, remainder = text.split("://", 1)
-    credentials, host = remainder.rsplit("@", 1)
-    if ":" in credentials:
-        user = credentials.split(":", 1)[0]
-        return f"{scheme}://{user}:{'*' * 8}@{host}"
-    return text
+    try:
+        parts = urlsplit(text)
+        authority = parts.netloc
+        if "@" in authority:
+            credentials, host = authority.rsplit("@", 1)
+            if ":" in credentials:
+                authority = f"{credentials.split(':', 1)[0]}:********@{host}"
+        # Query strings and fragments frequently carry bearer credentials;
+        # neither is needed in camera labels or capture metadata.
+        return urlunsplit((parts.scheme, authority, parts.path,
+                           "********" if parts.query else "",
+                           "********" if parts.fragment else ""))
+    except ValueError:
+        return "Camera URL (redacted)"
 
 
 def describe_source(value):

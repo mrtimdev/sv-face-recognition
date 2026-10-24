@@ -1,4 +1,5 @@
 """Versioned identity templates: equally-sized embeddings are not interchangeable."""
+import io
 import pickle
 from pathlib import Path
 
@@ -6,6 +7,61 @@ import numpy as np
 
 TEMPLATE_MODEL = 'opencv-sface-2021dec-v1'
 TEMPLATE_VERSION = 2
+MAX_TEMPLATE_BYTES = 256 * 1024 * 1024
+
+
+def _legacy_bytes(value, encoding='latin1', errors='strict'):
+    # NumPy pickles written with protocols 0-2 encode their raw array bytes
+    # through this global. Never resolve or expose the general codecs registry.
+    if not isinstance(value, str) or encoding not in ('latin1', 'latin-1') or errors != 'strict':
+        raise pickle.UnpicklingError('Unsupported legacy array byte encoding')
+    return value.encode('latin1')
+
+
+class _NumericTemplateUnpickler(pickle.Unpickler):
+    """Resolve only NumPy's numeric pickle primitives, never arbitrary globals."""
+    def find_class(self, module, name):
+        core = np.core
+        allowed = {
+            ('numpy', 'ndarray'): np.ndarray,
+            ('numpy', 'dtype'): np.dtype,
+            ('_codecs', 'encode'): _legacy_bytes,
+        }
+        for prefix in ('numpy.core', 'numpy._core'):
+            allowed[(prefix + '.multiarray', '_reconstruct')] = core.multiarray._reconstruct
+            allowed[(prefix + '.multiarray', 'scalar')] = core.multiarray.scalar
+            allowed[(prefix + '.numeric', '_frombuffer')] = core.numeric._frombuffer
+        try:
+            return allowed[(module, name)]
+        except KeyError:
+            raise pickle.UnpicklingError(f'Unsupported template global: {module}.{name}') from None
+
+    def persistent_load(self, pid):
+        raise pickle.UnpicklingError('Persistent template references are not supported')
+
+
+def _validate_numeric_payload(payload):
+    # Object arrays may contain nested objects even when no forbidden global
+    # was required to construct them. Validate the complete graph, not just
+    # the samples field; avoid recursion on cyclic or deeply nested pickles.
+    pending, visited = [payload], set()
+    while pending:
+        item = pending.pop()
+        if isinstance(item, (dict, list, tuple, set, frozenset)):
+            identity = id(item)
+            if identity in visited:
+                continue
+            visited.add(identity)
+        if isinstance(item, (np.ndarray, np.generic, np.dtype)):
+            dtype = item if isinstance(item, np.dtype) else item.dtype
+            if dtype.hasobject or dtype.kind not in 'biufc':
+                raise ValueError('Face templates must contain numeric arrays only')
+        elif isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+
 
 
 def read_template_bundle(path, allow_legacy=False):
@@ -14,7 +70,16 @@ def read_template_bundle(path, allow_legacy=False):
     if not path.exists():
         return {}, {}
     with path.open('rb') as handle:
-        payload = pickle.load(handle)  # Local, trusted enrollment files only.
+        if path.stat().st_size > MAX_TEMPLATE_BYTES:
+            raise ValueError('Face template file exceeds the size limit')
+        data = handle.read(MAX_TEMPLATE_BYTES + 1)
+    if len(data) > MAX_TEMPLATE_BYTES:
+        raise ValueError('Face template file exceeds the size limit')
+    try:
+        payload = _NumericTemplateUnpickler(io.BytesIO(data)).load()
+    except (pickle.UnpicklingError, EOFError, AttributeError, TypeError) as exc:
+        raise ValueError('Invalid or unsafe face template file') from exc
+    _validate_numeric_payload(payload)
     if not isinstance(payload, dict):
         raise ValueError('Invalid face template file')
     if payload.get('schema_version') == TEMPLATE_VERSION and payload.get('model') == TEMPLATE_MODEL:

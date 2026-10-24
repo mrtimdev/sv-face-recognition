@@ -34,7 +34,10 @@ def write_jpeg(path, frame, quality=92):
     ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
         raise OSError("OpenCV could not encode the image")
-    with open(path, "wb") as handle:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        if hasattr(os, 'fchmod'):
+            os.fchmod(handle.fileno(), 0o600)
         handle.write(encoded.tobytes())
         handle.flush()
         os.fsync(handle.fileno())

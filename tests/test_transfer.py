@@ -28,7 +28,7 @@ class Computer:
         self.mapping = self.root / "employees.json"
 
     def enroll(self, label, employee_id, *values):
-        service = EnrollmentService(self.catalog, self.mapping, backend=PhotoBackend(), check_quality=False)
+        service = EnrollmentService(self.catalog, self.mapping, backend=PhotoBackend(identity=employee_id or label), check_quality=False)
         outcome = service.enroll_many([frame(value) for value in values], label, employee_id)
         assert outcome.ok, outcome.message
 

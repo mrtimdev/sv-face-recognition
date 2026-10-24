@@ -41,7 +41,7 @@ class LicensePlateTests(unittest.TestCase):
 
     def test_failed_image_write_does_not_log_a_capture(self):
         with tempfile.TemporaryDirectory() as directory:
-            with patch("license_plate.core.cv2.imwrite", return_value=False):
+            with patch("license_plate.core.write_jpeg", side_effect=OSError("disk error")):
                 with self.assertRaises(OSError):
                     save_capture(directory, np.zeros((10, 20, 3), dtype=np.uint8),
                                  Plate("ABC", .9, (0, 0, 10, 5)), 0, False)
@@ -91,7 +91,8 @@ class LicensePlateTests(unittest.TestCase):
         class Engine(QObject):
             runningChanged = pyqtSignal(bool)
 
-        application = QApplication.instance() or QApplication([])
+        from tests.test_dashboard import _app
+        application = _app()
         screen = LicensePlateScreen(Engine(), Settings())
         try:
             screen.worker = NS(manual=threading.Event(), automatic=threading.Event(),

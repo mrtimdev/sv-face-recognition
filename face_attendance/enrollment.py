@@ -11,20 +11,34 @@ import os
 import pickle
 import tempfile
 import threading
+from functools import wraps
+from itertools import islice
 from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from .catalog import legacy_employee_id, load_employee_map
 from .template_store import (read_templates, template_payload, read_template_bundle,
                              preserve_photo_references)
 from .enrollment_photos import save_sample_photo, remove_sample_photos
+from .face_duplicates import DuplicateFaceMatch, FaceDuplicateIndex, find_face_duplicate
 
 
 # Serialize model calls shared by enrollment workers and live recognition.
 # OpenCV DNN networks mutate internal input/output buffers during inference.
 FACE_BACKEND_LOCK = threading.Lock()
+CATALOG_LOCK = threading.RLock()
+MAX_ENROLLMENT_SAMPLES = 64
+
+
+def _catalog_locked(method):
+    @wraps(method)
+    def locked(*args, **kwargs):
+        with CATALOG_LOCK:
+            return method(*args, **kwargs)
+    return locked
 
 
 # Samples outside these bounds are refused: a tiny, blurred or badly lit face
@@ -48,6 +62,7 @@ class EnrollmentOutcome:
     total_people: int = 0
     issues: tuple = ()
     photo_paths: tuple = ()
+    conflicts: tuple = ()
 
     @property
     def ok(self):
@@ -86,7 +101,7 @@ def write_encodings(path, data, photos=None):
     _atomic_write(path, lambda handle: pickle.dump(template_payload(data, photos), handle))
 
 
-def write_employee(path, name, employee_id):
+def write_employee(path, name, employee_id, display_name=None):
     """Map an enrollment label to a permanent ID without silently reassigning it."""
     records = load_employee_map(path)
     previous = records.get(name)
@@ -96,7 +111,7 @@ def write_employee(path, name, employee_id):
     data = {key: {"employee_id": value.employee_id, "name": value.name}
             for key, value in records.items()}
     canonical = previous.name if previous else next(
-        (employee.name for employee in records.values() if employee.employee_id == employee_id), name)
+        (employee.name for employee in records.values() if employee.employee_id == employee_id), display_name or name)
     data[name] = {"employee_id": employee_id, "name": canonical}
     _atomic_write(path, lambda handle: json.dump(data, handle, ensure_ascii=False, indent=2), binary=False)
     return canonical
@@ -157,39 +172,76 @@ class EnrollmentService:
     """Validates and appends samples for the catalog at the configured paths."""
 
     def __init__(self, encodings_path, employees_path, backend=None,
-                 min_face_height=MIN_FACE_HEIGHT, check_quality=True):
+                 min_face_height=MIN_FACE_HEIGHT, check_quality=True, identity_distance=.5,
+                 duplicate_distance=.5):
         self.encodings_path = Path(encodings_path)
         self.employees_path = Path(employees_path)
         self.backend = backend
         self.min_face_height = min_face_height
         self.check_quality = check_quality
+        self.identity_distance = float(identity_distance)
+        if not 0 < self.identity_distance < 2:
+            raise ValueError("Enrollment identity distance must be between 0 and 2")
+        self._backend_lock = threading.Lock()
+        self.duplicate_distance = float(duplicate_distance)
+        if not 0 < self.duplicate_distance < 2:
+            raise ValueError("Duplicate face distance must be between 0 and 2")
 
     def _detector(self):
-        if self.backend is None:
-            from .face_backend import OpenCVFaceBackend
-            self.backend = OpenCVFaceBackend()
+        with self._backend_lock:
+            if self.backend is None:
+                from .face_backend import OpenCVFaceBackend
+                self.backend = OpenCVFaceBackend()
         return self.backend
 
     def _prepare(self, image, check_quality):
         """(status, encoding-or-message, issues) for a single sample."""
-        backend = self._detector()
+        if (not isinstance(image, np.ndarray) or image.dtype != np.uint8
+                or image.ndim != 3 or image.shape[2] != 3 or not image.size):
+            return "invalid_image", "Choose a non-empty, 8-bit color image", ()
         try:
-            boxes = detect_faces(backend, image)
+            backend = self._detector()
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            # Reuse the same RGB object so SFace can reuse YuNet landmarks.
+            # Holding one lock also prevents another sample replacing them.
+            with FACE_BACKEND_LOCK:
+                boxes = list(backend.face_locations(rgb, model="yunet"))
+                if not boxes:
+                    return "no_face", "No face detected. Improve the lighting and face the camera.", ()
+                if len(boxes) > 1:
+                    return "multiple_faces", (f"Found {len(boxes)} faces. Enroll one employee per sample "
+                                              "to avoid mis-enrollment."), ()
+                bounds = np.asarray(boxes[0], dtype=float)
+                height, width = image.shape[:2]
+                if (bounds.shape != (4,) or not np.isfinite(bounds).all()
+                        or not (0 <= bounds[0] < bounds[2] <= height
+                                and 0 <= bounds[3] < bounds[1] <= width)):
+                    return "low_quality", "Keep the whole face visible inside the frame", ()
+                if check_quality:
+                    problems = frame_quality(image, boxes[0], self.min_face_height)
+                    if problems:
+                        return "low_quality", "; ".join(problems), problems
+                vectors = list(backend.face_encodings(rgb, boxes))
+                if len(vectors) != 1:
+                    return "error", "Face encoding failed: expected one face embedding", ()
+                vector = np.asarray(vectors[0], dtype=np.float32)
+                norm = float(np.linalg.norm(vector.astype(float)))
+                if (vector.shape != (128,) or not np.isfinite(vector).all()
+                        or not np.isfinite(norm) or norm < 1e-8):
+                    return "error", "Face encoding failed: invalid SFace embedding", ()
+                return "ok", (vector / norm).copy(), ()
         except Exception as exc:  # A broken backend must not look like "no face".
-            return "error", f"Face detection failed: {exc}", ()
-        if not boxes:
-            return "no_face", "No face detected. Improve the lighting and face the camera.", ()
-        if len(boxes) > 1:
-            return "multiple_faces", (f"Found {len(boxes)} faces. Enroll one employee per sample "
-                                      "to avoid mis-enrollment."), ()
-        if check_quality:
-            problems = frame_quality(image, boxes[0], self.min_face_height)
-            if problems:
-                return "low_quality", "; ".join(problems), problems
-        try:
-            return "ok", encode_faces(backend, image, boxes)[0], ()
-        except Exception as exc:
-            return "error", f"Face encoding failed: {exc}", ()
+            return "error", f"Face analysis failed: {exc}", ()
+
+    def _same_identity(self, vector, references):
+        candidate = vector / np.linalg.norm(vector)
+        for reference in references:
+            other = np.asarray(reference, dtype=float)
+            if other.shape != (128,) or not np.isfinite(other).all() or np.linalg.norm(other) < 1e-8:
+                raise ValueError("Existing face templates are invalid; re-enroll this employee")
+            if 1 - np.clip(np.dot(candidate, other / np.linalg.norm(other)), -1, 1) <= self.identity_distance:
+                return True
+        return False
 
     def _check_name(self, name, employee_id):
         records = load_employee_map(self.employees_path)
@@ -205,8 +257,9 @@ class EnrollmentService:
     def inspect(self, image, check_quality=None):
         """Validate one prospective sample without writing anything.
 
-        Returns ``(status, message, issues)``; ``status == "ok"`` means the
-        sample would be accepted by :meth:`enroll`.
+        Returns ``(status, message, issues)``; ``status == "ok"`` means a
+        structurally valid, readable face. Identity consistency against the
+        selected employee and other samples is checked again during enrollment.
         """
         check_quality = self.check_quality if check_quality is None else check_quality
         try:
@@ -217,22 +270,80 @@ class EnrollmentService:
 
     def employees(self):
         return employee_rows(self.encodings_path, self.employees_path)
+
+    def duplicate_faces(self):
+        with CATALOG_LOCK:
+            samples, _ = read_template_bundle(self.encodings_path)
+            records = load_employee_map(self.employees_path)
+        return FaceDuplicateIndex(samples,records).conflicts(self.duplicate_distance)
+
     def enroll_many(self, images, name, employee_id=None, check_quality=None):
         name = str(name or "").strip()
         employee_id = str(employee_id or "").strip()
         if not name:
             return EnrollmentOutcome("invalid_name", "Enter the employee name")
+        if any(len(value) > 100 or any(ord(char) < 32 for char in value) for value in (name, employee_id)):
+            return EnrollmentOutcome("invalid_name", "Use at most 100 characters and no control characters for names and IDs")
+        try:
+            images = list(islice(() if images is None else images, MAX_ENROLLMENT_SAMPLES + 1))
+        except TypeError:
+            return EnrollmentOutcome("invalid_samples", "Provide captured images as a sequence", name=name)
+        if len(images) > MAX_ENROLLMENT_SAMPLES:
+            return EnrollmentOutcome("invalid_samples", f"Save at most {MAX_ENROLLMENT_SAMPLES} samples at a time", name=name)
         images = [image for image in images if image is not None]
         if not images:
             return EnrollmentOutcome("no_face", "No captured sample to enroll", name=name)
         check_quality = self.check_quality if check_quality is None else check_quality
-        created_photos = []
         try:
             conflict, message, previous = self._check_name(name, employee_id)
             if conflict:
                 return EnrollmentOutcome(conflict, message, name=name, employee_id=employee_id)
-
             outcomes = [self._prepare(image, check_quality) for image in images]
+            return self._commit_samples(images, outcomes, name, employee_id)
+        except (ValueError, OSError, pickle.UnpicklingError, EOFError, AttributeError, cv2.error) as exc:
+            return EnrollmentOutcome("error", str(exc), name=name, employee_id=employee_id)
+
+    @_catalog_locked
+    def _commit_samples(self, images, outcomes, name, employee_id):
+        """Re-read at commit time; serialize service writers in this Python process."""
+        created_photos = []
+        mapping_written = False
+        mapping_before = None
+        try:
+            conflict, message, previous = self._check_name(name, employee_id)
+            if conflict:
+                return EnrollmentOutcome(conflict, message, name=name, employee_id=employee_id)
+            data, photos = read_template_bundle(self.encodings_path)
+            references = list(data.get(name, []))
+            records = load_employee_map(self.employees_path)
+            identity = employee_id or (previous.employee_id if previous else legacy_employee_id(name))
+            index = FaceDuplicateIndex(data,records)
+            conflicts = []
+            for status,vector,_ in outcomes:
+                if status == 'ok':
+                    match = index.match(vector,identity,self.duplicate_distance,name,
+                                        previous.name if previous else name)
+                    if match is not None and match not in conflicts:
+                        conflicts.append(match)
+            if conflicts:
+                owners = sorted({f'{match.matched_employee_name} ({match.matched_employee_id})'
+                                 for match in conflicts})
+                return EnrollmentOutcome('duplicate_face',
+                    'Face already matches ' + ', '.join(owners) +
+                    '. Open the existing employee and use Update photo; a second employee was not saved.',
+                    name=name,employee_id=identity,conflicts=tuple(conflicts))
+            for label, record in records.items():
+                if label != name and record.employee_id == identity:
+                    references.extend(data.get(label, []))
+            first = None
+            for index, (status, vector, _) in enumerate(outcomes):
+                if status != "ok":
+                    continue
+                if ((references and not self._same_identity(vector, references))
+                        or (first is not None and not self._same_identity(vector, [first]))):
+                    outcomes[index] = ("identity_mismatch", "Face does not match this employee's other samples", ())
+                elif first is None:
+                    first = vector
             encodings = [payload for status, payload, _ in outcomes if status == "ok"]
             rejected = [f"sample {index}: {payload}" for index, (status, payload, _) in
                         enumerate(outcomes, start=1) if status != "ok"]
@@ -240,7 +351,6 @@ class EnrollmentService:
                 status, payload, sample_issues = outcomes[0]
                 return EnrollmentOutcome(status, payload, name=name, employee_id=employee_id,
                                          issues=tuple(sample_issues))
-            data, photos = read_template_bundle(self.encodings_path)
             data.setdefault(name, [])
             photos.setdefault(name, [])
             for image, (status, _, _) in zip(images, outcomes):
@@ -249,13 +359,24 @@ class EnrollmentService:
             data[name].extend(encodings)
             photos[name].extend(path.name for path in created_photos)
             if employee_id:
+                mapping_before = self.employees_path.read_bytes() if self.employees_path.exists() else None
+                mapping_written = True
                 canonical = write_employee(self.employees_path, name, employee_id)
             else:
                 canonical = previous.name if previous else name
             write_encodings(self.encodings_path, data, photos=photos)
         except (ValueError, OSError, pickle.UnpicklingError, EOFError, AttributeError, cv2.error) as exc:
+            message = str(exc)
+            if mapping_written:
+                try:
+                    if mapping_before is None:
+                        self.employees_path.unlink(missing_ok=True)
+                    else:
+                        _atomic_write(self.employees_path, lambda handle: handle.write(mapping_before))
+                except OSError as rollback_error:
+                    message += f". Could not restore employee mapping: {rollback_error}; restore from backup before retrying"
             remove_sample_photos(self.encodings_path, [path.name for path in created_photos])
-            return EnrollmentOutcome("error", str(exc), name=name, employee_id=employee_id)
+            return EnrollmentOutcome("error", message, name=name, employee_id=employee_id)
 
         final_id = employee_id or (previous.employee_id if previous else legacy_employee_id(name))
         message = f"Enrolled {canonical}: {len(encodings)} sample(s) added"
@@ -266,6 +387,7 @@ class EnrollmentService:
                                  total_samples=len(data[name]), total_people=len(data),
                                  issues=tuple(rejected), photo_paths=tuple(str(path) for path in created_photos))
 
+    @_catalog_locked
     def update_employee(self, name, display_name):
         """Edit the display name while retaining enrollment labels and permanent IDs.
 
@@ -289,6 +411,7 @@ class EnrollmentService:
                       binary=False)
         return employee_id
 
+    @_catalog_locked
     def delete_employee(self, name):
         """Remove a label from the pickle and the mapping; attendance history is kept."""
         data, photos = read_template_bundle(self.encodings_path)
@@ -307,6 +430,7 @@ class EnrollmentService:
                           binary=False)
         return removed
 
+    @_catalog_locked
     def delete_sample(self, name, index):
         data, photos = read_template_bundle(self.encodings_path)
         samples = data.get(name)

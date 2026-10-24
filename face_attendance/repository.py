@@ -126,8 +126,8 @@ class AttendanceRepository:
             if prior:
                 self._set_cooldown(employee.employee_id, prior[0])
 
-        for row in conn.execute(
-                "SELECT event_id, payload FROM attendance_outbox WHERE synced_at IS NULL").fetchall():
+        for row in (conn.execute(
+                "SELECT event_id, payload FROM attendance_outbox WHERE synced_at IS NULL") if remapped else ()):
             payload = json.loads(row["payload"])
             employee = remapped.get(payload.get("employeeId"))
             if employee:
@@ -229,11 +229,17 @@ class AttendanceRepository:
                 (utc_iso(self.clock()), action, detail, actor))
             self.connection.commit()
         except Exception:
+            try:
+                self.connection.rollback()
+            except Exception:
+                pass
             logging.debug("Audit log write failed", exc_info=True)
 
     def checkpoint(self):
         self.connection.checkpoint()
 
     def close(self):
-        self.checkpoint()
-        self.connection.close()
+        try:
+            self.checkpoint()
+        finally:
+            self.connection.close()

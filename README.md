@@ -1,5 +1,9 @@
 # Face ID attendance terminal
 
+For unattended macOS operation, see [OPERATIONS.md](OPERATIONS.md) and the
+[security/reliability review](SECURITY_REVIEW.md). Hardware soak acceptance is
+separate from software regression tests.
+
 A local OpenCV attendance terminal using **YuNet** face detection, **SFace**
 identity matching, **MediaPipe Face Mesh** eye/mouth tracking, and mandatory
 **MiniFASNet** presentation checks. The live camera keeps moving during
@@ -115,6 +119,19 @@ Screens:
   restarts (`Config` is immutable while running).
 
 Behavior notes:
+
+- **Live Monitor** and **License Plates** can each open in a separate window.
+  Use the preview's **Open in new window** button or **More → Open in new window**.
+  Both monitor windows can stay open while the dashboard shows reports, employees,
+  settings or another page. They share the existing engine and plate worker;
+  opening a window never starts a second camera or duplicate attendance pipeline.
+  The original tab offers **Show window** and **Return to dashboard**. The return
+  button, preview control, or native window close button puts the same page back
+  in its tab without stopping recognition. Use the monitor's **Stop** control to
+  stop processing. Each external window supports its own full-screen toggle and
+  **Escape**, independent of the dashboard. Window size/position is reused while
+  this dashboard instance runs. Permissions, theme and settings remain shared;
+  sign-out, restart and application shutdown close the external pages too.
 
 - One engine per data directory (`attendance.lock`); a second dashboard or a
   terminal instance refuses to run against the same data.
@@ -236,6 +253,29 @@ Enrollment appends samples atomically. Images containing multiple faces are
 rejected to avoid enrolling the wrong person. Use a few clear, single-person
 photos at different angles.
 
+Employee setup accepts up to 64 samples per save (automatic capture stops at 8).
+Names and employee IDs are limited to 100 characters. The desktop rejects stale
+camera frames and exact repeated captures; clearing, closing or changing setup
+invalidates unfinished checks. Capture countdowns wait the selected number of
+seconds, and background checks use a snapshot of the current settings.
+
+Every accepted sample must contain one fully visible face and a finite,
+nonzero 128-value SFace embedding. Quality checks control the lighting, blur and
+minimum face size gates; they never bypass these structural or identity checks.
+Samples must match both the first accepted sample in the batch and, when adding
+photos, an existing sample for the employee or their alias. The default maximum
+cosine distance is 0.5 (`EnrollmentService(identity_distance=...)`); validate this
+policy with your deployment images before changing it. Rejected samples are
+reported in the save result and do not get saved as enrollment photos.
+
+Detection and encoding share one RGB image and one model lock, avoiding a second
+YuNet pass. Service commits within one Python process are serialized and re-read
+the latest catalog. If catalog publication fails, the prior employee mapping is
+restored and newly created sample photos are removed. Mapping and catalog remain
+separate filesystem files: this is recovery from reported write failures, not a
+power-loss transaction or coordination between separate API/CLI/dashboard
+processes. Keep a single enrollment writer active and back up the files together.
+
 An optional local `employees.json` maps enrollment labels to permanent HRM IDs
 and display names; see [employees.example.json](employees.example.json):
 
@@ -253,6 +293,32 @@ derives a deterministic `local-<uuid>` ID from the enrollment label. Exact
 duplicate encodings assigned to different employees generate a startup warning;
 ambiguous matches cannot record attendance. Do not loosen tolerance to resolve
 duplicate enrollment data.
+
+New enrollment now checks each face against **other employee IDs** before
+writing photos or records. For example, enrolling “Tim Dev 2” with a face
+matching “Tim Dev” is refused with the existing employee's name and ID; use
+**Update photo** on the original employee instead. A duplicate in any valid
+sample rejects the entire save, even when quality checks are turned off.
+Additional samples and aliases under the **same employee ID** remain allowed.
+The check uses normalized SFace cosine distance and the dashboard's configured
+face tolerance (default 0.5). CLI/service callers use the default unless an
+explicit `duplicate_distance` is supplied.
+
+Existing records are reviewed asynchronously in **Enrolled Employees**. Use
+**Refresh**, select **Possible duplicate faces**, and choose **Edit → Review
+match** to inspect the named counterpart. Profiles requiring review are excluded
+from the directory's “Ready for attendance” count. No employee is automatically
+merged, reassigned or deleted. After confirming which profile is mistaken, use
+that profile's existing **Delete employee** action and confirmation; attendance
+history is retained. Restart the dashboard after updating the code to load this
+behavior.
+
+Imports apply the same cross-employee check, including conflicts between entries
+inside one archive. Mobile captures name the conflicting employee; completion
+checks the current published catalog again before saving, so old pending
+sessions cannot bypass the duplicate gate. These checks compare face templates;
+deployment threshold calibration and human review remain necessary for close
+matches.
 
 Adding an explicit mapping later migrates attendance using the old derived
 local ID, carries cooldowns forward, and updates unsent outbox events. Historical
@@ -569,8 +635,17 @@ clipped crops; it retains the existing local OpenCV runtime and bundled weights.
 
 ## Live license plate recognition (optional)
 
-Install the optional CPU dependencies with `python -m pip install -r requirements-plates.txt`,
-then run `python dashboard.py` and select **License Plates**. Plate detection uses FastALPR
+Install optional CPU OCR in its own environment to avoid conflicting OpenCV wheels:
+
+```sh
+python3.12 -m venv .venv-plates
+.venv-plates/bin/python -m pip install -r requirements-plates.txt
+venv/bin/python dashboard.py
+```
+
+The source checkout detects `.venv-plates` automatically. For another location, set
+`SV_PLATE_PYTHON` to its absolute Python executable path. Select **License Plates**.
+Plate detection uses FastALPR
 with Fast Plate OCR; models download on first start (internet required), then use the local cache.
 The feature is implemented separately in `license_plate/` and does not write attendance records.
 
@@ -586,11 +661,59 @@ Enable **Automatic capture** to save a plate after consecutive matching readings
 a cooldown per recognized plate. Manual captures bypass stability and cooldown checks.
 Each saved event includes the full frame, a plate crop and a row in `captures.jsonl`;
 the default folder is `plate_captures/`. The screen shows the latest 200 captures in the
-current session; the JSONL file retains the complete saved history. Times are recorded in UTC.
-The live view includes recognition details, the most recent saved crop and session totals.
+selected capture folder, restored when the screen opens or recognition starts; the JSONL file retains the complete saved history. Times are recorded in UTC.
+Select a recent row to inspect its saved crop; session track IDs are visible in the list.
+History loads metadata first and decodes the selected crop on demand.
 Use the gear button in the camera header to expand camera and capture settings.
 Camera controls require **Control engine** access; saving requires **Export data** access.
+
+The preview uses the same floating camera controls as Live Monitor: **Start/Stop**,
+**Capture**, **Auto on/off**, **Restart**, settings and the captures folder.
+Use the expand icon or **More → Enter full screen** for a camera-focused view;
+press **Escape** or the exit icon to restore the dashboard and its previous panels.
+Video reads the latest camera frame independently of OCR, skips unchanged frames
+and avoids conversion while this page is hidden. The preview targets 25 updates/sec;
+actual frame rate depends on the camera and hardware. OCR timing is shown beside
+the resolution. Stale or reconnected-camera results are discarded before capture.
 
 Recognition depends on plate visibility, lighting and the model's regional coverage.
 Validate results against your local plates before relying on automatic captures.
 See the [Fast Plate OCR documentation](https://ankandrew.github.io/fast-plate-ocr/latest/).
+
+### Truck maintenance demo
+
+In **License Plates → Truck Maintenance**, choose **Load demo list** on an empty list.
+The three sample trucks cover overdue, due within seven days, and clear service dates,
+relative to the day the demo is loaded. Replace a sample plate with the plate on your
+test truck, edit its service task and due date (`YYYY-MM-DD`), and click
+**Save maintenance list**. The local registry is `plate_maintenance.json`.
+You can add or remove trucks; duplicate normalized plates and invalid dates are rejected.
+Editing and saving require Export data access. Loading demo data never replaces an existing list.
+
+Start recognition and show the test plate. After the configured consecutive readings,
+the maintenance panel displays the truck, service and due date, with an OVERDUE or
+DUE SOON visual alert. Checks work with auto capture off. Multiple confirmed plates
+are checked together. Unknown plates display NOT REGISTERED; they are never treated as clear.
+Matching ignores punctuation and case, but does not guess OCR substitutions such as O/0.
+This demo uses dates only, not mileage, engine hours or an external maintenance system.
+
+Track #1, #2, etc. are recognition-session IDs associated with normalized plate text.
+They expire after ten seconds of absence and restart with recognition. They are not
+physical vehicle tracks: OCR changes can split an ID, and identical plates share one.
+Old captures without IDs show a dash. For production truck movement tracking, add a
+vehicle detector and spatial tracker (ByteTrack or BoT-SORT), associate plate crops
+with each vehicle, then confirm OCR across that track. Keep the fleet plate as the
+maintenance identity, not the temporary track number.
+
+For a fixed truck gate, start with the existing CPU FastALPR pipeline and benchmark
+exact plate accuracy on your own daytime, nighttime and moving-truck recordings.
+Use a camera view dedicated to the plate, short exposure and adequate lighting.
+Validate regional formats (including Cambodian plates if applicable), particularly
+multiline plates and Khmer text; fine-tune detection/OCR if your recordings show gaps.
+Set the confidence and confirmation thresholds from those results; the defaults
+(0.8 confidence, three readings, 0.5-second interval) are demo starting points.
+Do not automatically release or block trucks from an uncertain OCR reading; provide
+operator confirmation and retain the captured frame as evidence.
+
+References: [FastALPR](https://github.com/ankandrew/fast-alpr) and
+[Ultralytics tracking](https://docs.ultralytics.com/modes/track/).

@@ -180,15 +180,15 @@ class WindowTests(unittest.TestCase):
                 window.close()
                 application.processEvents()
 
-    def test_all_four_screens_build_and_switch(self):
+    def test_all_screens_build_and_switch(self):
         from PyQt6.QtCore import QTimer
-        from face_attendance.dashboard.app import MainWindow
+        from face_attendance.dashboard.app import MainWindow, NAV
         application = _app()
         with tempfile.TemporaryDirectory() as directory:
             window = MainWindow(temp_settings(directory), use_lock=False)
             window.show()
             try:
-                self.assertEqual(window.nav.count(), 6)
+                self.assertEqual(window.nav.count(), len(NAV))
                 for row in range(window.nav.count()):
                     window.nav.setCurrentRow(row)
                     application.processEvents()
@@ -228,6 +228,25 @@ class WindowTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
+    def test_external_catalog_write_is_reloaded_once_after_debounce(self):
+        from face_attendance.dashboard.engine import AttendanceEngine
+        from face_attendance.enrollment import write_encodings, write_employee
+        _app()
+        with tempfile.TemporaryDirectory() as directory:
+            engine = AttendanceEngine(temp_settings(directory), backend=FakeBackend(), use_lock=False)
+            rows = []
+            engine.catalogChanged.connect(rows.append)
+            self.assertFalse(engine.reload_if_catalog_changed())
+            # Another process (the mobile API) publishes a new employee.
+            write_encodings(Path(directory) / "faces.pickle",
+                            {"Seed": [np.ones(128)], "Mobile": [np.ones(128)]})
+            write_employee(Path(directory) / "employees.json", "Mobile", "E9")
+            self.assertFalse(engine.reload_if_catalog_changed())  # first sighting: debounce
+            self.assertTrue(engine.reload_if_catalog_changed())
+            self.assertEqual(engine.catalog.enrolled_count, 2)
+            self.assertIn("E9", {row["employee_id"] for row in rows[-1]})
+            self.assertFalse(engine.reload_if_catalog_changed())
+
     def test_liveness_blocker_identifies_models_and_clears_after_recovery(self):
         from face_attendance.dashboard.engine import AttendanceEngine
         from tests.test_attendance import verified
@@ -378,6 +397,8 @@ class EmployeesScreenTests(unittest.TestCase):
                                  preview_capture_factory=lambda: PreviewCapture(frame))
         screen.quality_check.setChecked(False)
         screen.service.backend = FakeBackend()
+        screen.service.backend.face_encodings = lambda rgb, boxes: [
+            np.ones(128) if screen._editing_label else np.eye(1,128)[0] for _ in boxes]
         return screen
 
     def _start_preview(self, application, screen):

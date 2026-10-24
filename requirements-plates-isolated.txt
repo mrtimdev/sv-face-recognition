@@ -1,0 +1,6 @@
+# Install ONLY in a separate Python 3.11/3.12 venv, never in the desktop venv.
+# Set SV_PLATE_PYTHON to that venv's absolute bin/python path.
+# The child has no Qt or regular opencv-python dependency.
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+fast-alpr[onnx]==0.4.0

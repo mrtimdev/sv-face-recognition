@@ -9,7 +9,7 @@ import logging
 import queue
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Optional
 
@@ -35,6 +35,7 @@ class TelegramJob:
     kind: str                        # "capture" | "unknown" | "test"
     caption: str
     image: Optional[bytes] = None    # JPEG bytes; None for text-only messages
+    generation: Optional[int] = None
 
 
 class TelegramService:
@@ -49,6 +50,7 @@ class TelegramService:
         self._notify_unknown = notify_unknown
         self._cooldown_unknown = cooldown_unknown_sec
         self._last_unknown = float("-inf")
+        self._generation = 0
         self._lock = threading.Lock()
         self._queue: queue.Queue = queue.Queue(maxsize=MAX_QUEUE)
         self._stop = threading.Event()
@@ -63,6 +65,8 @@ class TelegramService:
     def reconfigure(self, bot_token: str, chat_id: str,
                     notify_capture: bool = True, notify_unknown: bool = True):
         with self._lock:
+            if (bot_token.strip(), chat_id.strip()) != (self._token, self._chat_id):
+                self._generation += 1
             self._token = bot_token.strip()
             self._chat_id = chat_id.strip()
             self._notify_capture = notify_capture
@@ -79,8 +83,10 @@ class TelegramService:
 
     def send_capture(self, employee_name: str, employee_id: str,
                      duration: float, frame=None):
-        if not self.configured or not self._notify_capture:
-            return
+        with self._lock:
+            if not self.configured or not self._notify_capture:
+                return
+            generation = self._generation
         now = datetime.now()
         caption = _md(
             f"\U0001f7e2 {{BOLD}}Attendance Recorded{{/BOLD}}\n"
@@ -92,7 +98,7 @@ class TelegramService:
             f"\u23f0 {{BOLD}}Time:{{/BOLD}} {now.strftime('%H:%M:%S')}"
         )
         image = _encode_frame(frame)
-        self._enqueue(TelegramJob("capture", caption, image))
+        self._enqueue(TelegramJob("capture", caption, image, generation))
 
     def send_unknown_alert(self, track_id: int, age: float, frame=None):
         now = time.monotonic()
@@ -102,6 +108,7 @@ class TelegramService:
             if not self.configured or not self._notify_unknown:
                 return
             self._last_unknown = now
+            generation = self._generation
         stamp = datetime.now()
         caption = _md(
             f"\U0001f534 {{BOLD}}Unknown Face Detected{{/BOLD}}\n"
@@ -115,7 +122,7 @@ class TelegramService:
             f"{{ITALIC}}This person is not enrolled in the system.{{/ITALIC}}"
         )
         image = _encode_frame(frame)
-        self._enqueue(TelegramJob("unknown", caption, image))
+        self._enqueue(TelegramJob("unknown", caption, image, generation))
 
     def send_test(self) -> str:
         """Synchronous test: returns status string for the UI."""
@@ -133,7 +140,7 @@ class TelegramService:
             bot_name = data["result"].get("first_name", "Bot")
             bot_user = data["result"].get("username", "")
         except Exception as exc:
-            return f"Connection failed: {exc}"
+            return f"Connection failed ({type(exc).__name__}). Check network access and bot settings."
         try:
             now = datetime.now()
             text = _md(
@@ -156,13 +163,17 @@ class TelegramService:
                 return f"Message failed: {result.get('description', resp.text)}"
             return f"Connected to @{bot_user}. Test message sent successfully."
         except Exception as exc:
-            return f"Bot verified, but sending failed: {exc}"
+            return f"Bot verified, but sending failed ({type(exc).__name__}). Check network access and bot settings."
 
     # -- internal -----------------------------------------------------------
 
     def _enqueue(self, job: TelegramJob):
         try:
-            self._queue.put_nowait(job)
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                self._queue.put_nowait(replace(job, generation=self._generation)
+                                       if job.generation is None else job)
         except queue.Full:
             logging.warning("Telegram queue full, dropping notification")
 
@@ -174,11 +185,19 @@ class TelegramService:
                 continue
             try:
                 self._send(job)
-            except Exception:
-                logging.debug("Telegram send failed", exc_info=True)
+            except Exception as exc:
+                # Request exceptions can contain the bot token in their URL.
+                logging.debug("Telegram send failed (%s)", type(exc).__name__)
+            finally:
+                self._queue.task_done()
 
     def _send(self, job: TelegramJob):
         with self._lock:
+            if job.generation != self._generation:
+                return  # Never reroute queued face photos after reconfiguration.
+            if ((job.kind == 'capture' and not self._notify_capture)
+                    or (job.kind == 'unknown' and not self._notify_unknown)):
+                return
             token, chat_id = self._token, self._chat_id
         if not token or not chat_id:
             return

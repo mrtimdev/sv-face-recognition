@@ -58,7 +58,8 @@ class CameraManager:
 
     def _run(self):
         sequence, generation = 0, 0
-        backoff = self.config.reconnect_sec
+        retry_delay = min(self.config.reconnect_sec, MAX_RECONNECT_BACKOFF)
+        backoff = retry_delay
         while not self.stop_event.is_set():
             cap = None
             try:
@@ -68,7 +69,6 @@ class CameraManager:
                     self._set_status("CAMERA DISCONNECTED")
                 else:
                     generation += 1
-                    backoff = self.config.reconnect_sec
                     count, fps_since = 0, self._clock()
                     while not self.stop_event.is_set():
                         ok, frame = cap.read()
@@ -76,6 +76,9 @@ class CameraManager:
                         if not ok or frame is None or frame.size == 0:
                             self._set_status("RECONNECTING")
                             break
+                        # Opening succeeds even when a stream never yields a frame.
+                        # Reset retry pressure only after actual capture succeeds.
+                        backoff = retry_delay
                         sequence += 1
                         count += 1
                         if now - fps_since >= 1:
@@ -87,8 +90,13 @@ class CameraManager:
                 logging.exception("Camera connection/read failed")
                 self._set_status("CAMERA DISCONNECTED")
             finally:
+                self.fps = 0.0
                 if cap is not None:
-                    cap.release()
+                    try:
+                        cap.release()
+                    except Exception:
+                        # Driver cleanup errors must not kill the reconnect loop.
+                        logging.exception("Camera release failed")
             self.stop_event.wait(backoff)
             backoff = min(backoff * 2, MAX_RECONNECT_BACKOFF)
         self._set_status("STOPPED")

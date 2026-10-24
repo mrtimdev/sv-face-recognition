@@ -3,10 +3,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import math
+import os
 from pathlib import Path
+import shutil
 import uuid
 
 import cv2
+
+from face_attendance.settings import describe_source
+from face_attendance.storage import MIN_DISK_MB, write_jpeg
 
 
 @dataclass(frozen=True)
@@ -14,13 +19,23 @@ class Plate:
     text: str
     confidence: float
     box: tuple
+    track_id: int = 0
 
 
 def create_recognizer():
+    isolated = os.environ.get('SV_PLATE_PYTHON')
+    if not isolated:
+        root = Path(__file__).resolve().parents[1]
+        candidate = root / '.venv-plates' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+        if candidate.is_file():
+            isolated = str(candidate)
+    if isolated:
+        from .process_backend import ProcessRecognizer
+        return ProcessRecognizer(isolated)
     try:
         from fast_alpr import ALPR
     except ImportError as exc:
-        raise RuntimeError("Install plate support: python -m pip install -r requirements-plates.txt") from exc
+        raise RuntimeError("Install plate support in a separate .venv-plates environment; see OPERATIONS.md") from exc
     return ALPR(detector_model="yolo-v9-t-384-license-plate-end2end",
                 ocr_model="cct-xs-v2-global-model", ocr_device="cpu",
                 detector_providers=["CPUExecutionProvider"])
@@ -70,22 +85,72 @@ class CapturePolicy:
 
 def save_capture(directory, frame, plate, source, automatic):
     directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if shutil.disk_usage(directory).free < MIN_DISK_MB * 1024 * 1024 + frame.nbytes * 2:
+        raise OSError("Disk space low; plate capture was not saved")
     stamp = datetime.now(timezone.utc)
     key = stamp.strftime("%Y%m%dT%H%M%S") + "-" + uuid.uuid4().hex
     full = directory / (key + ".jpg")
     crop = directory / (key + "-plate.jpg")
     x1, y1, x2, y2 = plate.box
     try:
-        if not cv2.imwrite(str(full), frame) or not cv2.imwrite(str(crop), frame[y1:y2, x1:x2]):
-            raise OSError("Could not save plate images")
+        write_jpeg(full, frame)
+        write_jpeg(crop, frame[y1:y2, x1:x2])
         record = dict(timestamp=stamp.isoformat(), text=plate.text,
-                      confidence=plate.confidence, box=plate.box, source=str(source),
-                      automatic=automatic, image=full.name, crop=crop.name)
-        with (directory / "captures.jsonl").open("a", encoding="utf-8") as handle:
+                      confidence=plate.confidence, box=plate.box, source=describe_source(source),
+                      automatic=automatic, image=full.name, crop=crop.name,
+                      track_id=plate.track_id)
+        descriptor = os.open(directory / "captures.jsonl", os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            if hasattr(os, 'fchmod'):
+                os.fchmod(handle.fileno(), 0o600)
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     except Exception:
         full.unlink(missing_ok=True)
         crop.unlink(missing_ok=True)
         raise
     return record
+
+
+class PlateTracker:
+    """Session IDs by exact normalized OCR; expires after absence (not vehicle tracking)."""
+    def __init__(self, timeout=10):
+        self.timeout = timeout
+        self.active = {}
+        self.next_id = 1
+
+    def update(self, plates, now):
+        from dataclasses import replace
+        from .maintenance import plate_key
+        self.active = {key: value for key, value in self.active.items()
+                       if now - value[1] < self.timeout}
+        result = []
+        for plate in plates:
+            key = plate_key(plate.text)
+            if key not in self.active:
+                self.active[key] = (self.next_id, now)
+                self.next_id += 1
+            track_id, _ = self.active[key]
+            self.active[key] = (track_id, now)
+            result.append(replace(plate, track_id=track_id))
+        return result
+
+
+def load_captures(directory, limit=200):
+    from collections import deque
+    path = Path(directory) / "captures.jsonl"
+    records = deque(maxlen=limit)
+    if path.exists():
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                    if all(key in record for key in ("text", "timestamp", "confidence", "image", "crop")):
+                        datetime.fromisoformat(record["timestamp"])
+                        float(record["confidence"])
+                        records.append(record)
+                except (ValueError, TypeError):
+                    continue
+    return list(records)

@@ -21,6 +21,7 @@ from ..config import ROOT
 from ..storage import context_path
 from .access import AccessControl, AccountWatcher, NAV_PERMISSIONS, guard
 from .bridge import to_pixmap
+from .detached import DetachedPageController
 from .engine import AttendanceEngine
 from .errors import DashboardErrorHandler
 from .icons import IconLabel, apply_button_icon, make_icon
@@ -46,6 +47,7 @@ from .widgets.user_menu import role_title
 
 APP_VERSION = f"v{__version__}"
 UPDATE_CHECK_DELAY_MS = 4000
+CATALOG_POLL_MS = 2000  # Mobile API enrollments appear within ~2-4 s.
 SIDEBAR_WIDTH = 244
 
 NAV = (
@@ -172,6 +174,12 @@ class MainWindow(QMainWindow):
         ]
         for screen in self.screens:
             self.stack.addWidget(screen)
+        self._detached_pages = {
+            index:DetachedPageController(self,index,NAV[index][1],self.screens[index])
+            for index in (0,6)
+        }
+        for index,controller in self._detached_pages.items():
+            controller.screen.detachRequested.connect(lambda i=index:self._toggle_detached_page(i))
         self.no_access_page = self._build_no_access_page()
         self.stack.addWidget(self.no_access_page)
         body.addWidget(self.stack, 1)
@@ -397,8 +405,8 @@ class MainWindow(QMainWindow):
         self.engine.attendanceFailed.connect(lambda _: self.capture_flash.cancel())
         live = self.screens[0]
         live.flashPreviewRequested.connect(lambda: self.capture_flash.trigger(preview=True))
-        live.viewAllRequested.connect(lambda: self._go("Attendance Report"))
-        live.settingsRequested.connect(lambda: self._go("Settings"))
+        live.viewAllRequested.connect(lambda: self._go_from_monitor("Attendance Report"))
+        live.settingsRequested.connect(lambda: self._go_from_monitor("Settings"))
         live.settingsApplied.connect(self._broadcast_settings)
         ctx = self.screens[5]
         ctx.settingsApplied.connect(
@@ -412,6 +420,12 @@ class MainWindow(QMainWindow):
         self.clock_timer.timeout.connect(self._tick)
         self.clock_timer.start()
         self._tick()
+        # The mobile API runs as its own process and publishes into the same
+        # catalog files; pick those enrollments up without a manual restart.
+        self.catalog_timer = QTimer(self)
+        self.catalog_timer.setInterval(CATALOG_POLL_MS)
+        self.catalog_timer.timeout.connect(self._check_catalog)
+        self.catalog_timer.start()
 
     # --- state propagation ------------------------------------------------
     def _engine_state(self, running):
@@ -470,6 +484,66 @@ class MainWindow(QMainWindow):
             if label == title:
                 self.nav.setCurrentRow(row)
                 return
+
+    def _show_dashboard(self):
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _go_from_monitor(self, title):
+        self._go(title)
+        self._show_dashboard()
+
+    def _toggle_detached_page(self, index):
+        controller = self._detached_pages[index]
+        if controller.is_detached:
+            self.attach_page(index,activate=True)
+        else:
+            self.detach_page(index)
+
+    def detach_page(self, index):
+        """Open the original monitor in its own window; never create another engine."""
+        controller = self._detached_pages.get(index)
+        if controller is None:
+            raise ValueError('This page cannot be opened in a separate window')
+        if getattr(self,'_detached_closing',False):
+            return None
+        title = NAV[index][1]
+        if not self.access.allows_nav(title):
+            self.access.deny(NAV_PERMISSIONS[title],f'open {title} in another window',self)
+            return None
+        window = controller.detach()
+        if index == 0:
+            self._move_capture_flash(window.centralWidget())
+        return window
+
+    def attach_page(self, index, activate=False):
+        controller = self._detached_pages.get(index)
+        if controller is None:
+            raise ValueError('This page cannot be returned from a separate window')
+        screen = controller.attach()
+        if index == 0:
+            self._move_capture_flash(self.centralWidget())
+        if activate and not getattr(self,'_detached_closing',False) and self.access.allows_nav(NAV[index][1]):
+            self.nav.setCurrentRow(index)
+            self._show_dashboard()
+        return screen
+
+    def _move_capture_flash(self, target):
+        flash = getattr(self,'capture_flash',None)
+        if flash is None or flash.parentWidget() is target:
+            return
+        flash.cancel()
+        flash.parentWidget().removeEventFilter(flash)
+        flash.setParent(target)
+        target.installEventFilter(flash)
+        flash.hide()
+
+    def _close_detached_pages(self):
+        self._detached_closing = True
+        for index in getattr(self,'_detached_pages',{}):
+            self.attach_page(index)
 
     # --- role-based access ----------------------------------------------------
     def _build_no_access_page(self):
@@ -530,6 +604,9 @@ class MainWindow(QMainWindow):
         allowed = [row for row, (_icon, title) in enumerate(NAV) if access.allows_nav(title)]
         for row in range(self.nav.count()):
             self.nav.item(row).setHidden(row not in allowed)
+        for index,controller in getattr(self,'_detached_pages',{}).items():
+            if index not in allowed:
+                self.attach_page(index)
         self.nav_section.setVisible(bool(allowed))
         self.no_access_account.setText(access.account_label())
         self.user_menu.set_shortcuts(users=access.allows_nav("Users & Access"),
@@ -580,6 +657,7 @@ class MainWindow(QMainWindow):
         if getattr(self, "_signing_out", False):
             return
         self._signing_out = True
+        self._close_detached_pages()
         if self.account_watcher is not None:
             self.account_watcher.stop()
         from ..users import clear_session
@@ -767,6 +845,15 @@ class MainWindow(QMainWindow):
         self.clock_label.setText(now.strftime("%H:%M:%S"))
         self.date_label.setText(now.strftime("%a %d %b %Y"))
 
+    def _check_catalog(self):
+        if self._exit is not None or self._exit_done:
+            return
+        try:
+            self.engine.reload_if_catalog_changed()
+        except Exception as exc:
+            logging.exception("Catalog reload after external change failed")
+            self._note(f"ERROR: could not reload employees: {exc}")
+
     def _note(self, message):
         logging.info("dashboard: %s", message)
         self.statusBar().showMessage(message, 8000)
@@ -790,7 +877,9 @@ class MainWindow(QMainWindow):
 
     def _autostart(self):
         try:
-            self.engine.start()
+            from .camera_permission import with_camera_permission
+            with_camera_permission(self.settings.source, self.engine.start,
+                                   self.screens[0].on_error, context=self)
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             QMessageBox.warning(self, "Cannot start the engine", str(exc))
             self.statusBar().showMessage(str(exc))
@@ -823,6 +912,7 @@ class MainWindow(QMainWindow):
         """Stop everything behind a progress card, then quit, restart or update (see shutdown.py)."""
         if self._exit is not None or self._exit_done:
             return
+        self._close_detached_pages()
         if self.account_watcher is not None:
             self.account_watcher.stop()
         self.notification_panel.close()
@@ -954,6 +1044,7 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 self._begin_exit("quit")
                 return
+        self._close_detached_pages()
         if self.account_watcher is not None:
             self.account_watcher.stop()
         self.notification_panel.close()
@@ -984,21 +1075,12 @@ def run_dashboard(settings_path=None, autostart=False, argv=None):
         settings = Settings.load(settings_path)
 
         def _show_main():
-            from ..users import (UserRepository, accounts_expected, clear_session, load_session,
-                                 remember_accounts_exist, save_session)
+            from ..users import (UserRepository, account_login_required, clear_session,
+                                 load_session, save_session)
             application.setStyleSheet(stylesheet(settings.theme))
             current_user = None
             repo = UserRepository(settings)
-            try:
-                has_users = repo.has_users()
-            except Exception:
-                logging.exception("Could not check user accounts")
-                # An unreachable database must not switch sign-in off on a machine
-                # that has had accounts; the sign-in dialog reports the problem.
-                has_users = accounts_expected()
-            else:
-                if has_users:
-                    remember_accounts_exist()
+            has_users = account_login_required(repo)
 
             if has_users:
                 notice = ""

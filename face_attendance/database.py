@@ -318,6 +318,8 @@ def connect(settings, readonly=False):
                 "PostgreSQL backend requires psycopg2.\n"
                 "Install it with:  pip install psycopg2-binary") from None
         params = dict(
+            connect_timeout=5,
+            options="-c statement_timeout=10000 -c lock_timeout=5000",
             host=getattr(settings, "db_host", "localhost"),
             port=int(getattr(settings, "db_port", 0) or 5432),
             user=getattr(settings, "db_user", ""),
@@ -342,6 +344,7 @@ def connect(settings, readonly=False):
                 "MySQL backend requires mysql-connector-python.\n"
                 "Install it with:  pip install mysql-connector-python") from None
         params = dict(
+            connection_timeout=5,
             host=getattr(settings, "db_host", "localhost"),
             port=int(getattr(settings, "db_port", 0) or 3306),
             user=getattr(settings, "db_user", ""),
