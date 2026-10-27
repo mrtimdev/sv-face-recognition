@@ -101,6 +101,7 @@ def write_encodings(path, data, photos=None):
     _atomic_write(path, lambda handle: pickle.dump(template_payload(data, photos), handle))
 
 
+@_catalog_locked
 def write_employee(path, name, employee_id, display_name=None):
     """Map an enrollment label to a permanent ID without silently reassigning it."""
     records = load_employee_map(path)
@@ -108,11 +109,13 @@ def write_employee(path, name, employee_id, display_name=None):
     if previous and previous.employee_id != employee_id:
         raise ValueError(f"{name!r} is already mapped to {previous.employee_id}; "
                          "use a deliberate ID migration to change it")
-    data = {key: {"employee_id": value.employee_id, "name": value.name}
+    data = {key: {"employee_id": value.employee_id, "name": value.name, "status": value.status}
             for key, value in records.items()}
     canonical = previous.name if previous else next(
         (employee.name for employee in records.values() if employee.employee_id == employee_id), display_name or name)
-    data[name] = {"employee_id": employee_id, "name": canonical}
+    active = all(e.active for e in records.values() if e.employee_id == employee_id)
+    data[name] = {"employee_id": employee_id, "name": canonical,
+                  "status": "active" if active else "inactive"}
     _atomic_write(path, lambda handle: json.dump(data, handle, ensure_ascii=False, indent=2), binary=False)
     return canonical
 
@@ -159,12 +162,16 @@ def employee_rows(encodings_path, employees_path):
     data = read_encodings(encodings_path)
     records = load_employee_map(employees_path)
     rows = []
+    inactive_ids = {e.employee_id for e in records.values() if not e.active}
     for name, samples in data.items():
         employee = records.get(name)
         rows.append({"name": name,
                      "employee_id": employee.employee_id if employee else legacy_employee_id(name),
                      "employee_name": employee.name if employee else name,
                      "mapped": employee is not None,
+                     "active": employee.active if employee else legacy_employee_id(name) not in inactive_ids,
+                     "status": employee.status if employee else
+                     "inactive" if legacy_employee_id(name) in inactive_ids else "active",
                      "samples": len(samples)})
     return sorted(rows, key=lambda row: (row["employee_name"].casefold(), row["name"].casefold()))
 
@@ -403,9 +410,32 @@ class EnrollmentService:
         records = load_employee_map(self.employees_path)
         employee_id = records[name].employee_id if name in records else legacy_employee_id(name)
         updated = {key: {"employee_id": record.employee_id,
-                         "name": display_name if record.employee_id == employee_id else record.name}
+                         "name": display_name if record.employee_id == employee_id else record.name,
+                         "status": record.status}
                    for key, record in records.items()}
-        updated[name] = {"employee_id": employee_id, "name": display_name}
+        updated[name] = {"employee_id": employee_id, "name": display_name,
+                         "status": records[name].status if name in records else "active"}
+        _atomic_write(self.employees_path,
+                      lambda handle: json.dump(updated, handle, ensure_ascii=False, indent=2),
+                      binary=False)
+        return employee_id
+
+    @_catalog_locked
+    def set_employee_active(self, name, active):
+        """Retain templates/history and change all aliases of the permanent ID."""
+        if not isinstance(active, bool):
+            raise ValueError("Employee active status must be a boolean")
+        if name not in read_encodings(self.encodings_path):
+            raise ValueError("Employee enrollment no longer exists; refresh the list")
+        records = load_employee_map(self.employees_path)
+        employee_id = records[name].employee_id if name in records else legacy_employee_id(name)
+        updated = {key: {"employee_id": e.employee_id, "name": e.name,
+                         "status": ("active" if active else "inactive")
+                         if e.employee_id == employee_id else e.status}
+                   for key, e in records.items()}
+        if name not in updated:
+            updated[name] = {"employee_id": employee_id, "name": name,
+                             "status": "active" if active else "inactive"}
         _atomic_write(self.employees_path,
                       lambda handle: json.dump(updated, handle, ensure_ascii=False, indent=2),
                       binary=False)
@@ -423,7 +453,7 @@ class EnrollmentService:
         remove_sample_photos(self.encodings_path, removed_photos)
         records = load_employee_map(self.employees_path)
         if name in records:
-            remaining = {key: {"employee_id": value.employee_id, "name": value.name}
+            remaining = {key: {"employee_id": value.employee_id, "name": value.name, "status": value.status}
                          for key, value in records.items() if key != name}
             _atomic_write(self.employees_path,
                           lambda handle: json.dump(remaining, handle, ensure_ascii=False, indent=2),

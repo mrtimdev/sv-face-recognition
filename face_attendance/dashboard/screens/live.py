@@ -115,6 +115,7 @@ class LiveScreen(QWidget):
             ("verified", "Verified Today", "0", "check-circle", "green", "Employees checked in today"),
             ("waiting", "Waiting", "-", "clock", "orange", "Presence accumulating"),
             ("unknown", "Unknown", "0", "alert", "purple", "Faces not in catalog"),
+            ("inactive", "Inactive", "0", "alert", "orange", "Attendance blocked"),
         )
         for key, label, value, icon, tone, hint in card_defs:
             card = StatCard(label, value, hint=hint, icon=icon, tone=tone)
@@ -460,6 +461,8 @@ class LiveScreen(QWidget):
         self.engine.statsReady.connect(self.on_stats)
         self.engine.tracksReady.connect(self._on_tracks)
         self.engine.captureTriggered.connect(self.on_capture)
+        self.engine.unknownFaceAlert.connect(self.on_unknown_capture)
+        self.engine.inactiveEmployeeAlert.connect(self.on_inactive_capture)
         self.engine.attendanceSaved.connect(self.on_saved)
         self.engine.attendanceFailed.connect(self.on_failed)
         self.engine.runningChanged.connect(self._sync_running)
@@ -590,6 +593,10 @@ class LiveScreen(QWidget):
         unknown = stats.get("unknown_faces", 0)
         self.cards["unknown"].set_value(unknown, "bad" if unknown else "idle")
 
+        inactive = stats.get("inactive_faces", 0)
+        self.cards["inactive"].set_value(inactive, "bad" if inactive else "idle")
+        self.cards["inactive"].set_hint(stats.get("inactive_details") or "Attendance blocked")
+
         # Camera strip + overlay chips
         status = stats.get("status", "STOPPED")
         self._camera_status = status
@@ -670,6 +677,29 @@ class LiveScreen(QWidget):
 
     # ── events ───────────────────────────────────────────────────────────
 
+    def on_inactive_capture(self, info):
+        self._log("WARN", f"Inactive employee {info['employee_name']} ({info['employee_id']}): "
+                  f"attendance blocked; capture saved: {info['snapshot']}")
+        self.toast.show_message(f"Inactive employee: {info['employee_name']} — attendance blocked", "bad")
+        self._add_activity(info["employee_name"], "Inactive — blocked", "Scan attempt captured",
+                           info["employee_id"],
+                           evidence={"capture": load_photo(info["snapshot"]),
+                                     "snapshot": info["snapshot"],
+                                     "captured_at": info["captured_at"],
+                                     "detail": "Inactive employee scan; no attendance recorded."})
+
+    def on_unknown_capture(self, info):
+        if not info.get("snapshot"):
+            self._log("INFO", f"Unknown face detected: track #{info.get('track_id', '?')}")
+            return
+        self._log("INFO", f"Unknown / Not enrolled face saved: {info['snapshot']}")
+        self._add_activity("Unknown / Not enrolled", "Face saved",
+                           f"Track #{info['track_id']} · {info['age']:.1f}s in view",
+                           evidence={"capture": load_photo(info["snapshot"]),
+                                     "snapshot": info["snapshot"],
+                                     "captured_at": info["captured_at"],
+                                     "detail": "Unrecognized face; identity and liveness are unverified."})
+
     def on_capture(self, job):
         self._log("INFO", f"CAPTURED  {job.employee_name} ({job.employee_id}), "
                   f"{job.duration:.1f}s verified")
@@ -734,6 +764,7 @@ class LiveScreen(QWidget):
             self.cards["verified"].set_value("-", "idle")
             self.cards["waiting"].set_value("-")
             self.cards["unknown"].set_value("0", "idle")
+            self.cards["inactive"].set_value("0", "idle")
             self.video.set_overlay(faces=0)
             self.video.set_overlay(resolution="", fps=0)
             for row_key in self._status_rows:

@@ -32,7 +32,7 @@ MAX_QUEUE = 64
 
 @dataclass(frozen=True)
 class TelegramJob:
-    kind: str                        # "capture" | "unknown" | "test"
+    kind: str                        # "capture" | "unknown" | "inactive" | "test"
     caption: str
     image: Optional[bytes] = None    # JPEG bytes; None for text-only messages
     generation: Optional[int] = None
@@ -43,13 +43,14 @@ class TelegramService:
 
     def __init__(self, bot_token: str = "", chat_id: str = "",
                  notify_capture: bool = True, notify_unknown: bool = True,
-                 cooldown_unknown_sec: float = 30.0):
+                 cooldown_unknown_sec: float = 30.0, notify_inactive: bool = True):
         self._token = bot_token.strip()
         self._chat_id = chat_id.strip()
         self._notify_capture = notify_capture
+        self._notify_inactive = notify_inactive
         self._notify_unknown = notify_unknown
         self._cooldown_unknown = cooldown_unknown_sec
-        self._last_unknown = float("-inf")
+        self._last_unknown = {}
         self._generation = 0
         self._lock = threading.Lock()
         self._queue: queue.Queue = queue.Queue(maxsize=MAX_QUEUE)
@@ -63,7 +64,8 @@ class TelegramService:
         return bool(self._token and self._chat_id and _HAS_REQUESTS)
 
     def reconfigure(self, bot_token: str, chat_id: str,
-                    notify_capture: bool = True, notify_unknown: bool = True):
+                    notify_capture: bool = True, notify_unknown: bool = True,
+                    notify_inactive: bool = True):
         with self._lock:
             if (bot_token.strip(), chat_id.strip()) != (self._token, self._chat_id):
                 self._generation += 1
@@ -71,6 +73,7 @@ class TelegramService:
             self._chat_id = chat_id.strip()
             self._notify_capture = notify_capture
             self._notify_unknown = notify_unknown
+            self._notify_inactive = notify_inactive
         if self.configured and (self._thread is None or not self._thread.is_alive()):
             self._start_worker()
 
@@ -100,29 +103,47 @@ class TelegramService:
         image = _encode_frame(frame)
         self._enqueue(TelegramJob("capture", caption, image, generation))
 
-    def send_unknown_alert(self, track_id: int, age: float, frame=None):
+    def send_unknown_alert(self, track_id: int, age: float, frame=None, event_id=None):
         now = time.monotonic()
         with self._lock:
-            if now - self._last_unknown < self._cooldown_unknown:
+            key = event_id or track_id
+            self._last_unknown = {k: t for k, t in self._last_unknown.items()
+                                  if now - t < self._cooldown_unknown}
+            if key in self._last_unknown:
                 return
             if not self.configured or not self._notify_unknown:
                 return
-            self._last_unknown = now
+            self._last_unknown[key] = now
             generation = self._generation
         stamp = datetime.now()
         caption = _md(
-            f"\U0001f534 {{BOLD}}Unknown Face Detected{{/BOLD}}\n"
+            f"\U0001f534 {{BOLD}}Unknown / Not Enrolled Face Captured{{/BOLD}}\n"
             f"\n"
-            f"\u26a0\ufe0f An unrecognised face appeared on camera.\n"
+            f"\u26a0\ufe0f Unverified face observation; this is not an attendance record.\n"
             f"\U0001f50d {{BOLD}}Track:{{/BOLD}} #{track_id}\n"
             f"\u23f1 {{BOLD}}In view:{{/BOLD}} {age:.1f}s\n"
             f"\U0001f4c5 {{BOLD}}Date:{{/BOLD}} {stamp.strftime('%Y-%m-%d')}\n"
             f"\u23f0 {{BOLD}}Time:{{/BOLD}} {stamp.strftime('%H:%M:%S')}\n"
             f"\n"
-            f"{{ITALIC}}This person is not enrolled in the system.{{/ITALIC}}"
+            f"{{ITALIC}}No enrolled identity matched; identity and liveness are unverified.{{/ITALIC}}"
         )
         image = _encode_frame(frame)
         self._enqueue(TelegramJob("unknown", caption, image, generation))
+
+    def send_inactive_alert(self, info):
+        with self._lock:
+            if not self.configured or not self._notify_inactive:
+                return
+            generation = self._generation
+        caption = _md(
+            f"{{BOLD}}Inactive Employee Detected — Attendance Blocked{{/BOLD}}\n"
+            f"Employee: {info['employee_name']}\nID: {info['employee_id']}\n"
+            f"Captured at: {info['captured_at']}\n"
+            f"Track: #{info['track_id']}\n"
+            f"Liveness passed: {bool(info.get('liveness_verified'))}\n"
+            f"Presentation check passed: {bool(info.get('presentation_verified'))}\n"
+            f"This is a scan observation. No attendance was recorded.")
+        self._enqueue(TelegramJob("inactive", caption, _encode_frame(info.get("frame")), generation))
 
     def send_test(self) -> str:
         """Synchronous test: returns status string for the UI."""
@@ -196,7 +217,8 @@ class TelegramService:
             if job.generation != self._generation:
                 return  # Never reroute queued face photos after reconfiguration.
             if ((job.kind == 'capture' and not self._notify_capture)
-                    or (job.kind == 'unknown' and not self._notify_unknown)):
+                    or (job.kind == 'unknown' and not self._notify_unknown)
+                    or (job.kind == 'inactive' and not self._notify_inactive)):
                 return
             token, chat_id = self._token, self._chat_id
         if not token or not chat_id:
@@ -205,13 +227,17 @@ class TelegramService:
             files = {"photo": ("capture.jpg", io.BytesIO(job.image), "image/jpeg")}
             data = {"chat_id": chat_id, "caption": job.caption,
                     "parse_mode": "MarkdownV2"}
-            requests.post(SEND_PHOTO.format(token=token),
+            response = requests.post(SEND_PHOTO.format(token=token),
                           data=data, files=files, timeout=TIMEOUT)
         else:
-            requests.post(SEND_MESSAGE.format(token=token),
+            response = requests.post(SEND_MESSAGE.format(token=token),
                           json={"chat_id": chat_id, "text": job.caption,
                                 "parse_mode": "MarkdownV2"},
                           timeout=TIMEOUT)
+
+        response.raise_for_status()
+        if not response.json().get("ok"):
+            raise RuntimeError("Telegram rejected notification")
 
     def stop(self):
         self._stop.set()

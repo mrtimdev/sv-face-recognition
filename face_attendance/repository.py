@@ -23,6 +23,7 @@ def parse_legacy_time(value):
 
 class AttendanceRepository:
     def __init__(self, config, employee_map=None, cooldown_sec=30.0, clock=time.time):
+        self.config = config
         self.employee_map = employee_map or {}
         self.cooldown_sec, self.clock = cooldown_sec, clock
         self.connection = connect(config)
@@ -172,6 +173,20 @@ class AttendanceRepository:
         return {"date": start.date().isoformat(), "count": int(row[0])}
 
     def record(self, job, snapshots):
+        from .enrollment import CATALOG_LOCK
+        from .catalog import load_employee_map
+        with CATALOG_LOCK:
+            try:
+                status_path = getattr(self.config, "employees_path", None)
+                records = (load_employee_map(status_path)
+                           if status_path is not None and status_path.exists() else self.employee_map)
+                if any(e.employee_id == job.employee_id and not e.active for e in records.values()):
+                    return SaveResult(job, "blocked", error="Inactive employee: attendance blocked")
+            except (OSError, ValueError) as exc:
+                return SaveResult(job, "error", error=f"Cannot verify employee status: {exc}")
+            return self._record(job, snapshots)
+
+    def _record(self, job, snapshots):
         conn, snapshot = self.connection, ""
         try:
             with conn:

@@ -1,19 +1,28 @@
 """Built-in, debounced dashboard cues. One owner prevents overlapping audio."""
 from pathlib import Path
 import time
+import math
+
+from .anti_spoof import LIVE_THRESHOLD
 
 from .audio import SoundPlayer
 
 SOUND_DIR = Path(__file__).resolve().parent / "assets" / "sounds"
 SOUND_LABELS = {
-    "detected": "Face detected", "lost": "No face in view", "unknown": "Not enrolled",
+    "detected": "Face detected", "lost": "No face in view", "unknown": "Unknown / not enrolled",
+    "inactive": "Inactive employee / attendance blocked",
+    "recognized": "Enrolled employee recognized", "multiple": "Multiple faces in view",
+    "spoof": "Presentation check rejected", "liveness": "Liveness action needed",
+    "reconnected": "Camera reconnected",
     "guidance": "Adjust position or lighting", "verified": "Verification complete",
     "success": "Attendance saved", "error": "Error", "disconnected": "Camera disconnected",
 }
-COOLDOWNS = {"detected": 3., "lost": 8., "unknown": 8., "guidance": 10.,
-             "verified": 2., "success": 1., "error": 3., "disconnected": 8.}
-PRIORITY = {"detected": 1, "lost": 1, "guidance": 2, "unknown": 3,
-            "verified": 4, "success": 5, "error": 6, "disconnected": 6}
+COOLDOWNS = {"inactive": 8., "detected": 3., "lost": 8., "unknown": 8., "guidance": 10.,
+             "recognized": 5., "multiple": 10., "spoof": 10., "liveness": 10.,
+             "reconnected": 5., "verified": 2., "success": 1., "error": 3., "disconnected": 8.}
+PRIORITY = {"inactive": 6, "detected": 1, "lost": 1, "guidance": 2, "unknown": 3,
+            "recognized": 2, "multiple": 2, "liveness": 2, "spoof": 6,
+            "reconnected": 3, "verified": 4, "success": 5, "error": 6, "disconnected": 6}
 
 
 class EventSounds:
@@ -39,17 +48,16 @@ class EventSounds:
         self._had_face = False
         self._empty_since = None
         self._connected = False
+        self._awaiting_reconnect = False
+        self._multiple_since = None
+        self._multiple_sent = False
 
     def _enabled(self, event):
         if not self.settings.sounds_enabled:
             return False
-        if event in ('detected', 'lost'):
+        if event == 'detected':
             return self.settings.sound_detection
-        if event == 'guidance':
-            return self.settings.sound_guidance
-        if event == 'unknown':
-            return self.settings.sound_unknown
-        return True
+        return getattr(self.settings, 'sound_' + event, True)
 
     def play(self, event='success', preview=False):
         now = self.clock()
@@ -77,6 +85,10 @@ class EventSounds:
         if self._connected and not connected:
             self.play('disconnected')
             self.reset()
+            self._awaiting_reconnect = True
+        if connected and self._awaiting_reconnect:
+            if self.play('reconnected') or not self._enabled('reconnected'):
+                self._awaiting_reconnect = False
         self._connected = connected
 
     def tracks(self, tracks):
@@ -95,23 +107,45 @@ class EventSounds:
                 self._empty_since = now
             if now - self._empty_since >= 2. and self.play('lost'):
                 self._had_face = False
+        if len(visible) > 1:
+            if self._multiple_since is None:
+                self._multiple_since = now
+            if (not self._multiple_sent and now - self._multiple_since >= 1.5
+                    and self.play('multiple')):
+                self._multiple_sent = True
+        else:
+            self._multiple_since, self._multiple_sent = None, False
         candidates = []
         for track in visible:
             state = self._tracks.setdefault(track['track_id'],
                 {'first': now, 'last': now, 'sent': set(), 'reason': '', 'reason_since': now})
             state['last'] = now
+            score = track.get('spoof_score')
+            rejected = (isinstance(score, (int, float)) and math.isfinite(score)
+                        and 0 <= score < LIVE_THRESHOLD)
             condition = ('guidance' if not track.get('quality_ok', True) or track.get('ambiguous') else
-                         'unknown' if track.get('state') == 'UNKNOWN' else '')
+                         'inactive' if not track.get('employee_active', True) and track.get('identity_valid') else
+                         'unknown' if track.get('state') == 'UNKNOWN' else
+                         'spoof' if track.get('identity_valid') and rejected else
+                         'liveness' if track.get('identity_valid') and track.get('spoof_ok')
+                         and not track.get('liveness_ok')
+                         and track.get('state') == 'VERIFYING' else '')
             if state['reason'] != condition:
                 state['reason'], state['reason_since'] = condition, now
             event = None
-            if (track.get('identity_valid') and track.get('spoof_ok') and track.get('liveness_ok')
+            if (track.get('employee_active', True) and track.get('identity_valid') and track.get('spoof_ok') and track.get('liveness_ok')
                     and track.get('quality_ok', True) and not track.get('ambiguous')
                     and track.get('state') not in ('SUCCESS', 'COOLDOWN', 'CAPTURING')
                     and 'verified' not in state['sent']):
                 event = 'verified'
-            elif condition and now - state['reason_since'] >= 1.5 and condition not in state['sent']:
+            elif (condition and now - state['reason_since'] >= (3. if condition == 'liveness' else 1.5)
+                  and condition not in state['sent']):
                 event = condition
+            elif (track.get('employee_active', True) and track.get('identity_valid') and 'recognized' not in state['sent']
+                    and track.get('quality_ok', True) and not track.get('ambiguous')
+                    and track.get('state') not in ('SUCCESS', 'COOLDOWN', 'CAPTURING', 'ERROR')
+                    and not rejected and now - state['first'] >= .35):
+                event = 'recognized'
             elif now - state['first'] >= .35 and 'detected' not in state['sent']:
                 event = 'detected'
             if event and self._enabled(event):
@@ -124,6 +158,8 @@ class EventSounds:
                     if candidate == event:
                         state['sent'].add(event)
                         state['sent'].add('detected')
+                        if event == 'verified':
+                            state['sent'].add('recognized')
 
     def stop(self):
         for player in self.players.values():

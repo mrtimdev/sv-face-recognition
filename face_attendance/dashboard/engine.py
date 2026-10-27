@@ -17,8 +17,11 @@ import numpy as np
 from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
 
 from ..attendance import AttendanceService
-from ..anti_spoof import LIVE_THRESHOLD, live_sample
+from ..anti_spoof import LIVE_THRESHOLD, SAMPLE_MAX_AGE, live_sample
+from ..liveness import MAX_SAMPLE_GAP
 from ..camera import CameraManager
+from ..capture import face_capture
+from ..unknown_capture import save_unknown_capture
 from ..catalog import FaceCatalog
 from ..enrollment import employee_rows as load_employee_rows
 from ..models import RecognitionRequest
@@ -41,6 +44,7 @@ def track_snapshot(track, now, tracker=None):
     """Plain data for Qt widgets; the live FaceTrack stays engine-owned."""
     return {"track_id": track.track_id,
             "employee_id": track.employee_id or "",
+            "employee_active": track.employee_active,
             "name": track.employee_name if track.employee_id else "UNKNOWN",
             "state": track.state.value,
             "progress": round(track.verification_progress, 3),
@@ -74,6 +78,7 @@ class AttendanceEngine(QObject):
     statsReady = pyqtSignal(object)          # dict of live statistics
     captureTriggered = pyqtSignal(object)    # CaptureJob when auto-capture fires
     unknownFaceAlert = pyqtSignal(object)   # dict snapshot of unknown face for alerts
+    inactiveEmployeeAlert = pyqtSignal(object)  # saved blocked scan observation
     attendanceSaved = pyqtSignal(object)     # SaveResult after a committed row
     attendanceFailed = pyqtSignal(object)    # SaveResult with outcome "error"
     catalogChanged = pyqtSignal(object)      # employee rows after rebuild
@@ -102,6 +107,7 @@ class AttendanceEngine(QObject):
         self._stats = {}
         self._last_elapsed = 0.0
         self._unknown_alerted = {}
+        self._unknown_retry = {}
         self.config = None
         self.catalog = None
         self._build()
@@ -157,6 +163,7 @@ class AttendanceEngine(QObject):
         self._assert_workers_stopped()
         self.acquire_lock()
         self._unknown_alerted = {}
+        self._unknown_retry = {}
         self._build()
         self._stop.clear()
         self.persistence.start()
@@ -384,25 +391,59 @@ class AttendanceEngine(QObject):
                     self.logMessage.emit("Attendance blocked by liveness: " +
                                          self._stats["liveness_details"].replace("\n", "; "))
                 self._expire_unknown_alerts(now)
-                for track in self.tracker.tracks.values():
-                    if (track.visible and track.quality_ok and not track.ambiguous
-                            and track.state.value == "UNKNOWN"
-                            and track.track_id not in self._unknown_alerted
-                            and now - track.first_seen >= 2.0):
-                        self._unknown_alerted[track.track_id] = now
-                        with self._clean_lock:
-                            snap = None if self._clean is None else self._clean.copy()
-                        self.unknownFaceAlert.emit({
-                            "track_id": track.track_id,
-                            "age": round(now - track.first_seen, 1),
-                            "frame": snap,
-                        })
+                self._capture_observations(now, generation, status, paused)
             self._queue_preview(**updates)
             delay = 1 / cfg.target_fps - (time.monotonic() - started)
             if delay > 0:
                 self._stop.wait(delay)
 
+    def _capture_observations(self, now, generation, status, paused):
+        if paused or status != "CONNECTED":
+            return
+        for track in self.tracker.tracks.values():
+            inactive = track.identity_valid and not track.employee_active
+            if inactive:
+                if not self.settings.auto_capture_inactive:
+                    continue
+            elif track.state.value != "UNKNOWN" or not self.settings.auto_capture_unknown:
+                continue
+            observation = track.unknown_packet
+            key = (track.track_id, "inactive" if inactive else "unknown", track.employee_id if inactive else "")
+            if (not track.visible or not track.quality_ok or track.ambiguous
+                    or key in self._unknown_alerted
+                    or now < self._unknown_retry.get(key, 0)
+                    or now - track.state_since < (1.0 if inactive else 2.0)
+                    or observation is None or observation.generation != generation
+                    or not 0 <= now - observation.captured_at <= self.config.max_result_age_sec):
+                continue
+            try:
+                crop, box = face_capture(observation.frame, track.unknown_box,
+                                         track.unknown_neighbors)
+                info = save_unknown_capture(self.config.capture_dir, crop, box,
+                    track.track_id, now - track.first_seen, observation.wall_time,
+                    category="inactive_employee" if inactive else "unknown_not_enrolled",
+                    employee_id=track.employee_id if inactive else "",
+                    employee_name=track.employee_name if inactive else "",
+                    liveness_verified=inactive and track.liveness_ok and 0 <= now - track.last_liveness_at <= MAX_SAMPLE_GAP,
+                    presentation_verified=inactive and track.spoof_ok and 0 <= now - track.last_spoof_at <= SAMPLE_MAX_AGE)
+            except ValueError:
+                continue
+            except OSError as exc:
+                self.errorRaised.emit(f"Face observation capture failed: {exc}")
+                self._unknown_retry[key] = now + 5
+                continue
+            self._unknown_alerted[key] = now
+            info["frame"] = crop
+            if inactive:
+                self.persistence.log_audit("inactive_employee_detected",
+                    f"{track.employee_id}: attendance blocked; capture={info['event_id']}")
+                self.inactiveEmployeeAlert.emit(info)
+            else:
+                self.unknownFaceAlert.emit(info)
+
     def _expire_unknown_alerts(self, now):
+        self._unknown_retry = {tid: deadline for tid, deadline in self._unknown_retry.items()
+                               if deadline > now}
         expired = [tid for tid, ts in self._unknown_alerted.items()
                    if now - ts > UNKNOWN_ALERT_EXPIRY]
         for tid in expired:
@@ -414,7 +455,8 @@ class AttendanceEngine(QObject):
         tracks = self.tracker.tracks
         visible = [track for track in tracks.values() if track.visible]
         known = [track for track in visible if track.employee_id and track.identity_valid]
-        blocked = [track for track in known if not live_sample(track.spoof_score)
+        inactive = [track for track in known if not track.employee_active]
+        blocked = [track for track in known if track.employee_active and not live_sample(track.spoof_score)
                    and track.state.value not in ("SUCCESS", "COOLDOWN", "CAPTURING")]
         details = []
         for track in blocked:
@@ -435,6 +477,8 @@ class AttendanceEngine(QObject):
                 "preview_fps": round(preview_fps, 1),
                 "faces": len(visible),
                 "known_faces": len(known),
+                "inactive_faces": len(inactive),
+                "inactive_details": "; ".join(f"{t.employee_name} ({t.employee_id}): attendance blocked" for t in inactive),
                 "unknown_faces": len([track for track in visible
                                       if track.quality_ok and not track.ambiguous and track.state.value == "UNKNOWN"]),
                 "cooldowns": len([track for track in visible if track.cooldown_remaining > 0]),

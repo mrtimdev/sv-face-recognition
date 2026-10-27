@@ -169,7 +169,7 @@ class UIRenderer:
         recorded = track.state in (State.SUCCESS, State.COOLDOWN)
         if known and not recorded and track.state != State.CAPTURING:
             color = GREEN if track.spoof_ok and track.liveness_ok else AMBER
-        if track.state == State.ERROR:
+        if track.state in (State.ERROR, State.INACTIVE):
             color = RED
         fade = 1.0 if track.visible else max(0, 1 - (now - track.last_seen) / self.config.session_timeout)
         color = tuple(int(channel * fade) for channel in color)
@@ -182,6 +182,8 @@ class UIRenderer:
             label = "IMPROVE FACE QUALITY"
         elif track.ambiguous:
             label = "SEPARATE FACES"
+        elif state == State.INACTIVE:
+            label = "INACTIVE / ATTENDANCE BLOCKED"
         elif state == State.ERROR:
             label = "SAVE FAILED / RETRYING"
         elif track.identity_valid and not track.spoof_ok and not recorded and state != State.CAPTURING:
@@ -212,6 +214,8 @@ class UIRenderer:
         # rather than waiting for the full PAD dwell before asking for a blink.
         if live_sample(track.spoof_score) and not track.liveness_ok:
             liveness_label = track.liveness_prompt
+        if state == State.INACTIVE:
+            liveness_label = "Attendance disabled for inactive employee"
         if recorded or state == State.CAPTURING:
             liveness_label = "Attendance recorded" if state != State.CAPTURING else "Saving attendance"
         if track.visible and not track.quality_ok:

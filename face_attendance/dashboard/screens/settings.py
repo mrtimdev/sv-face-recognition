@@ -246,12 +246,12 @@ class SettingsScreen(QWidget):
 
     def _build_sound_group(self):
         card, form = self._card_form("Built-in sounds", "Distinct local tones; no internet required.", icon="sliders")
-        for key, label in (("sounds_enabled", "Enable sounds"),
-                           ("sound_detection", "Face detected / no face in view"),
-                           ("sound_guidance", "Position and lighting guidance"),
-                           ("sound_unknown", "Not enrolled")):
+        from ...sound_events import SOUND_LABELS
+        self._register(form, "sounds_enabled", "Enable sounds", QCheckBox())
+        for event, label in SOUND_LABELS.items():
+            key = "sound_detection" if event == "detected" else "sound_" + event
             self._register(form, key, label, QCheckBox())
-        note = QLabel("Verification, saved attendance, errors and camera disconnection have separate tones. "
+        note = QLabel("Recognized means an enrolled identity matched; verification and attendance have their own tones. "
                       "Alerts are debounced and never overlap. Preview each tone in Live Monitor.")
         note.setWordWrap(True)
         form.addRow(note)
@@ -496,10 +496,20 @@ class SettingsScreen(QWidget):
         self.tg_capture_check.setChecked(True)
         form.addRow("On capture", self.tg_capture_check)
         self.fields["telegram_notify_capture"] = self.tg_capture_check
+        auto_unknown = QCheckBox("Save separate unknown / not enrolled face photos and records")
+        self._register(form, "auto_capture_unknown", "Automatic face capture", auto_unknown,
+                       "After 2 seconds of unknown status, save one crop per track in captures/unknown. "
+                       "Pause stops these captures. These records do not mark attendance.")
         self.tg_unknown_check = QCheckBox("Send danger alert when an unknown face is detected")
         self.tg_unknown_check.setChecked(True)
         form.addRow("On unknown face", self.tg_unknown_check)
         self.fields["telegram_notify_unknown"] = self.tg_unknown_check
+        self._register(form, "auto_capture_inactive", "Inactive employee capture",
+                       QCheckBox("Save separate inactive employee scan attempts"),
+                       "Attendance is always blocked for inactive employees. Capture retains an observation, "
+                       "including failed or pending liveness checks, under captures/inactive.")
+        self._register(form, "telegram_notify_inactive", "Inactive employee Telegram alert",
+                       QCheckBox("Send the inactive employee face crop and blocked attendance alert"))
         self.tg_test_button = QPushButton("Verify Bot && Send Test")
         self.tg_test_button.setObjectName("softButton")
         self.tg_test_result = QLabel("")

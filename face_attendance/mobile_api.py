@@ -228,7 +228,7 @@ def create_app():
         if signature != catalog_cache['signature']:
             templates, _ = read_template_bundle(service.encodings_path)
             employees = service.employees()
-            records = {row['name']:Employee(row['employee_id'],row['employee_name']) for row in employees}
+            records = {row['name']:Employee(row['employee_id'],row['employee_name'],row.get('active', True)) for row in employees}
             catalog_cache.update(signature=signature, templates=templates, employees=employees,
                                  duplicate_index=FaceDuplicateIndex(templates,records))
         return catalog_cache['templates'], catalog_cache['employees']
@@ -583,7 +583,7 @@ def create_app():
             catalog = service.employees()
             catalog_ids = {r['employee_id'] for r in catalog}
             directory = {r['employee_id']: {'employeeId':r['employee_id'],'name':r['employee_name'],
-                                          'status':'ENROLLED','enrollmentId':None} for r in catalog}
+                                          'status':'ENROLLED','employmentStatus':r.get('status','active'),'enrollmentId':None} for r in catalog}
             for row in db.execute('SELECT * FROM face_enrollments ORDER BY created_at, rowid'):
                 current = directory.get(row['employee_id'])
                 if row['status'] == 'CANCELLED':
@@ -591,7 +591,7 @@ def create_app():
                 if row['status'] == 'COMPLETED' and row['employee_id'] not in catalog_ids:
                     continue  # Profile was removed on the desktop after mobile publication.
                 directory[row['employee_id']] = {'employeeId':row['employee_id'],'name':current['name'] if current else (row['display_name'] or row['name']),
-                    'status':row['status'],'enrollmentId':row['id']}
+                    'status':row['status'],'employmentStatus':current.get('employmentStatus','active') if current else 'active','enrollmentId':row['id']}
             return {'employees':sorted(directory.values(),key=lambda r: r['name'].casefold())}
 
     @app.get('/employees/{employee_id}/enrollment', dependencies=[Depends(authorize)])
@@ -633,7 +633,7 @@ def create_app():
                 raise HTTPException(409,'Employee was enrolled on the desktop meanwhile; cancel and restart with re-enrollment authorized')
             vectors = [decrypt_vector(r[0]) for r in db.execute('SELECT embedding FROM face_enrollment_samples WHERE enrollment_id=?',(eid,))]
             templates, photos = read_template_bundle(service.encodings_path)
-            records = {r['name']:Employee(r['employee_id'],r['employee_name']) for r in service.employees()}
+            records = {r['name']:Employee(r['employee_id'],r['employee_name'],r.get('active', True)) for r in service.employees()}
             index = FaceDuplicateIndex(templates,records)
             for vector in vectors:
                 duplicate = index.match(vector,row['employee_id'],service.duplicate_distance)

@@ -227,6 +227,10 @@ class FaceTracker:
                 self._invalidate(track)
             if detection.encoded:
                 self._recognize(track, detection, packet, now)
+                track.unknown_packet = packet if detection.employee is None or not detection.employee.active else None
+                track.unknown_box = tuple(detection.bounding_box)
+                track.unknown_neighbors = tuple(tuple(other.bounding_box)
+                    for other in result.detections if other is not detection)
             # Bind all liveness evidence to the recognized candidate. Resetting
             # identity above must happen before consuming this frame's evidence.
             if track.candidate_id is not None:
@@ -246,7 +250,7 @@ class FaceTracker:
                     track.reset_verification()
                     self.liveness.reset(track.track_id)
                 else:
-                    if (track.identity_valid and track.flow_ok
+                    if (track.identity_valid and track.employee_active and track.flow_ok
                             and 0 <= packet.captured_at - track.last_recognized <= self.config.identity_fresh_sec):
                         if track.last_evidence_at is not None:
                             gap = packet.captured_at - track.last_evidence_at
@@ -296,7 +300,9 @@ class FaceTracker:
         track.last_recognized = packet.captured_at
         if track.confirmation_count >= cfg.min_confirmation_frames:
             track.employee_id, track.employee_name = employee.employee_id, employee.name
+            track.employee_active = employee.active
             track.identity_valid = True
         # Pending persistence belongs to the original employee even if this track changes.
         if track.pending_event_id is None and track.state not in (State.SUCCESS, State.COOLDOWN, State.ERROR):
-            track.transition(State.VERIFYING if track.identity_valid else State.RECOGNIZING, now)
+            track.transition(State.INACTIVE if track.identity_valid and not track.employee_active else
+                             State.VERIFYING if track.identity_valid else State.RECOGNIZING, now)

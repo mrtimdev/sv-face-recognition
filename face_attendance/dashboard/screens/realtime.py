@@ -16,7 +16,7 @@ from ..widgets import StatCard, ToastBar, VideoView
 
 TRACK_HEADERS = ("Track", "Employee", "Employee ID", "State", "Progress", "Cooldown")
 RECORD_HEADERS = ("Recorded", "Employee", "Employee ID", "Presence", "Evidence image")
-STATE_TONES = {"SUCCESS": "ok", "CONFIRMED": "ok", "VERIFYING": "warn", "CAPTURING": "warn",
+STATE_TONES = {"INACTIVE": "bad", "SUCCESS": "ok", "CONFIRMED": "ok", "VERIFYING": "warn", "CAPTURING": "warn",
                "COOLDOWN": "warn", "UNKNOWN": "bad", "ERROR": "bad", "DETECTING": "idle",
                "RECOGNIZING": "idle", "READY": "idle"}
 
@@ -112,7 +112,7 @@ class RealtimeScreen(QWidget):
         records_column.addWidget(self.records_table, 1)
         lower.addLayout(records_column, 3)
         alerts_column = QVBoxLayout()
-        alerts_title = QLabel("Unknown faces (this session)")
+        alerts_title = QLabel("Unknown / inactive alerts (this session)")
         alerts_title.setObjectName("sectionTitle")
         self.alerts = QListWidget()
         self.alerts.setAlternatingRowColors(True)
@@ -130,6 +130,7 @@ class RealtimeScreen(QWidget):
         self.engine.tracksReady.connect(self.on_tracks)
         self.engine.captureTriggered.connect(self.on_capture)
         self.engine.attendanceSaved.connect(self.on_saved)
+        self.engine.inactiveEmployeeAlert.connect(self.on_inactive)
         self.engine.errorRaised.connect(lambda message: self.toast.show_message(message, "bad"))
         self.refresh_button.clicked.connect(self.reload)
         self.range_box.currentIndexChanged.connect(lambda _: self.reload())
@@ -153,6 +154,13 @@ class RealtimeScreen(QWidget):
         self.toast.show_message(
             f"Captured {job.employee_name} - saving...", "warn")
         self._sound.play()
+
+    def on_inactive(self, info):
+        self.toast.show_message(f"Inactive employee {info['employee_name']}: attendance blocked", "bad")
+        self.alerts.insertItem(0, QListWidgetItem(
+            f"{datetime.now():%H:%M:%S}  INACTIVE {info['employee_name']} ({info['employee_id']}) — captured, attendance blocked"))
+        while self.alerts.count() > 100:
+            self.alerts.takeItem(self.alerts.count() - 1)
 
     def on_saved(self, result):
         self.toast.show_message(f"{result.job.employee_name} checked in "

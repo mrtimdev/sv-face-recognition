@@ -108,6 +108,17 @@ class Settings:
     sound_detection: bool = True
     sound_guidance: bool = True
     sound_unknown: bool = True
+    sound_inactive: bool = True
+    sound_lost: bool = True
+    sound_recognized: bool = True
+    sound_multiple: bool = True
+    sound_spoof: bool = True
+    sound_liveness: bool = True
+    sound_verified: bool = True
+    sound_success: bool = True
+    sound_error: bool = True
+    sound_disconnected: bool = True
+    sound_reconnected: bool = True
     theme: str = "dark"
     report_page_size: int = 100
     report_work_start: str = ""  # opt-in "Late" label in reports; "" disables it
@@ -115,6 +126,9 @@ class Settings:
     telegram_chat_id: str = ""
     telegram_notify_capture: bool = True
     telegram_notify_unknown: bool = True
+    auto_capture_unknown: bool = True
+    auto_capture_inactive: bool = True
+    telegram_notify_inactive: bool = True
     dashboard_pin_hash: str = ""
     update_auto_check: bool = True
     update_skipped_version: str = ""

@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
             chat_id=settings.telegram_chat_id,
             notify_capture=settings.telegram_notify_capture,
             notify_unknown=settings.telegram_notify_unknown,
+            notify_inactive=settings.telegram_notify_inactive,
         )
         self.setWindowTitle("Face ID Attendance - Admin Dashboard")
         self.resize(1280, 800)
@@ -126,6 +127,8 @@ class MainWindow(QMainWindow):
         self.engine.catalogChanged.connect(lambda rows: self._refresh_header())
         self.engine.attendanceSaved.connect(self._telegram_on_saved)
         self.engine.unknownFaceAlert.connect(self._telegram_on_unknown)
+        self.engine.inactiveEmployeeAlert.connect(self.telegram.send_inactive_alert)
+        self.engine.inactiveEmployeeAlert.connect(self._notify_inactive)
         self.engine.attendanceSaved.connect(self._notify_saved)
         self.engine.attendanceFailed.connect(self._notify_failed)
         self.engine.unknownFaceAlert.connect(self._notify_unknown)
@@ -780,6 +783,11 @@ class MainWindow(QMainWindow):
             thumbnail=self._face_thumbnail(job.frame),
             payload=self._evidence(result, "Save failed", error))
 
+    def _notify_inactive(self, info):
+        self.notifications.add("unknown", "Inactive employee — attendance blocked",
+            f"{info['employee_name']} ({info['employee_id']}) scanned; face capture saved.",
+            thumbnail=self._face_thumbnail(info.get("frame")))
+
     def _notify_unknown(self, info):
         seconds = float(info.get("age") or 0)
         self.notifications.add(
@@ -817,6 +825,7 @@ class MainWindow(QMainWindow):
             chat_id=settings.telegram_chat_id,
             notify_capture=settings.telegram_notify_capture,
             notify_unknown=settings.telegram_notify_unknown,
+            notify_inactive=settings.telegram_notify_inactive,
         )
         for screen in self.screens:
             handler = getattr(screen, "on_settings_changed", None)
@@ -872,6 +881,7 @@ class MainWindow(QMainWindow):
         self.telegram.send_unknown_alert(
             track_id=info["track_id"],
             age=info["age"],
+            event_id=info.get("event_id"),
             frame=info.get("frame"),
         )
 

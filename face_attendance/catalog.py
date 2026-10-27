@@ -25,7 +25,14 @@ def load_employee_map(path):
     for name, record in data.items():
         if not isinstance(record, dict) or not str(record.get("employee_id", "")).strip():
             raise ValueError(f"Missing employee_id for {name!r}")
-        result[name] = Employee(str(record["employee_id"]), str(record.get("name", name)))
+        status = record.get("status", "active")
+        if status not in ("active", "inactive"):
+            raise ValueError(f"Invalid employment status for {name!r}")
+        result[name] = Employee(str(record["employee_id"]), str(record.get("name", name)), status == "active")
+    # One employment status per permanent ID, including legacy aliases.
+    inactive = {e.employee_id for e in result.values() if not e.active}
+    result = {label: Employee(e.employee_id, e.name, e.employee_id not in inactive)
+              for label, e in result.items()}
     return result
 
 
@@ -42,8 +49,10 @@ class FaceCatalog:
             raise FileNotFoundError(f"{path} not found. Run enroll_faces.py first.")
         data = read_templates(path)
         employees, encodings = [], []
+        inactive_ids = {e.employee_id for e in self.employee_map.values() if not e.active}
         for name, samples in data.items():
-            employee = self.employee_map.get(name, Employee(legacy_employee_id(name), name))
+            employee_id = legacy_employee_id(name)
+            employee = self.employee_map.get(name, Employee(employee_id, name, employee_id not in inactive_ids))
             self.employee_map[name] = employee
             for sample in samples:
                 vector = np.asarray(sample, dtype=np.float64)

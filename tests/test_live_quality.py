@@ -29,6 +29,17 @@ class LiveQualityTests(unittest.TestCase):
                 from face_attendance.dashboard.screens.settings import SettingsScreen
                 settings_screen = next(screen for screen in window.screens if isinstance(screen, SettingsScreen))
                 self.assertTrue(settings_screen.fields['sounds_enabled'].isChecked())
+                from face_attendance.sound_events import SOUND_LABELS
+                for event in SOUND_LABELS:
+                    key = 'sound_detection' if event == 'detected' else 'sound_' + event
+                    self.assertGreaterEqual(live.sound_choice.findData(event), 0)
+                    live.sound_choice.setCurrentIndex(live.sound_choice.findData(event))
+                    live.test_sound_button.click()
+                    sounds.return_value.play.assert_called_with(event, preview=True)
+                    self.assertTrue(settings_screen.fields[key].isChecked())
+                    settings_screen.fields[key].setChecked(False)
+                    self.assertFalse(settings_screen.collect()[key])
+
                 settings_screen.fields['sound_guidance'].setChecked(False)
                 self.assertFalse(settings_screen.collect()['sound_guidance'])
                 app.processEvents()

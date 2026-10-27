@@ -18,6 +18,7 @@ class State(str, Enum):
     COOLDOWN = "COOLDOWN"
     READY = "READY"
     UNKNOWN = "UNKNOWN"
+    INACTIVE = "INACTIVE"
     ERROR = "ERROR"
 
 
@@ -25,6 +26,11 @@ class State(str, Enum):
 class Employee:
     employee_id: str
     name: str
+    active: bool = True
+
+    @property
+    def status(self):
+        return "active" if self.active else "inactive"
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,7 @@ class FaceTrack:
     last_seen: float
     employee_id: Optional[str] = None
     employee_name: str = ""
+    employee_active: bool = True
     last_recognized: float = float("-inf")
     last_encoded_sequence: int = -1
     recognition_distance: Optional[float] = None
@@ -110,6 +117,10 @@ class FaceTrack:
     last_spoof_at: float = float("-inf")
     spoof_progress: float = 0.0
     evidence_packet: Any = field(default=None, repr=False, compare=False)
+    # Exact observation for unknown or inactive matches, independent of attendance evidence.
+    unknown_packet: Any = field(default=None, repr=False, compare=False)
+    unknown_box: Optional[Box] = None
+    unknown_neighbors: tuple = ()
     evidence_box: Optional[Box] = None
     evidence_neighbors: tuple = ()
     liveness_ok: bool = False

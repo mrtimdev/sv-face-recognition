@@ -48,9 +48,9 @@ The HUD is appended beside the full camera image, so employees at the right
 edge are still visible. Its width and typography scale with resolution.
 Camera sizes/FPS are requests to the driver, not guaranteed capabilities.
 
-The dashboard includes eight distinct local WAV tones: face detected, no face
-in view, not enrolled, quality guidance, verification complete, attendance
-saved, error, and camera disconnected. No audio download or generation step is
+The dashboard includes fourteen distinct local WAV tones for detection, unknown
+faces, recognized employees, multiple faces, quality and liveness guidance,
+presentation rejection, verification, attendance results, and camera health. No audio download or generation step is
 required. Files in `face_attendance/assets/sounds` are included in packaged builds;
 `scripts/generate_builtin_sounds.py` reproduces them using the standard library.
 
@@ -717,3 +717,95 @@ operator confirmation and retain the captured frame as evidence.
 
 References: [FastALPR](https://github.com/ankandrew/fast-alpr) and
 [Ultralytics tracking](https://docs.ultralytics.com/modes/track/).
+
+## Live Monitor automatic unknown-face captures
+
+In **Settings → Telegram Notifications**, enable **Automatic face capture** to
+save unknown / not enrolled observations after two seconds of unknown status.
+Each tracked person gets a separate cropped JPEG and UTC JSON record under
+`<capture_dir>/unknown/<event_id>/`. Live Activity shows the saved face. The
+existing Captures folder button opens the parent folder. Enrolled employees
+continue through the verified attendance capture flow and its separate records.
+
+Unknown observations do not establish identity, employee status, or liveness;
+a registered person who is not recognized can also appear as unknown. Enrollment
+is required before the system can attach a name. Pause stops automatic unknown
+captures. Overlapping faces and stale recognition frames are deferred. Captures
+are deduplicated per track for one hour; leaving and returning with a new track
+can produce another observation.
+
+To deliver the individual crops, configure the bot token and Chat ID and enable
+**On unknown face**. Attendance photos use **On capture**. Telegram sends run on
+its existing background queue; simultaneous unknown people no longer suppress
+each other's alerts. Local records are retained when Telegram is disabled or
+unavailable. Delivery is best effort; queued notifications are not a persistent
+outbox and are not automatically retried after process exit or network failure.
+Saved face records remain until removed by the operator.
+
+## Separate detection sound alerts
+
+**Settings → Built-in sounds** provides a master mute and individual switches
+for all 14 local tones. Use the sound selector and **Test alert sound** in Live
+Monitor to hear each tone (preview works even when alerts are muted).
+
+| Alert | Trigger |
+| --- | --- |
+| Face detected | A face stays visible for at least 0.35 seconds |
+| Inactive employee / attendance blocked | An inactive matched employee remains visible for 1.5 seconds |
+| Unknown / not enrolled | Unknown status persists for 1.5 seconds with acceptable quality |
+| Enrolled employee recognized | Identity matched; does not imply verified attendance |
+| Multiple faces in view | More than one visible face for 1.5 seconds |
+| Adjust position or lighting | Poor quality or overlapping faces for 1.5 seconds |
+| Presentation check rejected | A recognized face has a rejected model score for 1.5 seconds |
+| Liveness action needed | A recognized face passes presentation checks but awaits liveness for 3 seconds |
+| Verification complete | Identity, quality, presentation and liveness checks pass |
+| Attendance saved | Attendance persistence succeeds |
+| Error | Engine or attendance-save failure |
+| No face in view | All faces leave for at least 2 seconds |
+| Camera disconnected | A running camera loses its connection |
+| Camera reconnected | Connection returns after a disconnect; initial startup is silent |
+
+Recommended defaults enable all tones. For a busy entrance, mute **Face detected**,
+**No face in view**, and **Multiple faces in view** while keeping unknown,
+presentation rejection, attendance results, and camera health alerts enabled.
+Detection alerts are debounced, coalesced across simultaneous people, and emitted
+once per tracked condition; cooldowns and priorities prevent overlapping sounds.
+Pause and engine stop silence automatic detection alerts. Presentation rejection
+is a model result, not proof of an attack; an unknown face may be an enrolled
+person whom recognition could not match.
+
+## Active and inactive employees
+
+In **Enrolled Employees**, open a person's **Edit** menu and select **Mark inactive
+(terminated)** or **Reactivate employee**. The directory and profile display the
+employment status; use the **Active employees** and **Inactive employees** filters.
+Existing records default to active. Inactivation keeps the permanent ID, face
+templates, photos, and attendance history, so a returning person remains
+recognizable. It applies to every enrollment alias sharing that permanent ID.
+Updating photos, renaming, exporting or importing employees retains the status.
+Imports preserve the destination's status for an employee already enrolled there.
+
+Live Monitor and Liveness Monitoring display **INACTIVE** and block attendance
+for an inactive matched identity, even if all liveness checks pass. The final
+attendance commit also re-reads employment status, preventing a queued job from
+saving after an in-process deactivation. Already committed historical attendance
+is retained. Reactivation restores normal attendance eligibility after the catalog
+reload; normal verification and cooldown rules still apply.
+
+By default, a confirmed inactive identity visible for another second produces
+an individual JPEG and UTC JSON record in `<capture_dir>/inactive/<event_id>/`.
+The record includes employee ID/name, blocked attendance status, and current
+liveness/presentation check results. These are scan observations, including
+pending or rejected liveness, rather than attendance records or proof that a
+physical person was present. Quality, overlap, freshness, camera-generation,
+pause, and per-track deduplication checks apply. A distinct inactive-employee
+sound, Live Activity entry, notification and monitoring alert identify the event.
+The **Inactive** card counts currently visible matched inactive employees.
+
+**Settings → Telegram Notifications** has separate **Inactive employee capture**
+and **Inactive employee Telegram alert** switches. The bot receives the cropped
+face with the employee name/ID, UTC capture time and an attendance-blocked caption
+when configured. Disabling capture or Telegram never permits inactive attendance.
+The inactive sound has its own switch under **Built-in sounds**. Camera testing
+and real Telegram delivery should be checked with your installation; automated
+tests use synthetic frames and mocked notification transport.

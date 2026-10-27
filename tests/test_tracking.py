@@ -56,6 +56,18 @@ class TrackingTests(unittest.TestCase):
         self.assertIsNone(track.evidence_box)
         self.assertEqual(track.evidence_neighbors, ())
 
+    def test_unknown_capture_uses_exact_observation_and_clears_on_match(self):
+        self.detect(1, 1, [Detection(self.box_a, None, .9, True),
+                           Detection(self.box_b, self.b, .3, True)])
+        track = self.tracker.tracks[1]
+        self.assertEqual(track.unknown_box, self.box_a)
+        self.assertEqual(track.unknown_neighbors, (self.box_b,))
+        self.assertEqual(track.unknown_packet.sequence, 1)
+        track.bounding_box = (52, 152, 172, 32)
+        self.assertEqual(track.unknown_box, self.box_a)
+        self.detect(2, 1.2, [Detection(self.box_a, self.a, .3, True)])
+        self.assertIsNone(track.unknown_packet)
+
     def test_conflicting_identity_immediately_revokes_eligibility(self):
         self.confirm_two()
         self.detect(20, 1.6, [Detection(self.box_a, self.b, 0.3, True), Detection(self.box_b, self.b, 0.3, True)])

@@ -323,6 +323,7 @@ class EmployeesScreen(QWidget):
         self.status_filter = QComboBox()
         self.status_filter.addItems(["All employees", "Ready for attendance", "Needs enrollment"])
         self.status_filter.addItem("Possible duplicate faces")
+        self.status_filter.addItems(["Active employees", "Inactive employees"])
         self.status_filter.setMinimumWidth(180)
         tools.addWidget(self.search_edit, 1)
         tools.addWidget(self.status_filter)
@@ -684,9 +685,11 @@ class EmployeesScreen(QWidget):
             matches = not text or any(text in str(row[key]).casefold()
                                      for key in ("employee_name", "employee_id", "name"))
             status = self.status_filter.currentIndex()
-            visible = matches and (status == 0 or (status == 1 and row["samples"] > 0)
+            visible = matches and (status == 0 or (status == 1 and row["samples"] > 0 and row.get("active", True))
                                    or (status == 2 and row["samples"] == 0)
-                                   or (status == 3 and row["name"] in self._duplicates_by_label))
+                                   or (status == 3 and row["name"] in self._duplicates_by_label)
+                                   or (status == 4 and row.get("active", True))
+                                   or (status == 5 and not row.get("active", True)))
             self.employee_table.setRowHidden(index, not visible)
             shown += visible
         self.result_count.setText(f"Showing {shown} of {len(self.rows)} enrollment records • Double-click a row to view details")
@@ -875,8 +878,8 @@ class EmployeesScreen(QWidget):
             f"ID: {row['employee_id']}" if row["employee_id"] else "No employee ID")
         duplicates = self._duplicates_by_label.get(row["name"], [])
         self.profile_pill.set_status(
-            "Review face match" if duplicates else ("Enrolled" if row["samples"] else "Needs enrollment"),
-            "warn" if duplicates or not row["samples"] else "ok")
+            "Inactive" if not row.get("active", True) else "Review face match" if duplicates else ("Active" if row["samples"] else "Needs enrollment"),
+            "bad" if not row.get("active", True) else "warn" if duplicates or not row["samples"] else "ok")
         lines = [f"{row['samples']} enrolled sample(s)"]
         if duplicates:
             lines.append("Possible duplicate face with " + "; ".join(owner for _, owner in duplicates))
@@ -1552,8 +1555,9 @@ class EmployeesScreen(QWidget):
             status_layout = QHBoxLayout(status)
             status_layout.setContentsMargins(8, 0, 8, 0)
             duplicates = self._duplicates_by_label.get(row["name"], [])
-            pill = StatusPill("Review match" if duplicates else
-                              ("Enrolled" if row["samples"] else "Needs enrollment"),
+            pill = StatusPill("Inactive" if not row.get("active", True) else "Review match" if duplicates else
+                              ("Active" if row["samples"] else "Needs enrollment"),
+                              "bad" if not row.get("active", True) else
                               "warn" if duplicates or not row["samples"] else "ok")
             if duplicates:
                 explanation = ("Possible duplicate face with " + "; ".join(owner for _, owner in duplicates)
@@ -1592,6 +1596,8 @@ class EmployeesScreen(QWidget):
                 review.triggered.connect(lambda checked=False, label=counterpart: self._show_duplicate_profile(label))
             if duplicates:
                 menu.addSeparator()
+            toggle = menu.addAction("Mark inactive (terminated)" if row.get("active", True) else "Reactivate employee")
+            toggle.triggered.connect(lambda checked=False, i=index: self._row_action(i, self._toggle_employee_active))
             del_act = menu.addAction("Delete employee")
             del_act.setIcon(make_icon("trash", 16, palette(self._theme)["danger"]))
             del_act.triggered.connect(lambda checked=False, i=index: self._row_action(i, self._remove_employee))
@@ -1602,12 +1608,13 @@ class EmployeesScreen(QWidget):
             self.employee_table.setRowHeight(index, 64)
         enrolled = {row["employee_id"] for row in self.rows if row["samples"]}
         review = {row["employee_id"] for row in self.rows if row["name"] in self._duplicates_by_label}
-        ready = len(enrolled-review)
+        inactive = {row["employee_id"] for row in self.rows if not row.get("active", True)}
+        ready = len(enrolled-review-inactive)
         pending = len({row["employee_id"] for row in self.rows if not row["samples"]}
                       - {row["employee_id"] for row in self.rows if row["samples"]})
         self.stat_enrolled.set_value(ready, "warn" if review else "ok" if ready else "idle")
         self.stat_enrolled.set_hint(f"{len(review)} employees need face-match review" if review
-                                    else "Employees with enrolled faces")
+                                    else f"{len(inactive)} inactive · active employees ready for attendance")
         self.stat_latest.set_value(pending, "warn" if pending else "idle")
         self.stat_samples.set_value(sum(row["samples"] for row in self.rows))
         self.enrolled_pill.set_status(f"{len(enrolled)} enrolled", "warn" if review else "ok" if ready else "idle")
@@ -1656,6 +1663,26 @@ class EmployeesScreen(QWidget):
         self.reload()
         self.engine.reload_catalog()
         self._notify("Employee updated. Employee ID and attendance history are unchanged.", "ok")
+
+    def _toggle_employee_active(self):
+        if not guard(self, "manage_employees", "change employment status"):
+            return
+        row = self.selected_row()
+        if row is None:
+            return
+        active = not row.get("active", True)
+        try:
+            employee_id = self.service.set_employee_active(row["name"], active)
+            self.engine.persistence.log_audit("employee_status_changed",
+                f"{employee_id}: {'active' if active else 'inactive'}")
+            self.engine.reload_catalog()
+        except (ValueError, OSError, RuntimeError) as exc:
+            self._notify(str(exc), "bad")
+            self.reload()
+            return
+        self.reload()
+        self._notify("Employee reactivated." if active else
+                     "Employee inactive. Attendance blocked; face templates retained for detection.", "ok")
 
     def _use_selected(self):
         row = self.selected_row()
