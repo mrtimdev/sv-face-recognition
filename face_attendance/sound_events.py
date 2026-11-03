@@ -5,7 +5,7 @@ import math
 
 from .anti_spoof import LIVE_THRESHOLD
 
-from .audio import SoundPlayer
+from .audio import SoundPlayer, format_checkin_speech
 
 SOUND_DIR = Path(__file__).resolve().parent / "assets" / "sounds"
 SOUND_LABELS = {
@@ -59,22 +59,30 @@ class EventSounds:
             return self.settings.sound_detection
         return getattr(self.settings, 'sound_' + event, True)
 
-    def play(self, event='success', preview=False):
+    def play(self, event='success', preview=False, text=None):
         now = self.clock()
         if event not in self.players or (not preview and not self._enabled(event)):
             return False
         if not preview and now - self._last.get(event, float('-inf')) < COOLDOWNS[event]:
             return False
         if self._active and now < self._active_until:
+            if event == 'success' and self._active == 'verified':
+                # Verified presence already announced check-in; do not interrupt or repeat.
+                return False
             if not preview and PRIORITY[event] <= PRIORITY[self._active]:
                 return False
         # Terminate the preceding cue even if the system player ran late.
         if self._active:
             self.players[self._active].stop()
-        if not self.players[event].play():
+        try:
+            played = self.players[event].play(text=text) if text else self.players[event].play()
+        except TypeError:
+            played = self.players[event].play()
+        if not played:
             return False
         self._last[event] = now
-        self._active, self._active_until = event, now + .85
+        active_duration = 1.6 if event in ('unknown', 'success', 'verified') else .85
+        self._active, self._active_until = event, now + active_duration
         return True
 
     def camera(self, connected, active):
@@ -120,6 +128,8 @@ class EventSounds:
             state = self._tracks.setdefault(track['track_id'],
                 {'first': now, 'last': now, 'sent': set(), 'reason': '', 'reason_since': now})
             state['last'] = now
+            state['name'] = track.get('name') or track.get('employee_name') or ''
+            state['last_name'] = track.get('last_name') or ''
             score = track.get('spoof_score')
             rejected = (isinstance(score, (int, float)) and math.isfinite(score)
                         and 0 <= score < LIVE_THRESHOLD)
@@ -138,7 +148,7 @@ class EventSounds:
                     and track.get('state') not in ('SUCCESS', 'COOLDOWN', 'CAPTURING')
                     and 'verified' not in state['sent']):
                 event = 'verified'
-            elif (condition and now - state['reason_since'] >= (3. if condition == 'liveness' else 1.5)
+            elif (condition and now - state['reason_since'] >= (3. if condition == 'liveness' else 0.25 if condition in ('unknown', 'inactive') else 1.5)
                   and condition not in state['sent']):
                 event = condition
             elif (track.get('employee_active', True) and track.get('identity_valid') and 'recognized' not in state['sent']
@@ -146,20 +156,23 @@ class EventSounds:
                     and track.get('state') not in ('SUCCESS', 'COOLDOWN', 'CAPTURING', 'ERROR')
                     and not rejected and now - state['first'] >= .35):
                 event = 'recognized'
-            elif now - state['first'] >= .35 and 'detected' not in state['sent']:
+            elif now - state['first'] >= .35 and 'detected' not in state['sent'] and condition != 'unknown':
                 event = 'detected'
             if event and self._enabled(event):
                 candidates.append((PRIORITY[event], event, state))
         # Coalesce simultaneous people into one cue; never queue stale sounds.
         if candidates:
-            _, event, _ = max(candidates, key=lambda item: item[0])
-            if self.play(event):
-                for _, candidate, state in candidates:
+            _, event, state = max(candidates, key=lambda item: item[0])
+            text = None
+            if event in ('verified', 'success'):
+                text = format_checkin_speech(state.get('last_name', ''), state.get('name', ''))
+            if self.play(event, text=text):
+                for _, candidate, s in candidates:
                     if candidate == event:
-                        state['sent'].add(event)
-                        state['sent'].add('detected')
+                        s['sent'].add(event)
+                        s['sent'].add('detected')
                         if event == 'verified':
-                            state['sent'].add('recognized')
+                            s['sent'].add('recognized')
 
     def stop(self):
         for player in self.players.values():

@@ -448,13 +448,16 @@ class EmployeesScreenTests(unittest.TestCase):
             try:
                 original_id = screen.rows[0]["employee_id"]
                 screen.employee_table.selectRow(0)
-                with patch('face_attendance.dashboard.screens.employees.QInputDialog.getText',
-                           return_value=("Edited employee", True)):
+                with patch('face_attendance.dashboard.screens.employees.EditNameDialog.ask',
+                           return_value=("Jane", "Smith", "Edited employee")):
                     screen._edit_selected()
+                self.assertEqual((screen.rows[0]["first_name"], screen.rows[0]["last_name"]), ("Jane", "Smith"))
                 screen.employee_table.selectRow(0)
                 screen._use_selected()
                 self.assertEqual(screen.name_edit.text(), "Edited employee")
+                self.assertEqual(screen.last_name_edit.text(), "Smith")
                 self.assertTrue(screen.name_edit.isReadOnly())
+                self.assertTrue(screen.last_name_edit.isReadOnly())
                 screen.pending = [np.full((240, 320, 3), 128, np.uint8)]
                 screen._save()
                 self.assertTrue(self._wait_for(application, lambda: not screen.saving))
@@ -462,6 +465,7 @@ class EmployeesScreenTests(unittest.TestCase):
                 self.assertEqual(screen.rows[0]["employee_id"], original_id)
                 self.assertEqual(screen.rows[0]["employee_name"], "Edited employee")
                 self.assertEqual(screen.rows[0]["samples"], 2)
+                self.assertEqual(screen.rows[0]["last_name"], "Smith")
                 self.assertTrue(screen._find_enrollment_photo("Seed", "Edited employee").exists())
                 self.assertEqual(screen._find_enrollment_photo("Seed", "Edited employee").parent.name, "samples")
                 self.assertFalse(screen.editor.isVisible())

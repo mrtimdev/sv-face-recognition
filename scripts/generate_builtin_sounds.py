@@ -27,6 +27,9 @@ TONES = {
 def generate():
     ROOT.mkdir(parents=True, exist_ok=True)
     for name, notes in TONES.items():
+        if name in ("unknown", "success", "verified") and (ROOT / f"{name}.wav").is_file():
+            # Spoken prompts ("This people not enrolled", "Attendance record captured", "Mr. or Ms. checked in") are kept intact.
+            continue
         samples = bytearray()
         for frequency, duration in notes:
             count = round(22050 * duration)

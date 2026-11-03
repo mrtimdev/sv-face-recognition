@@ -37,7 +37,7 @@ class FaceQuality:
             sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
             metrics = (("brightness", brightness), ("clipped_fraction", clipped),
                        ("sharpness", sharpness))
-            if brightness < 35 or brightness > 220 or clipped > .55:
+            if brightness < 20 or brightness > 230 or clipped > .55:
                 return QualityResult(False, "Improve lighting on your face", metrics)
             if sharpness < self.config.quality_min_sharpness:
                 return QualityResult(False, "Hold still - image is blurry", metrics)
@@ -53,6 +53,8 @@ class FaceQuality:
         """
         if not result.ok:
             return result
+        if not landmarks:
+            return QualityResult(False, "Face the camera - keep eyes and mouth visible", result.metrics)
         try:
             left = np.mean(np.asarray(landmarks["left_eye"], dtype=float), axis=0)
             right = np.mean(np.asarray(landmarks["right_eye"], dtype=float), axis=0)

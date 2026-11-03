@@ -46,6 +46,7 @@ def track_snapshot(track, now, tracker=None):
             "employee_id": track.employee_id or "",
             "employee_active": track.employee_active,
             "name": track.employee_name if track.employee_id else "UNKNOWN",
+            "last_name": track.employee_last_name if track.employee_id else "",
             "state": track.state.value,
             "progress": round(track.verification_progress, 3),
             "cooldown": round(track.cooldown_remaining, 1),
@@ -412,7 +413,7 @@ class AttendanceEngine(QObject):
             if (not track.visible or not track.quality_ok or track.ambiguous
                     or key in self._unknown_alerted
                     or now < self._unknown_retry.get(key, 0)
-                    or now - track.state_since < (1.0 if inactive else 2.0)
+                    or now - track.state_since < (0.2 if inactive else 0.2)
                     or observation is None or observation.generation != generation
                     or not 0 <= now - observation.captured_at <= self.config.max_result_age_sec):
                 continue

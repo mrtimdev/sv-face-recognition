@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import time
@@ -46,6 +47,31 @@ class EnrollmentTests(unittest.TestCase):
             self.assertEqual(records['First'].name, 'Updated')
             self.assertEqual(records['Alias'].name, 'Updated')
             self.assertEqual(records['Other'].name, 'Other')
+
+    def test_first_and_last_names_survive_edits_status_changes_and_deletes(self):
+        from face_attendance.enrollment import EnrollmentService, write_encodings, write_employee
+        from face_attendance.catalog import load_employee_map
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            faces, employees = root / 'faces.pickle', root / 'employees.json'
+            write_encodings(faces, {'Jane Smith': [np.ones(128)], 'Other': [np.ones(128)]})
+            write_employee(employees, 'Jane Smith', 'E1', first_name='Jane', last_name='Smith')
+            write_employee(employees, 'Other', 'E2')
+            service = EnrollmentService(faces, employees)
+            # Re-mapping without name parts (e.g. adding photos) keeps them.
+            write_employee(employees, 'Jane Smith', 'E1')
+            self.assertEqual(load_employee_map(employees)['Jane Smith'].last_name, 'Smith')
+            service.update_employee('Jane Smith', 'Jane Doe', 'Jane', 'Doe')
+            service.set_employee_active('Jane Smith', False)
+            service.delete_employee('Other')
+            record = load_employee_map(employees)['Jane Smith']
+            self.assertEqual((record.name, record.first_name, record.last_name, record.active),
+                             ('Jane Doe', 'Jane', 'Doe', False))
+            # Clearing a part removes it; None leaves it alone.
+            service.update_employee('Jane Smith', 'Jane Doe', last_name='')
+            record = load_employee_map(employees)['Jane Smith']
+            self.assertEqual((record.first_name, record.last_name), ('Jane', ''))
+            self.assertNotIn('last_name', json.loads(employees.read_text())['Jane Smith'])
 
     def test_existing_format_and_alias_mapping(self):
         with tempfile.TemporaryDirectory() as directory:

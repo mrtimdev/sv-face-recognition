@@ -18,6 +18,7 @@ from ..access import guard
 from ..icons import IconLabel, apply_button_icon
 from ..bridge import to_pixmap
 from ...sound_events import EventSounds, SOUND_LABELS
+from ...audio import format_checkin_speech
 from ..theme import palette, tone_color
 from ..widgets import (ActivityFeed, Card, StatCard,
                        ToastBar, ToggleSwitch, VideoView)
@@ -707,7 +708,11 @@ class LiveScreen(QWidget):
             f"Captured {job.employee_name} \u2014 saving attendance...", "warn")
 
     def on_saved(self, result):
-        self._sound.play()
+        text = format_checkin_speech(result.job.last_name, result.job.employee_name)
+        try:
+            self._sound.play(text=text)
+        except TypeError:
+            self._sound.play()
         recorded = datetime.fromtimestamp(result.recorded_at or 0).strftime("%H:%M:%S")
         self._log("INFO", f"{result.job.employee_name} ({result.job.employee_id}) "
                   f"recorded at {recorded}, {result.job.duration:.1f}s verified")

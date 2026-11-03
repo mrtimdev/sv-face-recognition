@@ -122,8 +122,10 @@ class AntiSpoofService:
 class PresentationGuard:
     """Require sustained, current model agreement; reject missing evidence."""
 
-    def __init__(self, min_span=MIN_SAMPLE_SPAN):
-        self.min_span = max(MIN_SAMPLE_SPAN, min_span)
+    def __init__(self, min_span=None, min_samples=None):
+        self.min_span = MIN_SAMPLE_SPAN if min_span is None else max(0.0, float(min_span))
+        self.min_samples = (MIN_SAMPLES if min_samples is None
+                            else max(1, int(min_samples)))
         self._state = {}
 
     def update(self, track_id, score, captured_at):
@@ -146,13 +148,13 @@ class PresentationGuard:
         if not 0 <= now - state["last"] <= SAMPLE_MAX_AGE:
             self.reset(track_id)
             return False
-        return state["count"] >= MIN_SAMPLES and state["last"] - state["first"] >= self.min_span
+        return state["count"] >= self.min_samples and (self.min_samples <= 1 or state["last"] - state["first"] >= self.min_span)
 
     def progress(self, track_id):
         state = self._state.get(track_id)
         if state is None:
             return 0.0
-        return min(1., state["count"] / MIN_SAMPLES, (state["last"] - state["first"]) / self.min_span)
+        return min(1., state["count"] / self.min_samples, 1.0 if self.min_span <= 0 else (state["last"] - state["first"]) / self.min_span)
 
     def reset(self, track_id):
         self._state.pop(track_id, None)

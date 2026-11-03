@@ -12,7 +12,7 @@ from .enrollment import FACE_BACKEND_LOCK
 from .face_backend import OpenCVFaceBackend
 from .geometry import association_cost, iou
 from .models import Detection, RecognitionResult
-from .quality import FaceQuality
+from .quality import FaceQuality, QualityResult
 
 
 class RecognitionService:
@@ -127,7 +127,9 @@ class RecognitionService:
                     quality_ok=False, quality_prompt=quality[index].prompt,
                     quality_metrics=quality[index].metrics))
                 continue
-            # Always inspect the current presentation, even when identity is reused.
+            # Run anti-spoof on candidate recognized employees or tracks evaluating presence.
+            # Skip heavy dual-model inference on unknown faces to make unknown detection instantaneous.
+            is_candidate = (employee is not None) or (hint is not None and getattr(hint, "employee_id", None))
             if hasattr(self.anti_spoof, "inspect"):
                 inspection = self.anti_spoof.inspect(packet.frame, box)
                 spoof_score, spoof_error = inspection["live_score"], inspection["error"]

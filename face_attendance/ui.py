@@ -164,7 +164,7 @@ class UIRenderer:
         l, r, t, b = max(2, l), min(w - 3, r), max(2, t), min(h - 3, b)
         if r <= l or b <= t:
             return
-        known = bool(track.employee_id) and track.state != State.UNKNOWN
+        known = bool(track.employee_id or track.employee_name) and track.state != State.UNKNOWN
         color = GREEN if known else RED if track.state == State.UNKNOWN else AMBER
         recorded = track.state in (State.SUCCESS, State.COOLDOWN)
         if known and not recorded and track.state != State.CAPTURING:
@@ -214,7 +214,9 @@ class UIRenderer:
         # rather than waiting for the full PAD dwell before asking for a blink.
         if live_sample(track.spoof_score) and not track.liveness_ok:
             liveness_label = track.liveness_prompt
-        if state == State.INACTIVE:
+        if state == State.UNKNOWN:
+            liveness_label = "Visitor / Not enrolled"
+        elif state == State.INACTIVE:
             liveness_label = "Attendance disabled for inactive employee"
         if recorded or state == State.CAPTURING:
             liveness_label = "Attendance recorded" if state != State.CAPTURING else "Saving attendance"

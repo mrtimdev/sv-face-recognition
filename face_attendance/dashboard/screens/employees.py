@@ -15,7 +15,7 @@ from PyQt6.QtCore import QObject, QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                              QLabel, QLineEdit, QListWidget, QListWidgetItem, QComboBox, QDialog,
-                             QHeaderView, QInputDialog, QMenu, QTableWidget, QTableWidgetItem,
+                             QDialogButtonBox, QHeaderView, QMenu, QTableWidget, QTableWidgetItem,
                              QAbstractItemView, QMessageBox, QPushButton, QScrollArea, QSpinBox,
                              QStackedWidget, QVBoxLayout, QWidget)
 
@@ -109,16 +109,18 @@ class EnrollmentRunner(QObject):
         super().__init__(parent)
         self.service = service
 
-    def submit(self, images, name, employee_id, check_quality=True):
+    def submit(self, images, name, employee_id, check_quality=True, first_name="", last_name=""):
         copies = [image.copy() for image in images if image is not None]
         thread = threading.Thread(target=self._work,
-                                  args=(self.service, copies, name, employee_id, check_quality),
+                                  args=(self.service, copies, name, employee_id, check_quality,
+                                        first_name, last_name),
                                   name="enrollment", daemon=True)
         thread.start()
 
-    def _work(self, service, images, name, employee_id, check_quality):
+    def _work(self, service, images, name, employee_id, check_quality, first_name="", last_name=""):
         try:
-            outcome = service.enroll_many(images, name, employee_id, check_quality)
+            outcome = service.enroll_many(images, name, employee_id, check_quality,
+                                          first_name=first_name, last_name=last_name)
         except Exception as exc:
             outcome = EnrollmentOutcome("error", str(exc), name=name, employee_id=employee_id or "")
         self.finished.emit(outcome)
@@ -183,6 +185,83 @@ class DropLabel(QLabel):
 # ---------------------------------------------------------------------------
 #  Main screen
 # ---------------------------------------------------------------------------
+
+def compose_full_name(first_name, last_name):
+    return " ".join(part for part in (first_name.strip(), last_name.strip()) if part)
+
+
+class NameFields(QObject):
+    """First, last and full name inputs; the full name follows the parts until edited by hand."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.first = QLineEdit()
+        self.last = QLineEdit()
+        self.full = QLineEdit()
+        for edit, hint in ((self.first, "e.g. Jane"), (self.last, "e.g. Smith"),
+                           (self.full, "Required, e.g. Jane Smith")):
+            edit.setMaxLength(100)
+            edit.setPlaceholderText(hint)
+        self._composed = ""
+        self.first.textChanged.connect(self._compose)
+        self.last.textChanged.connect(self._compose)
+
+    def _compose(self):
+        composed = compose_full_name(self.first.text(), self.last.text())
+        if self.full.text().strip() == self._composed:
+            self.full.setText(composed)
+        self._composed = composed
+
+    def add_to(self, grid, row=0):
+        for offset, (label, edit) in enumerate((("First name", self.first), ("Last name", self.last),
+                                                ("Full name", self.full))):
+            grid.addWidget(QLabel(label), row + offset, 0)
+            grid.addWidget(edit, row + offset, 1)
+        return row + 3
+
+    def set_values(self, first_name="", last_name="", full_name=""):
+        self.first.setText(first_name)
+        self.last.setText(last_name)
+        self.full.setText(full_name)
+        self._composed = compose_full_name(first_name, last_name)
+
+    def values(self):
+        return self.first.text().strip(), self.last.text().strip(), self.full.text().strip()
+
+    def set_read_only(self, read_only):
+        for edit in (self.first, self.last, self.full):
+            edit.setReadOnly(read_only)
+
+
+class EditNameDialog(QDialog):
+    """Edit an employee's first, last and full name; the employee ID never changes."""
+
+    def __init__(self, row, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit employee")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Employee ID: " + row["employee_id"]))
+        form = QGridLayout()
+        form.setSpacing(8)
+        self.names = NameFields(self)
+        self.names.add_to(form)
+        self.names.set_values(row.get("first_name", ""), row.get("last_name", ""), row["employee_name"])
+        layout.addLayout(form)
+        hint = QLabel("Check-in speech says \"Thank you\" and the last name.")
+        hint.setObjectName("screenSubtitle")
+        layout.addWidget(hint)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.setMinimumWidth(380)
+
+    @classmethod
+    def ask(cls, row, parent=None):
+        """Return ``(first, last, full)`` or ``None`` when cancelled."""
+        dialog = cls(row, parent)
+        return dialog.names.values() if dialog.exec() == QDialog.DialogCode.Accepted else None
+
 
 class EmployeeDialog(QDialog):
     def reject(self):
@@ -365,19 +444,18 @@ class EmployeesScreen(QWidget):
 
         form = QGridLayout()
         form.setSpacing(8)
-        form.addWidget(QLabel("Display name"), 0, 0)
-        self.name_edit = QLineEdit()
-        self.name_edit.setMaxLength(100)
-        self.name_edit.setPlaceholderText("Required, e.g. Jane Smith")
-        form.addWidget(self.name_edit, 0, 1)
-        form.addWidget(QLabel("Employee ID"), 1, 0)
+        self.names = NameFields(self)
+        self.first_name_edit, self.last_name_edit, self.name_edit = \
+            self.names.first, self.names.last, self.names.full
+        row = self.names.add_to(form)
+        form.addWidget(QLabel("Employee ID"), row, 0)
         self.id_edit = QLineEdit()
         self.id_edit.setMaxLength(100)
         self.id_edit.setPlaceholderText("Optional, e.g. EMP-125")
-        form.addWidget(self.id_edit, 1, 1)
+        form.addWidget(self.id_edit, row, 1)
         self.quality_check = QCheckBox("Reject low-quality samples")
         self.quality_check.setChecked(True)
-        form.addWidget(self.quality_check, 2, 0, 1, 2)
+        form.addWidget(self.quality_check, row + 1, 0, 1, 2)
         card.add_layout(form)
 
         # Segmented control for capture / upload
@@ -682,8 +760,9 @@ class EmployeesScreen(QWidget):
         text = text.casefold().strip()
         shown = 0
         for index, row in enumerate(self.rows):
-            matches = not text or any(text in str(row[key]).casefold()
-                                     for key in ("employee_name", "employee_id", "name"))
+            matches = not text or any(text in str(row.get(key, "")).casefold()
+                                     for key in ("employee_name", "first_name", "last_name",
+                                                 "employee_id", "name"))
             status = self.status_filter.currentIndex()
             visible = matches and (status == 0 or (status == 1 and row["samples"] > 0 and row.get("active", True))
                                    or (status == 2 and row["samples"] == 0)
@@ -808,9 +887,10 @@ class EmployeesScreen(QWidget):
         self.editor_toast.hide_message()
         self.editor_toast.hide_message()
         self._editing_label = row["name"] if row else None
-        self.name_edit.setText(row["employee_name"] if row else "")
+        self.names.set_values(row.get("first_name", "") if row else "", row.get("last_name", "") if row else "",
+                              row["employee_name"] if row else "")
         self.id_edit.setText(row["employee_id"] if row else "")
-        self.name_edit.setReadOnly(row is not None)
+        self.names.set_read_only(row is not None)
         self.id_edit.setReadOnly(row is not None)
         title = "Update employee photo" if row else "Add employee"
         self.wizard_card.title_label.setText(title)
@@ -822,7 +902,7 @@ class EmployeesScreen(QWidget):
         self.right_stack.setCurrentIndex(0)
         self.editor.show()
         self.coach.setText("Start the preview to capture a face, or choose Upload Photo.")
-        self.name_edit.setFocus()
+        self.first_name_edit.setFocus()
 
     def _editor_closed(self, _result):
         self.countdown_timer.stop()
@@ -880,7 +960,8 @@ class EmployeesScreen(QWidget):
         self.profile_pill.set_status(
             "Inactive" if not row.get("active", True) else "Review face match" if duplicates else ("Active" if row["samples"] else "Needs enrollment"),
             "bad" if not row.get("active", True) else "warn" if duplicates or not row["samples"] else "ok")
-        lines = [f"{row['samples']} enrolled sample(s)"]
+        lines = [f"First name: {row.get('first_name') or '—'}  •  Last name: {row.get('last_name') or '—'}",
+                 f"{row['samples']} enrolled sample(s)"]
         if duplicates:
             lines.append("Possible duplicate face with " + "; ".join(owner for _, owner in duplicates))
             lines.append("Compare both profiles. Delete only a confirmed mistaken enrollment using its directory action.")
@@ -1382,9 +1463,10 @@ class EmployeesScreen(QWidget):
     def _save(self):
         if self.saving or self.validating:
             return
-        name = self._editing_label or self.name_edit.text().strip()
+        first_name, last_name, full_name = self.names.values()
+        name = self._editing_label or full_name
         if not name:
-            self._notify("Enter the employee display name.", "warn")
+            self._notify("Enter the employee full name.", "warn")
             return
         if not self.pending:
             self._notify("Capture or upload at least one sample.", "warn")
@@ -1406,8 +1488,10 @@ class EmployeesScreen(QWidget):
         self.save_button.setEnabled(False)
         self.save_button.setText("Saving...")
         self._notify("Encoding samples...", "info")
+        # Updating photos keeps the stored name parts; the fields are read-only then.
         self.runner.submit(self.pending, name, self.id_edit.text().strip(),
-                           self.quality_check.isChecked())
+                           self.quality_check.isChecked(),
+                           *(("", "") if self._editing_label else (first_name, last_name)))
 
     def on_enrollment_finished(self, outcome):
         self.saving = False
@@ -1435,7 +1519,7 @@ class EmployeesScreen(QWidget):
         self.pending.clear()
         self._refresh_samples()
         self._notify(f"{outcome.message}. Total samples: {outcome.total_samples}", "ok")
-        self.name_edit.clear()
+        self.names.set_values()
         self.id_edit.clear()
         self.reload()
         self.engine.reload_catalog()
@@ -1651,12 +1735,12 @@ class EmployeesScreen(QWidget):
         row = self.selected_row()
         if row is None:
             return
-        name, accepted = QInputDialog.getText(self, "Edit employee", "Display name\nEmployee ID: " + row["employee_id"],
-                                              text=row["employee_name"])
-        if not accepted:
+        names = EditNameDialog.ask(row, self)
+        if names is None:
             return
+        first_name, last_name, full_name = names
         try:
-            self.service.update_employee(row["name"], name)
+            self.service.update_employee(row["name"], full_name, first_name, last_name)
         except (ValueError, OSError) as exc:
             self._notify(str(exc), "bad")
             return

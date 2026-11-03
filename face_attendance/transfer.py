@@ -25,7 +25,7 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
-from .catalog import legacy_employee_id, load_employee_map
+from .catalog import employee_record, legacy_employee_id, load_employee_map
 from .enrollment import _atomic_write, _catalog_locked, find_face_duplicate, write_encodings
 from .models import Employee
 from .enrollment_photos import photo_directory, photo_path, portrait_name, portrait_path
@@ -89,6 +89,8 @@ def export_employees(destination, encodings_path, employees_path):
             item["employee_id"] = records[label].employee_id
             item["name"] = records[label].name
             item["employment_status"] = records[label].status
+            item["first_name"] = records[label].first_name
+            item["last_name"] = records[label].last_name
         elif any(e.employee_id == legacy_employee_id(label) and not e.active for e in records.values()):
             item.update(employee_id=legacy_employee_id(label), name=label, employment_status="inactive")
         for vector, reference in zip(samples[label], refs.get(label, [])):
@@ -274,8 +276,10 @@ def _merge(archive, items, encodings_path, employees_path, duplicate_distance=.5
                 status = item.get("employment_status", "active")
                 if status not in ("active", "inactive"):
                     raise TransferError("Invalid employment status in import")
-                new_records[label] = {"employee_id": given_id, "name": name, "status": status}
-                records[label] = Employee(given_id, name, status == "active")
+                records[label] = Employee(given_id, name, status == "active",
+                                          first_name=str(item.get("first_name") or "").strip(),
+                                          last_name=str(item.get("last_name") or "").strip())
+                new_records[label] = employee_record(records[label])
             owners.setdefault(employee_id, name)
             (report.updated if id_here is not None else report.added).append(name)
             report.samples += len(fresh)
@@ -283,8 +287,7 @@ def _merge(archive, items, encodings_path, employees_path, duplicate_distance=.5
             return report
         previous = employees_path.read_bytes() if new_records and employees_path.exists() else None
         if new_records:
-            mapping = {key: {"employee_id": value.employee_id, "name": value.name, "status": value.status}
-                       for key, value in records.items()}
+            mapping = {key: employee_record(value) for key, value in records.items()}
             mapping.update(new_records)
             _atomic_write(employees_path, lambda handle: json.dump(mapping, handle, ensure_ascii=False,
                                                                      indent=2), binary=False)

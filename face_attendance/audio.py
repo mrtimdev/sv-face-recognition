@@ -8,6 +8,18 @@ import threading
 import time
 
 
+def format_checkin_speech(last_name="", full_name=""):
+    """Check-in greeting, e.g. 'Thank you Smith'.
+
+    Uses the employee's last name, falling back to the full name for records
+    enrolled before names were split, and to a plain 'Thank you' when unknown.
+    """
+    name = str(last_name or "").strip() or str(full_name or "").strip()
+    if name.upper() == "UNKNOWN":
+        name = ""
+    return f"Thank you {name}" if name else "Thank you"
+
+
 class SoundPlayer:
     def __init__(self, path, cooldown_sec=1.0):
         self._path = str(Path(path).expanduser().resolve())
@@ -40,7 +52,7 @@ class SoundPlayer:
     def available(self):
         return any(value is not None for value in (self._wave, self._command, self._winsound))
 
-    def play(self):
+    def play(self, text=None):
         with self._lock:
             now = time.monotonic()
             if not self.available or now - self._last_played < self._cooldown:
@@ -48,6 +60,33 @@ class SoundPlayer:
             if self._process is not None and self._process.poll() is None:
                 return False
             try:
+                if text:
+                    clean = str(text).replace("'", "").replace('"', '').strip()
+                    if sys.platform == "darwin" and Path("/usr/bin/say").is_file():
+                        self._process = subprocess.Popen(
+                            ["/usr/bin/say", "-v", "Samantha", "-r", "205", clean],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self._last_played = now
+                        return True
+                    elif sys.platform == "win32":
+                        self._process = subprocess.Popen(
+                            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                             f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{clean}')"],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self._last_played = now
+                        return True
+                    elif shutil.which("spd-say"):
+                        self._process = subprocess.Popen(
+                            ["spd-say", "-r", "10", clean],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self._last_played = now
+                        return True
+                    elif shutil.which("espeak"):
+                        self._process = subprocess.Popen(
+                            ["espeak", "-s", "175", clean],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        self._last_played = now
+                        return True
                 if self._command:
                     self._process = subprocess.Popen(
                         self._command, stdin=subprocess.DEVNULL,

@@ -27,6 +27,9 @@ class CameraManager:
     def _open(self):
         cfg = self.config
         if isinstance(cfg.source, str) and "://" in cfg.source:
+            # Low latency FFmpeg options for RTSP/network camera streams
+            import os
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|max_delay;50000"
             # Timeouts must be supplied at open, and are supported by FFmpeg.
             cap = cv2.VideoCapture(cfg.source, cv2.CAP_FFMPEG, [
                 cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, cfg.camera_timeout_ms,
@@ -70,12 +73,15 @@ class CameraManager:
                 else:
                     generation += 1
                     count, fps_since = 0, self._clock()
+                    cfg_w, cfg_h = getattr(self.config, "camera_width", 1280), getattr(self.config, "camera_height", 720)
                     while not self.stop_event.is_set():
                         ok, frame = cap.read()
                         now = self._clock()
                         if not ok or frame is None or frame.size == 0:
                             self._set_status("RECONNECTING")
                             break
+                        if frame.shape[1] > cfg_w or frame.shape[0] > cfg_h:
+                            frame = cv2.resize(frame, (cfg_w, cfg_h), interpolation=cv2.INTER_LINEAR)
                         # Opening succeeds even when a stream never yields a frame.
                         # Reset retry pressure only after actual capture succeeds.
                         backoff = retry_delay

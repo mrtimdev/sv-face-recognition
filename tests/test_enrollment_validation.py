@@ -160,8 +160,8 @@ class EnrollmentValidationTests(unittest.TestCase):
         from face_attendance.enrollment import write_employee
         original = b'{"Bob":{"employee_id":"B","name":"Bob"}}\n'
         self.mapping.write_bytes(original)
-        def interrupted(*args):
-            write_employee(*args)
+        def interrupted(*args, **kwargs):
+            write_employee(*args, **kwargs)
             raise OSError('interrupted after mapping write')
         with patch('face_attendance.enrollment.write_employee',side_effect=interrupted):
             result = self.service.enroll(image(),'Alice','A')

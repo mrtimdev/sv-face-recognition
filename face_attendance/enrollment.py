@@ -19,7 +19,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .catalog import legacy_employee_id, load_employee_map
+from .catalog import employee_record, legacy_employee_id, load_employee_map
+from .models import Employee
 from .template_store import (read_templates, template_payload, read_template_bundle,
                              preserve_photo_references)
 from .enrollment_photos import save_sample_photo, remove_sample_photos
@@ -102,20 +103,24 @@ def write_encodings(path, data, photos=None):
 
 
 @_catalog_locked
-def write_employee(path, name, employee_id, display_name=None):
+def write_employee(path, name, employee_id, display_name=None, gender=None, first_name=None, last_name=None):
     """Map an enrollment label to a permanent ID without silently reassigning it."""
     records = load_employee_map(path)
     previous = records.get(name)
     if previous and previous.employee_id != employee_id:
         raise ValueError(f"{name!r} is already mapped to {previous.employee_id}; "
                          "use a deliberate ID migration to change it")
-    data = {key: {"employee_id": value.employee_id, "name": value.name, "status": value.status}
-            for key, value in records.items()}
-    canonical = previous.name if previous else next(
-        (employee.name for employee in records.values() if employee.employee_id == employee_id), display_name or name)
+    # Aliases of one permanent ID share its display name and name parts.
+    known = previous or next((e for e in records.values() if e.employee_id == employee_id), None)
+    canonical = known.name if known else display_name or name
     active = all(e.active for e in records.values() if e.employee_id == employee_id)
-    data[name] = {"employee_id": employee_id, "name": canonical,
-                  "status": "active" if active else "inactive"}
+
+    def keep(value, field):
+        return str(value).strip() if value is not None else getattr(known, field) if known else ""
+
+    records[name] = Employee(employee_id, canonical, active, gender=keep(gender, "gender"),
+                             first_name=keep(first_name, "first_name"), last_name=keep(last_name, "last_name"))
+    data = {key: employee_record(value) for key, value in records.items()}
     _atomic_write(path, lambda handle: json.dump(data, handle, ensure_ascii=False, indent=2), binary=False)
     return canonical
 
@@ -168,6 +173,8 @@ def employee_rows(encodings_path, employees_path):
         rows.append({"name": name,
                      "employee_id": employee.employee_id if employee else legacy_employee_id(name),
                      "employee_name": employee.name if employee else name,
+                     "first_name": employee.first_name if employee else "",
+                     "last_name": employee.last_name if employee else "",
                      "mapped": employee is not None,
                      "active": employee.active if employee else legacy_employee_id(name) not in inactive_ids,
                      "status": employee.status if employee else
@@ -284,12 +291,14 @@ class EnrollmentService:
             records = load_employee_map(self.employees_path)
         return FaceDuplicateIndex(samples,records).conflicts(self.duplicate_distance)
 
-    def enroll_many(self, images, name, employee_id=None, check_quality=None):
+    def enroll_many(self, images, name, employee_id=None, check_quality=None, first_name="", last_name=""):
         name = str(name or "").strip()
         employee_id = str(employee_id or "").strip()
+        first_name, last_name = str(first_name or "").strip(), str(last_name or "").strip()
         if not name:
             return EnrollmentOutcome("invalid_name", "Enter the employee name")
-        if any(len(value) > 100 or any(ord(char) < 32 for char in value) for value in (name, employee_id)):
+        if any(len(value) > 100 or any(ord(char) < 32 for char in value)
+               for value in (name, employee_id, first_name, last_name)):
             return EnrollmentOutcome("invalid_name", "Use at most 100 characters and no control characters for names and IDs")
         try:
             images = list(islice(() if images is None else images, MAX_ENROLLMENT_SAMPLES + 1))
@@ -306,12 +315,12 @@ class EnrollmentService:
             if conflict:
                 return EnrollmentOutcome(conflict, message, name=name, employee_id=employee_id)
             outcomes = [self._prepare(image, check_quality) for image in images]
-            return self._commit_samples(images, outcomes, name, employee_id)
+            return self._commit_samples(images, outcomes, name, employee_id, first_name, last_name)
         except (ValueError, OSError, pickle.UnpicklingError, EOFError, AttributeError, cv2.error) as exc:
             return EnrollmentOutcome("error", str(exc), name=name, employee_id=employee_id)
 
     @_catalog_locked
-    def _commit_samples(self, images, outcomes, name, employee_id):
+    def _commit_samples(self, images, outcomes, name, employee_id, first_name="", last_name=""):
         """Re-read at commit time; serialize service writers in this Python process."""
         created_photos = []
         mapping_written = False
@@ -365,10 +374,11 @@ class EnrollmentService:
                     created_photos.append(save_sample_photo(self.encodings_path, image))
             data[name].extend(encodings)
             photos[name].extend(path.name for path in created_photos)
-            if employee_id:
+            if employee_id or first_name or last_name:
                 mapping_before = self.employees_path.read_bytes() if self.employees_path.exists() else None
                 mapping_written = True
-                canonical = write_employee(self.employees_path, name, employee_id)
+                canonical = write_employee(self.employees_path, name, identity,
+                                           first_name=first_name or None, last_name=last_name or None)
             else:
                 canonical = previous.name if previous else name
             write_encodings(self.encodings_path, data, photos=photos)
@@ -395,26 +405,30 @@ class EnrollmentService:
                                  issues=tuple(rejected), photo_paths=tuple(str(path) for path in created_photos))
 
     @_catalog_locked
-    def update_employee(self, name, display_name):
-        """Edit the display name while retaining enrollment labels and permanent IDs.
+    def update_employee(self, name, display_name, first_name=None, last_name=None):
+        """Edit the full name and name parts while retaining enrollment labels and permanent IDs.
 
-        Aliases for the same ID receive the same display name. Historical
-        attendance rows are never rewritten.
+        Aliases for the same ID receive the same names; ``None`` keeps a name
+        part unchanged. Historical attendance rows are never rewritten.
         """
         display_name = str(display_name or "").strip()
         if not display_name:
-            raise ValueError("Enter the employee display name")
+            raise ValueError("Enter the employee full name")
+        parts = {key: str(value).strip() for key, value in
+                 (("first_name", first_name), ("last_name", last_name)) if value is not None}
+        if any(len(value) > 100 or any(ord(char) < 32 for char in value)
+               for value in (display_name, *parts.values())):
+            raise ValueError("Use at most 100 characters and no control characters for names")
         data = read_encodings(self.encodings_path)
         if name not in data:
             raise ValueError("Employee enrollment no longer exists; refresh the list")
         records = load_employee_map(self.employees_path)
         employee_id = records[name].employee_id if name in records else legacy_employee_id(name)
-        updated = {key: {"employee_id": record.employee_id,
-                         "name": display_name if record.employee_id == employee_id else record.name,
-                         "status": record.status}
+        updated = {key: employee_record(record, name=display_name, **parts)
+                   if record.employee_id == employee_id else employee_record(record)
                    for key, record in records.items()}
-        updated[name] = {"employee_id": employee_id, "name": display_name,
-                         "status": records[name].status if name in records else "active"}
+        if name not in records:
+            updated[name] = employee_record(Employee(employee_id, display_name), **parts)
         _atomic_write(self.employees_path,
                       lambda handle: json.dump(updated, handle, ensure_ascii=False, indent=2),
                       binary=False)
@@ -429,9 +443,8 @@ class EnrollmentService:
             raise ValueError("Employee enrollment no longer exists; refresh the list")
         records = load_employee_map(self.employees_path)
         employee_id = records[name].employee_id if name in records else legacy_employee_id(name)
-        updated = {key: {"employee_id": e.employee_id, "name": e.name,
-                         "status": ("active" if active else "inactive")
-                         if e.employee_id == employee_id else e.status}
+        updated = {key: employee_record(e, status=("active" if active else "inactive")
+                                        if e.employee_id == employee_id else e.status)
                    for key, e in records.items()}
         if name not in updated:
             updated[name] = {"employee_id": employee_id, "name": name,
@@ -453,8 +466,7 @@ class EnrollmentService:
         remove_sample_photos(self.encodings_path, removed_photos)
         records = load_employee_map(self.employees_path)
         if name in records:
-            remaining = {key: {"employee_id": value.employee_id, "name": value.name, "status": value.status}
-                         for key, value in records.items() if key != name}
+            remaining = {key: employee_record(value) for key, value in records.items() if key != name}
             _atomic_write(self.employees_path,
                           lambda handle: json.dump(remaining, handle, ensure_ascii=False, indent=2),
                           binary=False)

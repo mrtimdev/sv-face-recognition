@@ -27,6 +27,9 @@ class Employee:
     employee_id: str
     name: str
     active: bool = True
+    gender: str = ""
+    first_name: str = ""
+    last_name: str = ""
 
     @property
     def status(self):
@@ -91,6 +94,7 @@ class FaceTrack:
     last_seen: float
     employee_id: Optional[str] = None
     employee_name: str = ""
+    employee_last_name: str = ""
     employee_active: bool = True
     last_recognized: float = float("-inf")
     last_encoded_sequence: int = -1
@@ -177,6 +181,7 @@ class CaptureJob:
     crop_box: Optional[Box] = None
     source_sequence: Optional[int] = None
     source_generation: Optional[int] = None
+    last_name: str = ""
 
 
 @dataclass(frozen=True)

@@ -51,9 +51,9 @@ class EmployeeSetupTests(unittest.TestCase):
         from face_attendance.dashboard.screens.employees import EnrollmentRunner
         from face_attendance.enrollment import EnrollmentOutcome
         calls, scheduled = [], []
-        original = SimpleNamespace(enroll_many=lambda *args: (calls.append('original'),
+        original = SimpleNamespace(enroll_many=lambda *args, **kwargs: (calls.append('original'),
                                     EnrollmentOutcome('enrolled'))[1])
-        replacement = SimpleNamespace(enroll_many=lambda *args: calls.append('replacement'))
+        replacement = SimpleNamespace(enroll_many=lambda *args, **kwargs: calls.append('replacement'))
         runner = EnrollmentRunner(original)
         def deferred_thread(target, args, **kwargs):
             scheduled.append((target,args))

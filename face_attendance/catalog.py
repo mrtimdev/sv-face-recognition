@@ -1,5 +1,6 @@
 """Versioned SFace enrollment loading and stable employee identifiers."""
 import json
+from dataclasses import replace
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -11,6 +12,15 @@ from .template_store import read_templates
 
 def legacy_employee_id(name):
     return "local-" + str(uuid5(NAMESPACE_URL, "face-attendance/" + name))
+
+
+def employee_record(employee, **changes):
+    """Serialize one employee for employees.json, keeping optional name parts."""
+    record = {"employee_id": employee.employee_id, "name": employee.name, "status": employee.status,
+              "first_name": employee.first_name, "last_name": employee.last_name, "gender": employee.gender}
+    record.update(changes)
+    return {key: value for key, value in record.items()
+            if value or key in ("employee_id", "name", "status")}
 
 
 def load_employee_map(path):
@@ -28,11 +38,13 @@ def load_employee_map(path):
         status = record.get("status", "active")
         if status not in ("active", "inactive"):
             raise ValueError(f"Invalid employment status for {name!r}")
-        result[name] = Employee(str(record["employee_id"]), str(record.get("name", name)), status == "active")
+        result[name] = Employee(str(record["employee_id"]), str(record.get("name", name)), status == "active",
+                                gender=str(record.get("gender", "")).strip().lower(),
+                                first_name=str(record.get("first_name", "")).strip(),
+                                last_name=str(record.get("last_name", "")).strip())
     # One employment status per permanent ID, including legacy aliases.
     inactive = {e.employee_id for e in result.values() if not e.active}
-    result = {label: Employee(e.employee_id, e.name, e.employee_id not in inactive)
-              for label, e in result.items()}
+    result = {label: replace(e, active=e.employee_id not in inactive) for label, e in result.items()}
     return result
 
 

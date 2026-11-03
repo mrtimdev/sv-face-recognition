@@ -12,8 +12,10 @@ class Player:
     def __init__(self, path, cooldown_sec=0):
         self.name = Path(path).stem
         self.plays = self.stops = 0
-    def play(self):
+        self.texts = []
+    def play(self, text=None):
         self.plays += 1
+        self.texts.append(text)
         return True
     def stop(self):
         self.stops += 1
@@ -36,9 +38,20 @@ class SoundEventTests(unittest.TestCase):
             with wave.open(str(path)) as wav:
                 self.assertEqual(wav.getsampwidth(), 2)
                 self.assertEqual(wav.getnchannels(), 1)
-                self.assertLess(wav.getnframes() / wav.getframerate(), .85)
+                max_dur = 1.6 if event in ('unknown', 'success', 'verified') else .85
+                self.assertLess(wav.getnframes() / wav.getframerate(), max_dur)
             contents.add(path.read_bytes())
         self.assertEqual(len(contents), len(SOUND_LABELS))
+
+    def test_unknown_plays_promptly_without_detected_chime(self):
+        track = {'track_id': 1, 'visible': True, 'state': 'UNKNOWN', 'quality_ok': True}
+        self.sample(0, [track])
+        self.sample(0.2, [track])
+        self.assertEqual(self.sounds.players['unknown'].plays, 0)
+        self.assertEqual(self.sounds.players['detected'].plays, 0)
+        self.sample(0.4, [track])
+        self.assertEqual(self.sounds.players['unknown'].plays, 1)
+        self.assertEqual(self.sounds.players['detected'].plays, 0)
 
     def test_detected_is_debounced_and_group_coalesced(self):
         tracks = [{'track_id': i, 'visible': True, 'state': 'RECOGNIZING'} for i in range(5)]
@@ -194,3 +207,23 @@ class SoundEventTests(unittest.TestCase):
         self.sample(2, [track])
         self.assertEqual(self.sounds.players['recognized'].plays, 0)
         self.assertEqual(self.sounds.players['guidance'].plays, 1)
+
+    def test_format_checkin_speech(self):
+        from face_attendance.audio import format_checkin_speech
+        self.assertEqual(format_checkin_speech("Smith", "Jane Smith"), "Thank you Smith")
+        self.assertEqual(format_checkin_speech(" Smith "), "Thank you Smith")
+        # Records enrolled before names were split fall back to the full name.
+        self.assertEqual(format_checkin_speech("", "Nget Tim"), "Thank you Nget Tim")
+        self.assertEqual(format_checkin_speech("", ""), "Thank you")
+        self.assertEqual(format_checkin_speech("", "UNKNOWN"), "Thank you")
+
+    def test_verified_presence_speech_suppresses_subsequent_duplicate_success(self):
+        track = dict(track_id=1, visible=True, state='VERIFYING', identity_valid=True,
+                     quality_ok=True, spoof_ok=True, liveness_ok=True, name="Jane Smith", last_name="Smith")
+        self.sample(0, [track])
+        self.sample(0.1, [track])
+        self.assertEqual(self.sounds.players['verified'].plays, 1)
+        self.assertEqual(self.sounds.players['verified'].texts, ["Thank you Smith"])
+        # 0.05s later attendance commits: success cue does not cut off or duplicate check-in speech
+        self.now = 0.15
+        self.assertFalse(self.sounds.play('success'))

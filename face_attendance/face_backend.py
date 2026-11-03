@@ -24,14 +24,15 @@ MODEL_HASHES = {
 class OpenCVFaceBackend:
     model_id = MODEL_ID
 
-    def __init__(self, model_dir=MODEL_DIR):
+    def __init__(self, model_dir=MODEL_DIR, score_threshold=0.45):
         paths = {}
         for name, digest in MODEL_HASHES.items():
             path = Path(model_dir) / name
             if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 raise ValueError(f'Recognition model damaged: {name}; reinstall application')
             paths[name] = str(path)
-        self.detector = cv2.FaceDetectorYN.create(paths['yunet.onnx'], '', (320, 320), .8, .3, 5000)
+        self.score_threshold = score_threshold
+        self.detector = cv2.FaceDetectorYN.create(paths['yunet.onnx'], '', (320, 320), score_threshold, .3, 5000)
         self.recognizer = cv2.FaceRecognizerSF.create(paths['sface.onnx'], '')
         self.mesh = cv2.dnn.readNetFromONNX(paths['face_mesh.onnx'])
         self.mesh.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
@@ -122,8 +123,8 @@ class OpenCVFaceBackend:
             blob = cv2.dnn.blobFromImage(crop, 1 / 255., swapRB=False)
             self.mesh.setInput(blob)
             points, score = self.mesh.forward(['landmarks', 'score'])
-            # The score is a logit: 0 corresponds to probability .5.
-            if not np.all(np.isfinite(points)) or not np.isfinite(score).all() or float(score[0, 0]) < 0:
+            # The score is a logit: 0 corresponds to probability .5; tolerate angled CCTV presentations.
+            if not np.all(np.isfinite(points)) or not np.isfinite(score).all() or float(score[0, 0]) < -1.5:
                 result.append({})
                 continue
             inverse = cv2.invertAffineTransform(matrix)

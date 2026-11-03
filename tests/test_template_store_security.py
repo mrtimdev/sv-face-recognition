@@ -51,8 +51,11 @@ class TemplateSecurityTests(unittest.TestCase):
     def test_new_numpy_core_module_paths_load_on_existing_numpy(self):
         payload = store.template_payload({'Alice': [np.arange(128, dtype=np.float64)]})
         data = pickle.dumps(payload, protocol=2)
-        self.assertIn(b'numpy.core.multiarray', data)
-        self.catalog.write_bytes(data.replace(b'numpy.core.multiarray', b'numpy._core.multiarray'))
+        if b'numpy.core.multiarray' in data:
+            target = data.replace(b'numpy.core.multiarray', b'numpy._core.multiarray')
+        else:
+            target = data.replace(b'numpy._core.multiarray', b'numpy.core.multiarray')
+        self.catalog.write_bytes(target)
         samples, _ = store.read_template_bundle(self.catalog)
         np.testing.assert_array_equal(samples['Alice'][0], np.arange(128))
 

@@ -20,7 +20,8 @@ class FaceTracker:
         self.generation = None
         self.last_result_sequence = -1
         self.liveness = LivenessChecker(config.attendance_mode)
-        self.presentation = PresentationGuard(min_span=config.capture_after_sec)
+        min_samples = 1 if config.capture_after_sec <= 0.2 else 2 if config.capture_after_sec <= 0.5 else None
+        self.presentation = PresentationGuard(min_span=config.capture_after_sec, min_samples=min_samples)
 
     def clear(self):
         self.tracks.clear()
@@ -261,6 +262,8 @@ class FaceTracker:
                                 track.verified_presence += gap
                             else:
                                 track.reset_verification()
+                        elif track.verified_presence == 0:
+                            track.verified_presence = min(self.config.capture_after_sec, 0.05)
                         track.last_evidence_at = packet.captured_at
                     self.liveness.update(track.track_id, detection.landmarks, packet.captured_at)
                     self.liveness.update_texture(track.track_id, detection.face_roi, packet.captured_at)
@@ -298,8 +301,10 @@ class FaceTracker:
             track.candidate_id = employee.employee_id
         track.confirmation_count += 1
         track.last_recognized = packet.captured_at
+        track.employee_name = employee.name
+        track.employee_last_name = employee.last_name
         if track.confirmation_count >= cfg.min_confirmation_frames:
-            track.employee_id, track.employee_name = employee.employee_id, employee.name
+            track.employee_id = employee.employee_id
             track.employee_active = employee.active
             track.identity_valid = True
         # Pending persistence belongs to the original employee even if this track changes.

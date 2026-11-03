@@ -230,3 +230,22 @@ class TrackingTests(unittest.TestCase):
         track.liveness_ok = True
         track.spoof_ok = True
         self.assertFalse(self.tracker.hints()[0].stable)
+
+    def test_ultra_fast_verified_presence_and_liveness(self):
+        from dataclasses import replace
+        cfg = replace(self.cfg, capture_after_sec=0.05, min_confirmation_frames=1, attendance_mode="face")
+        tracker = FaceTracker(cfg)
+        packet1 = self.packet(1, 10.0)
+        tracker.advance(packet1)
+        det = Detection(self.box_a, self.a, .3, True, spoof_score=.99, face_roi=np.full((80, 80, 3), 120, np.uint8))
+        tracker.apply(RecognitionResult(packet1, (det,), .01), 10.0)
+        # Advance second frame 0.05s later (30 FPS/20 FPS realistic timing)
+        packet2 = self.packet(2, 10.05)
+        tracker.advance(packet2)
+        tracker.apply(RecognitionResult(packet2, (det,), .01), 10.05)
+        track = tracker.tracks[1]
+        self.assertTrue(track.identity_valid)
+        self.assertTrue(track.flow_ok)
+        self.assertTrue(track.spoof_ok)
+        self.assertTrue(track.liveness_ok)
+        self.assertGreaterEqual(track.verified_presence, 0.05)
