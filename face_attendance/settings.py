@@ -133,6 +133,8 @@ class Settings:
     update_auto_check: bool = True
     update_skipped_version: str = ""
     update_last_checked: str = ""     # ISO timestamp of the last successful check
+    ai_provider: str = "openai"
+    ai_profiles: str = ""             # JSON per provider; see ai_providers.load_profiles
 
     def to_config(self):
         """Build a validated ``Config``; raises ``ValueError`` for bad values."""

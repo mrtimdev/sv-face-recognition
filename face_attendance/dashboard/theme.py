@@ -211,13 +211,15 @@ def _indicator_images():
         directory = Path(tempfile.gettempdir()) / "face-attendance-qss"
         directory.mkdir(parents=True, exist_ok=True)
         images = {}
-        for key, glyph in (("checked", "check"), ("indeterminate", "minus")):
+        for key, glyph, color, weight in (("checked", "check", "#FFFFFF", 2.8),
+                                          ("indeterminate", "minus", "#FFFFFF", 2.8),
+                                          ("combo-arrow", "chevron-down", "#8493A8", 2.2)):
             path = directory / f"indicator-{key}-v1.png"
             for scale, target in ((1, path), (2, path.with_name(f"{path.stem}@2x.png"))):
                 if not target.exists():
                     # Write then rename, so a second instance never reads half a file.
                     partial = target.with_name(f"{target.name}.{os.getpid()}.part")
-                    if make_pixmap(glyph, 16, "#FFFFFF", 2.8, ratio=scale).save(str(partial), "PNG"):
+                    if make_pixmap(glyph, 16, color, weight, ratio=scale).save(str(partial), "PNG"):
                         os.replace(partial, target)
             images[key] = path.as_posix()
         _INDICATORS = images
@@ -235,6 +237,7 @@ def stylesheet(theme="light"):
     indicator = _indicator_images()
     checked_image = f'image: url("{indicator["checked"]}");' if "checked" in indicator else ""
     partial_image = f'image: url("{indicator["indeterminate"]}");' if "indeterminate" in indicator else ""
+    combo_arrow = f'image: url("{indicator["combo-arrow"]}");' if "combo-arrow" in indicator else "image: none;"
     font_family = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
     available = set(QFontDatabase.families())
     if font_family not in available:
@@ -474,7 +477,7 @@ QDateEdit:focus, QTimeEdit:focus, QPlainTextEdit:focus {{
 }}
 QLineEdit::placeholder {{ color: {c['muted']}; }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
-QComboBox::down-arrow {{ image: none; width: 0px; }}
+QComboBox::down-arrow {{ {combo_arrow} width: 14px; height: 14px; margin-right: 8px; }}
 QComboBox QAbstractItemView {{
     background-color: {c['card']};
     border: 1px solid {c['border']};

@@ -35,6 +35,7 @@ NAV_PERMISSIONS = {
     "Users & Access": "manage_users",
     "Settings": "manage_settings",
     "License Plates": "view_dashboard",
+    "AI Face Angles": "manage_employees",
 }
 
 ROLE_TITLES = {"admin": "Administrator", "user": "Standard user"}

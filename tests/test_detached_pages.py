@@ -72,6 +72,8 @@ class DetachedPagesTests(unittest.TestCase):
             expected = window._detached_pages[index].host if index in (0, 6) else screen
             self.assertIs(window.stack.currentWidget(), expected)
         self.assertTrue(live.host.placeholder.isVisible() or window.nav.currentRow() != 0)
+        window.nav.setCurrentRow(6)
+        self.application.processEvents()
         self.assertTrue(plates.host.placeholder.isVisible())
 
     def test_close_and_return_reuse_pages_without_stopping_processing(self):

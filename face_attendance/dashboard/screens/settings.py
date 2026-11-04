@@ -4,22 +4,103 @@
 values only reach the running engine after a restart. The screen validates
 through ``Config`` itself (``Settings.to_config``) exactly like the CLI does.
 """
+import logging
 from pathlib import Path
 
-from PyQt6.QtCore import QThread, QTime, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
-                             QFileDialog, QFormLayout, QFrame,
+from PyQt6.QtCore import QEvent, QSize, QThread, QTime, Qt, pyqtSignal
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QCompleter, QDoubleSpinBox,
+                             QFileDialog, QFormLayout, QFrame, QGridLayout,
                              QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                              QPushButton, QScrollArea, QSpinBox, QStackedWidget,
                              QTimeEdit, QVBoxLayout, QWidget)
 
 from ..access import guard
-from ..threads import settle
+from ..threads import settle, start_detached
+from ...ai_providers import (AIConfig, AIError, DEFAULT_TEST_MESSAGE, PREFERRED_CHAT_MODELS, PROVIDERS,
+                             dump_profiles, list_models, load_profiles, plain_http_warning, send_test_message,
+                             split_models)
 from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source, hash_pin
-from ..icons import apply_button_icon
+from ..icons import apply_button_icon, make_icon
 from ..theme import palette
 from ..widgets import Card, PageHeader, StatCard, ToastBar
 from .updates import UpdatesPage
+
+
+CHECK_ROW_HEIGHT = 24
+
+
+class _FormNote(QLabel):
+    """Wrapped text whose height matches its lines, so it sits right under the field it explains.
+
+    A plain wrapped QLabel reports a tall, narrow size hint, and QFormLayout gives the row that height.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+
+    def heightForWidth(self, width):
+        return super().heightForWidth(width) if self.text() else 0  # Blank results take no room.
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        height = self.heightForWidth(self.width())
+        if not self.text():
+            return QSize(hint.width(), 0)
+        return QSize(hint.width(), height) if height > 0 else hint
+
+    def minimumSizeHint(self):
+        return QSize(0, 0) if not self.text() else super().minimumSizeHint()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.size().width() != event.oldSize().width():
+            self.updateGeometry()
+
+
+class _ModelCombo(QComboBox):
+    """Pick a loaded model, or type any name. Typing filters the list; the first click opens it."""
+
+    needsModels = pyqtSignal()  # The list was opened before any models were loaded.
+
+    def __init__(self, placeholder, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        # Long model names scroll inside the field instead of widening the page.
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(24)
+        self.setMaxVisibleItems(14)
+        self.lineEdit().setPlaceholderText(placeholder)
+        finder = QCompleter(self.model(), self)
+        finder.setFilterMode(Qt.MatchFlag.MatchContains)
+        finder.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        finder.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.setCompleter(finder)
+        self._open_on_release = False
+        self.lineEdit().installEventFilter(self)
+
+    def showPopup(self):
+        self._open_on_release = False
+        if self.count():
+            super().showPopup()
+        else:
+            self.needsModels.emit()
+
+    def focusInEvent(self, event):
+        # The click that brings focus here opens the list. Later clicks place the cursor, so a name
+        # can still be edited.
+        if event.reason() == Qt.FocusReason.MouseFocusReason:
+            self._open_on_release = True
+        super().focusInEvent(event)
+
+    def eventFilter(self, watched, event):
+        # Opens on release: opening on press lets a quick click's release close the list again.
+        if (watched is self.lineEdit() and event.type() == QEvent.Type.MouseButtonRelease
+                and self._open_on_release):
+            self.showPopup()
+        return super().eventFilter(watched, event)
 
 
 class SettingsScreen(QWidget):
@@ -32,7 +113,9 @@ class SettingsScreen(QWidget):
         self.fields = {}
         self._theme = settings.theme if hasattr(settings, "theme") else "dark"
         self._cards = []
+        self._reveal_actions = []
         self._build()
+        self._tidy_layouts()
         self._connect()
         self.load_settings(settings)
 
@@ -76,6 +159,7 @@ class SettingsScreen(QWidget):
         self._stack.addWidget(self._build_backup_page())
         self.updates_page = UpdatesPage(self.settings, self._theme)
         self._stack.addWidget(self.updates_page)
+        self._stack.addWidget(self._make_page(self._build_ai_group()))
         content.addWidget(self._stack, 1)
         outer.addLayout(content, 1)
 
@@ -106,6 +190,7 @@ class SettingsScreen(QWidget):
             ("shield", "Security"),
             ("download", "Backup"),
             ("refresh", "Updates"),
+            ("bolt", "AI Configuration"),
         ]
         for i, (icon_name, label) in enumerate(tabs):
             btn = QPushButton(f"  {label}")
@@ -150,25 +235,115 @@ class SettingsScreen(QWidget):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
-    def _card_form(self, title, subtitle="", icon=""):
+    def _tidy_layouts(self):
+        # macOS style margins would otherwise inset any card that holds a checkbox by a few pixels.
+        for check in self.findChildren(QCheckBox):
+            check.setAttribute(Qt.WidgetAttribute.WA_LayoutUsesWidgetRect)
+            check.setMinimumHeight(CHECK_ROW_HEIGHT)
+        # Form labels sit at the top of their row, so match the field's height to centre them on it.
+        for form in self.findChildren(QFormLayout):
+            for row in range(form.rowCount()):
+                label = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+                field = form.itemAt(row, QFormLayout.ItemRole.FieldRole)
+                if label is not None and field is not None and label.widget() is not None:
+                    label.widget().setMinimumHeight(field.sizeHint().height())
+
+    def _make_card(self, title, subtitle="", icon=""):
         card = Card(title, subtitle, icon=icon, theme=self._theme)
         self._cards.append(card)
+        return card
+
+    def _card_form(self, title, subtitle="", icon=""):
+        card = self._make_card(title, subtitle, icon)
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
-        form.setSpacing(8)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        # macOS keeps form fields at their natural size unless told otherwise.
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
         card.add_layout(form)
         return card, form
+
+    @staticmethod
+    def _hint(text):
+        note = _FormNote(text)
+        note.setObjectName("screenSubtitle")
+        note.setContentsMargins(0, 0, 0, 6)
+        return note
+
+    @staticmethod
+    def _section(text):
+        title = QLabel(text)
+        title.setObjectName("formSectionTitle")
+        title.setContentsMargins(0, 8, 0, 0)
+        return title
 
     def _register(self, form, key, label, widget, hint=""):
         form.addRow(label, widget)
         self.fields[key] = widget
         if hint:
-            note = QLabel(hint)
-            note.setObjectName("screenSubtitle")
-            note.setWordWrap(True)
-            form.addRow("", note)
+            form.addRow("", self._hint(hint))
         return widget
+
+    def _number_grid(self, rows):
+        """Two columns of label, number and hint. Rows: key, label, low, high, step, decimals, suffix, hint."""
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(12)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        for index, (key, label, low, high, step, decimals, suffix, hint) in enumerate(rows):
+            box = QDoubleSpinBox() if decimals else QSpinBox()
+            box.setRange(low, high)
+            box.setSingleStep(step)
+            if decimals:
+                box.setDecimals(decimals)
+            if suffix:
+                box.setSuffix(f" {suffix}")
+            self.fields[key] = box
+            cell = QVBoxLayout()
+            cell.setSpacing(4)
+            title = QLabel(label)
+            title.setObjectName("cellTitle")
+            cell.addWidget(title)
+            cell.addWidget(box)
+            if hint:
+                cell.addWidget(self._hint(hint))
+            cell.addStretch(1)
+            grid.addLayout(cell, index // 2, index % 2)
+        return grid
+
+    def _check_rows(self, card, rows):
+        """Full-width options: rows of (key, checkbox text, description)."""
+        for key, text, hint in rows:
+            check = QCheckBox(text)
+            self.fields[key] = check
+            card.add(check)
+            if hint:
+                note = self._hint(hint)
+                note.setContentsMargins(25, 0, 0, 6)  # Lines up with the checkbox text.
+                card.add(note)
+            yield check
+
+    def _add_reveal(self, edit):
+        """An eye inside a secret field that shows or hides what was typed."""
+        action = QAction(self)
+        action.setCheckable(True)
+        action.setToolTip("Show or hide")
+        edit.addAction(action, QLineEdit.ActionPosition.TrailingPosition)
+
+        def toggled(shown):
+            edit.setEchoMode(QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password)
+            self._style_reveal(action)
+
+        action.toggled.connect(toggled)
+        self._reveal_actions.append(action)
+        self._style_reveal(action)
+        return action
+
+    def _style_reveal(self, action):
+        action.setIcon(make_icon("eye-off" if action.isChecked() else "eye", 18, palette(self._theme)["muted"]))
 
     def _build_camera_group(self):
         card, form = self._card_form("Camera", "Video source and frame capture settings.", icon="camera")
@@ -185,77 +360,282 @@ class SettingsScreen(QWidget):
         row.addWidget(self.source_value, 1)
         self.browse_source_button = QPushButton("Choose file")
         row.addWidget(self.browse_source_button)
-        container = QWidget()
-        container.setLayout(row)
-        self._register(form, "source", "Source", container,
+        self._register(form, "source", "Source", self._row_widget(row),
                        "RTSP credentials are stored in settings.json (gitignored) and are never "
                        "written to the log. Prefer a camera user without a password where possible.")
 
-        for key, label, low, high, step, decimals, hint in (
-                ("camera_width", "Frame width", 160, 4096, 10, 0, ""),
-                ("camera_height", "Frame height", 120, 2160, 10, 0, ""),
-                ("target_fps", "Target FPS", 1, 120, 1, 1, "Requested from the driver, not guaranteed."),
-                ("detection_scale", "Detector scale", 0.1, 1.0, 0.05, 2,
-                 "0.50 is the default; 0.25 uses less CPU. Compare Analysis latency in Live Monitor."),
-                ("detection_interval", "Detection interval", 1, 30, 1, 0, "Camera frames between detections."),
-                ("recognition_interval", "Recognition interval", 1, 60, 1, 0,
-                 "Frames between encodings for unconfirmed faces."),
-                ("camera_timeout_ms", "Open/read timeout", 250, 30000, 250, 0,
-                 "Applies to FFmpeg network sources."),
-                ("reconnect_sec", "Reconnect delay", 0.2, 30, 0.1, 1, "Backoff after a disconnect.")):
-            box = QDoubleSpinBox() if decimals else QSpinBox()
-            box.setRange(low, high)
-            box.setSingleStep(step)
-            if decimals:
-                box.setDecimals(decimals)
-            self._register(form, key, label, box, hint)
+        card.add(self._section("Frame"))
+        card.add_layout(self._number_grid((
+            ("camera_width", "Frame width", 160, 4096, 10, 0, "px", ""),
+            ("camera_height", "Frame height", 120, 2160, 10, 0, "px", ""),
+            ("target_fps", "Target FPS", 1, 120, 1, 1, "fps", "Requested from the driver, not guaranteed."),
+            ("detection_scale", "Detector scale", 0.1, 1.0, 0.05, 2, "",
+             "0.50 is the default; 0.25 uses less CPU. Compare Analysis latency in Live Monitor."),
+        )))
+        card.add(self._section("Timing"))
+        card.add_layout(self._number_grid((
+            ("detection_interval", "Detection interval", 1, 30, 1, 0, "frames", "Camera frames between detections."),
+            ("recognition_interval", "Recognition interval", 1, 60, 1, 0, "frames",
+             "Frames between encodings for unconfirmed faces."),
+            ("camera_timeout_ms", "Open/read timeout", 250, 30000, 250, 0, "ms", "Applies to FFmpeg network sources."),
+            ("reconnect_sec", "Reconnect delay", 0.2, 30, 0.1, 1, "s", "Backoff after a disconnect."),
+        )))
         return card
 
     def _build_recognition_group(self):
-        card, form = self._card_form("Recognition and attendance",
-                                     "Face matching thresholds and check-in timing.", icon="face-id")
-        for key, label, low, high, step, decimals, hint in (
-                ("max_detect_faces", "Max faces to detect", 1, 20, 1, 0,
-                 "Upper limit on simultaneous faces the engine will process per frame. "
-                 "Higher values use more CPU; 5 is a sensible default for most setups."),
-                ("quality_min_face_px", "Minimum face pixels", 80, 300, 10, 0,
-                 "Shortest face dimension in the original frame. Smaller faces receive Move closer guidance."),
-                ("quality_min_sharpness", "Minimum sharpness", 1, 200, 1, 1,
-                 "Blur check on a 96 × 96 face image. Calibrate for your camera; this is not a liveness score."),
-                ("face_tolerance", "SFace cosine distance", 0.3, 0.9, 0.01, 2,
-                 "Lower is stricter. Loosening this never fixes duplicate enrollment data."),
-                ("identity_margin", "Identity margin", 0.0, 0.3, 0.005, 3,
-                 "Minimum cosine-distance separation from a competing employee."),
-                ("min_confirmation_frames", "Confirmation frames", 1, 20, 1, 0,
-                 "Matching encodings required before an identity is trusted."),
-                ("stable_recheck_sec", "Stable recheck", 0.1, 5, 0.05, 2,
-                 "How often a stable track is re-encoded near capture."),
-                ("capture_after_sec", "Verified presence", 0.5, 30, 0.5, 1,
-                 "Seconds of continuous verified presence before a check-in."),
-                ("cooldown_sec", "Employee cooldown", 0, 3600, 5, 0,
-                 "Repeat check-ins for one employee are blocked for this long."),
-                ("opencv_threads", "OpenCV threads", 1, 16, 1, 0,
-                 "Keep at 1 unless you have measured spare CPU.")):
-            box = QDoubleSpinBox() if decimals else QSpinBox()
-            box.setRange(low, high)
-            box.setSingleStep(step)
-            if decimals:
-                box.setDecimals(decimals)
-            self._register(form, key, label, box, hint)
+        card = self._make_card("Recognition and attendance",
+                               "Face matching thresholds and check-in timing.", icon="face-id")
+        card.add(self._section("Detection"))
+        card.add_layout(self._number_grid((
+            ("max_detect_faces", "Max faces to detect", 1, 20, 1, 0, "faces",
+             "Upper limit on simultaneous faces the engine will process per frame. "
+             "Higher values use more CPU; 5 is a sensible default for most setups."),
+            ("quality_min_face_px", "Minimum face pixels", 80, 300, 10, 0, "px",
+             "Shortest face dimension in the original frame. Smaller faces receive Move closer guidance."),
+            ("quality_min_sharpness", "Minimum sharpness", 1, 200, 1, 1, "",
+             "Blur check on a 96 × 96 face image. Calibrate for your camera; this is not a liveness score."),
+            ("opencv_threads", "OpenCV threads", 1, 16, 1, 0, "", "Keep at 1 unless you have measured spare CPU."),
+        )))
+        card.add(self._section("Matching"))
+        card.add_layout(self._number_grid((
+            ("face_tolerance", "SFace cosine distance", 0.3, 0.9, 0.01, 2, "",
+             "Lower is stricter. Loosening this never fixes duplicate enrollment data."),
+            ("identity_margin", "Identity margin", 0.0, 0.3, 0.005, 3, "",
+             "Minimum cosine-distance separation from a competing employee."),
+            ("min_confirmation_frames", "Confirmation frames", 1, 20, 1, 0, "frames",
+             "Matching encodings required before an identity is trusted."),
+            ("stable_recheck_sec", "Stable recheck", 0.1, 5, 0.05, 2, "s",
+             "How often a stable track is re-encoded near capture."),
+        )))
+        card.add(self._section("Attendance"))
+        card.add_layout(self._number_grid((
+            ("capture_after_sec", "Verified presence", 0.5, 30, 0.5, 1, "s",
+             "Seconds of continuous verified presence before a check-in."),
+            ("cooldown_sec", "Employee cooldown", 0, 3600, 5, 0, "s",
+             "Repeat check-ins for one employee are blocked for this long."),
+        )))
         return card
 
-    def _build_sound_group(self):
-        card, form = self._card_form("Built-in sounds", "Distinct local tones; no internet required.", icon="sliders")
-        from ...sound_events import SOUND_LABELS
-        self._register(form, "sounds_enabled", "Enable sounds", QCheckBox())
-        for event, label in SOUND_LABELS.items():
-            key = "sound_detection" if event == "detected" else "sound_" + event
-            self._register(form, key, label, QCheckBox())
-        note = QLabel("Recognized means an enrolled identity matched; verification and attendance have their own tones. "
-                      "Alerts are debounced and never overlap. Preview each tone in Live Monitor.")
-        note.setWordWrap(True)
-        form.addRow(note)
+    # --- AI configuration ----------------------------------------------------
+
+    def _build_ai_group(self):
+        card, form = self._card_form(
+            "AI Configuration", "Connect the AI provider used by AI Face Angles.", icon="bolt")
+        self._ai_profiles = load_profiles(self.settings)
+        self._ai_current = "openai"
+        self._ai_call_id = 0
+
+        self.ai_provider = QComboBox()
+        for provider in PROVIDERS.values():
+            self.ai_provider.addItem(provider.label, provider.key)
+        form.addRow("Provider", self.ai_provider)
+        self.ai_provider_note = _FormNote()
+        self.ai_provider_note.setObjectName("screenSubtitle")
+        self.ai_provider_note.setWordWrap(True)
+        form.addRow("", self.ai_provider_note)
+
+        self.ai_base_url = QLineEdit()
+        self.ai_base_url.setPlaceholderText("https://example.com/v1")
+        self._ai_base_label = QLabel("Base URL")
+        form.addRow(self._ai_base_label, self.ai_base_url)
+        self.ai_url_warning = _FormNote()
+        self.ai_url_warning.setObjectName("screenSubtitle")
+        self.ai_url_warning.setWordWrap(True)
+        form.addRow("", self.ai_url_warning)
+        self.ai_base_url.textChanged.connect(self._ai_update_url_warning)
+
+        self.ai_key = QLineEdit()
+        self.ai_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.ai_key.setPlaceholderText("Paste your API key")
+        self.ai_show_key = self._add_reveal(self.ai_key)
+        form.addRow("API key", self.ai_key)
+        key_note = _FormNote("Saved in settings.json on this computer, like the database password. "
+                          "Each provider keeps its own key, and keys are never written to the log.")
+        key_note.setObjectName("screenSubtitle")
+        key_note.setWordWrap(True)
+        form.addRow("", key_note)
+
+        self.ai_load_button = QPushButton("Load models")
+        self.ai_load_button.setObjectName("softButton")
+        self.ai_load_result = _FormNote()
+        self.ai_load_result.setObjectName("screenSubtitle")
+        self.ai_load_result.setWordWrap(True)
+        load_row = QHBoxLayout()
+        load_row.addWidget(self.ai_load_button)
+        load_row.addWidget(self.ai_load_result, 1)
+        form.addRow("", self._row_widget(load_row))
+
+        self.ai_chat_model = _ModelCombo("Load models, then choose one or type a name")
+        self.ai_chat_model.needsModels.connect(self._ai_models_needed)
+        form.addRow("Chat model", self.ai_chat_model)
+        self.ai_image_model = _ModelCombo("Load models, then choose one or type a name")
+        self.ai_image_model.needsModels.connect(self._ai_models_needed)
+        form.addRow("Image model", self.ai_image_model)
+
+        self.ai_test_input = QLineEdit(DEFAULT_TEST_MESSAGE)
+        self.ai_test_button = QPushButton("Send test message")
+        self.ai_test_button.setObjectName("softButton")
+        test_row = QHBoxLayout()
+        test_row.addWidget(self.ai_test_input, 1)
+        test_row.addWidget(self.ai_test_button)
+        form.addRow("Test message", self._row_widget(test_row))
+        self.ai_test_result = _FormNote()
+        self.ai_test_result.setObjectName("screenSubtitle")
+        self.ai_test_result.setWordWrap(True)
+        self.ai_test_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow("", self.ai_test_result)
+
+        self.ai_provider.currentIndexChanged.connect(self._ai_provider_changed)
+        self.ai_load_button.clicked.connect(self._ai_load_models)
+        self.ai_test_button.clicked.connect(self._ai_send_test)
+        self._load_ai(self.settings)
         return card
+
+    @staticmethod
+    def _row_widget(layout):
+        layout.setContentsMargins(0, 0, 0, 0)
+        container = QWidget()
+        container.setObjectName("plain")
+        container.setLayout(layout)
+        return container
+
+    def _load_ai(self, settings):
+        self._ai_profiles = load_profiles(settings)
+        provider = settings.ai_provider if settings.ai_provider in PROVIDERS else "openai"
+        self._ai_current = provider
+        self.ai_provider.blockSignals(True)
+        self.ai_provider.setCurrentIndex(self.ai_provider.findData(provider))
+        self.ai_provider.blockSignals(False)
+        self._ai_show_profile()
+
+    def _ai_store_form(self):
+        self._ai_profiles[self._ai_current] = {
+            "api_key": self.ai_key.text().strip(),
+            "base_url": self.ai_base_url.text().strip(),
+            "chat_model": self.ai_chat_model.currentText().strip(),
+            "image_model": self.ai_image_model.currentText().strip(),
+        }
+
+    def _ai_show_profile(self):
+        provider = PROVIDERS[self._ai_current]
+        profile = self._ai_profiles[self._ai_current]
+        self.ai_key.setText(profile["api_key"])
+        self.ai_base_url.setText(profile["base_url"])
+        self.ai_show_key.setChecked(False)
+        for combo, model in ((self.ai_chat_model, profile["chat_model"]),
+                             (self.ai_image_model, profile["image_model"])):
+            combo.clear()
+            combo.setCurrentText(model)
+        self.ai_base_url.setVisible(not provider.base_url)
+        self._ai_base_label.setVisible(not provider.base_url)
+        self.ai_image_model.setEnabled(provider.can_generate_images)
+        self.ai_provider_note.setText(
+            "Works with any OpenAI-compatible service. Enter its base URL, usually ending in /v1."
+            if not provider.base_url else
+            "Generates images and answers test messages." if provider.can_generate_images else
+            "Claude can load models and answer test messages, but it can't generate images. "
+            "Choose GPT, Gemini or Custom for AI Face Angles.")
+        self._ai_update_url_warning()
+        self.ai_load_result.clear()
+        self.ai_test_result.clear()
+
+    def _ai_update_url_warning(self):
+        custom = not PROVIDERS[self._ai_current].base_url
+        self.ai_url_warning.setText(plain_http_warning(self.ai_base_url.text()) if custom else "")
+        self.ai_url_warning.setVisible(bool(self.ai_url_warning.text()))
+
+    def _ai_provider_changed(self):
+        self._ai_store_form()
+        self._ai_current = self.ai_provider.currentData()
+        self._ai_call_id += 1  # An answer still on its way belongs to the old provider.
+        self._ai_show_profile()
+
+    def _ai_config(self):
+        self._ai_store_form()
+        return AIConfig(provider=self._ai_current, **self._ai_profiles[self._ai_current])
+
+    def _ai_run(self, button, call, on_done):
+        button.setEnabled(False)
+        call_id = self._ai_call_id
+
+        def finished(result, error):
+            button.setEnabled(True)
+            if call_id == self._ai_call_id:
+                on_done(result, error)
+
+        worker = _AICallWorker(call)
+        worker.completed.connect(finished)
+        start_detached(worker)
+
+    def _ai_load_models(self):
+        config = self._ai_config()
+        self.ai_load_result.setText("Loading…")
+        self._ai_run(self.ai_load_button, lambda: list_models(config), self._ai_models_loaded)
+
+    def _ai_models_loaded(self, models, error):
+        if error:
+            self.ai_load_result.setText(error)
+            self.toast.show_message(error, "bad")
+            return
+        chat, image = split_models(models)
+        preferred = PREFERRED_CHAT_MODELS.get(self._ai_current)
+        self._ai_fill_models(self.ai_chat_model, chat, preferred)
+        self._ai_fill_models(self.ai_image_model, image)
+        self.ai_load_result.setText(f"Found {len(models)} models. Choose them from the lists below.")
+
+    def _ai_models_needed(self):
+        self.ai_load_result.setText("Select Load models to fill this list.")
+
+    @staticmethod
+    def _ai_fill_models(combo, models, preferred=None):
+        current = combo.currentText().strip()
+        combo.clear()
+        combo.addItems(models)
+        chosen = current or (preferred if preferred in models else next(iter(models), ""))
+        combo.setCurrentText(chosen)
+
+    def _ai_send_test(self):
+        config = self._ai_config()
+        message = self.ai_test_input.text().strip() or DEFAULT_TEST_MESSAGE
+        self.ai_test_result.setText("Waiting for a reply…")
+        self._ai_run(self.ai_test_button, lambda: send_test_message(config, message), self._ai_test_done)
+
+    def _ai_test_done(self, reply, error):
+        if error:
+            self.ai_test_result.setText(error)
+            self.toast.show_message(error, "bad")
+        else:
+            self.ai_test_result.setText(f"Reply: {reply}")
+            self.toast.show_message("The provider answered. Save to keep this configuration.", "ok")
+
+    def _build_sound_group(self):
+        card = self._make_card("Built-in sounds", "Distinct local tones; no internet required.", icon="sliders")
+        from ...sound_events import SOUND_LABELS
+        self.sounds_master = QCheckBox("Enable sounds")
+        self.fields["sounds_enabled"] = self.sounds_master
+        card.add(self.sounds_master)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        self._sound_checks = []
+        for index, (event, label) in enumerate(SOUND_LABELS.items()):
+            key = "sound_detection" if event == "detected" else "sound_" + event
+            check = QCheckBox(label)
+            self.fields[key] = check
+            self._sound_checks.append(check)
+            grid.addWidget(check, index // 2, index % 2)
+        card.add_layout(grid)
+        card.add(self._hint("Recognized means an enrolled identity matched; verification and attendance have "
+                            "their own tones. Alerts are debounced and never overlap. Preview each tone in "
+                            "Live Monitor."))
+        self.sounds_master.toggled.connect(self._sync_sound_checks)
+        return card
+
+    def _sync_sound_checks(self):
+        for check in self._sound_checks:
+            check.setEnabled(self.sounds_master.isChecked())
 
     def _build_storage_group(self):
         card, form = self._card_form("Storage", "File paths for data, evidence and logs.", icon="database")
@@ -271,10 +651,8 @@ class SettingsScreen(QWidget):
             row = QHBoxLayout()
             row.addWidget(edit, 1)
             row.addWidget(button)
-            container = QWidget()
-            container.setLayout(row)
             button.clicked.connect(lambda _=False, e=edit, k=key: self._browse_path(e, k))
-            self._register(form, key, label, container, caption)
+            self._register(form, key, label, self._row_widget(row), caption)
             self.fields[key] = edit
         self._register(form, "persistence_queue_size", "Evidence queue size",
                        self._spin(1, 64))
@@ -311,6 +689,7 @@ class SettingsScreen(QWidget):
         password = QLineEdit()
         password.setEchoMode(QLineEdit.EchoMode.Password)
         password.setPlaceholderText("database password")
+        self._add_reveal(password)
         self._register(form, "db_password", "Password", password)
         self._db_remote_widgets.append(("db_password", password))
 
@@ -321,14 +700,13 @@ class SettingsScreen(QWidget):
 
         self.db_test_button = QPushButton("Test Connection")
         self.db_test_button.setObjectName("softButton")
-        self.db_test_result = QLabel("")
+        self.db_test_result = _FormNote()
         self.db_test_result.setObjectName("screenSubtitle")
         self.db_test_result.setWordWrap(True)
         row = QHBoxLayout()
         row.addWidget(self.db_test_button)
         row.addWidget(self.db_test_result, 1)
-        container = QWidget()
-        container.setLayout(row)
+        container = self._row_widget(row)
         form.addRow("", container)
         self._db_remote_widgets.append(("_test", container))
 
@@ -417,11 +795,16 @@ class SettingsScreen(QWidget):
         self._bk_size.set_hint(info["size_hint"])
 
     UPDATES_TAB = 7
+    AI_TAB = 8
 
     def show_updates(self):
         """Open the Updates tab (used by the startup prompt and notifications)."""
         self._tab_group.button(self.UPDATES_TAB).setChecked(True)
         self._select_tab(self.UPDATES_TAB)
+
+    def show_ai(self):
+        self._tab_group.button(self.AI_TAB).setChecked(True)
+        self._select_tab(self.AI_TAB)
 
     def closeEvent(self, event):
         # A connection test or backup still running must not be destroyed mid-run.
@@ -467,13 +850,12 @@ class SettingsScreen(QWidget):
         self._register(form, "report_page_size", "Report page size", self._spin(10, 1000))
         work = QTimeEdit(QTime(9, 0))
         work.setDisplayFormat("HH:mm")
+        work.setButtonSymbols(QTimeEdit.ButtonSymbols.NoButtons)  # Same look as the other number fields.
         self.work_start_check = QCheckBox("Add a Punctuality column using this start time")
-        holder = QWidget()
-        layout = QHBoxLayout(holder)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout = QHBoxLayout()
         layout.addWidget(work, 1)
         layout.addWidget(self.work_start_check, 2)
-        self._register(form, "report_work_start", "Work start", holder,
+        self._register(form, "report_work_start", "Work start", self._row_widget(layout),
                        "Off by default: the database has no late/absent policy, so this label is "
                        "computed at export time only.")
         self.fields["report_work_start"] = work
@@ -485,6 +867,7 @@ class SettingsScreen(QWidget):
         token_edit = QLineEdit()
         token_edit.setPlaceholderText("123456789:ABCdefGHIjklMNOpqrSTUvwxYZ")
         token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._add_reveal(token_edit)
         self._register(form, "telegram_bot_token", "Bot token", token_edit,
                        "Create a bot with @BotFather on Telegram and paste the token here.")
         chat_edit = QLineEdit()
@@ -492,35 +875,33 @@ class SettingsScreen(QWidget):
         self._register(form, "telegram_chat_id", "Chat ID", chat_edit,
                        "Send /start to your bot, then use @userinfobot or @RawDataBot to find your chat ID. "
                        "For groups, add the bot and use the group's chat ID (starts with -).")
-        self.tg_capture_check = QCheckBox("Send photo and details on every attendance capture")
-        self.tg_capture_check.setChecked(True)
-        form.addRow("On capture", self.tg_capture_check)
-        self.fields["telegram_notify_capture"] = self.tg_capture_check
-        auto_unknown = QCheckBox("Save separate unknown / not enrolled face photos and records")
-        self._register(form, "auto_capture_unknown", "Automatic face capture", auto_unknown,
-                       "After 2 seconds of unknown status, save one crop per track in captures/unknown. "
-                       "Pause stops these captures. These records do not mark attendance.")
-        self.tg_unknown_check = QCheckBox("Send danger alert when an unknown face is detected")
-        self.tg_unknown_check.setChecked(True)
-        form.addRow("On unknown face", self.tg_unknown_check)
-        self.fields["telegram_notify_unknown"] = self.tg_unknown_check
-        self._register(form, "auto_capture_inactive", "Inactive employee capture",
-                       QCheckBox("Save separate inactive employee scan attempts"),
-                       "Attendance is always blocked for inactive employees. Capture retains an observation, "
-                       "including failed or pending liveness checks, under captures/inactive.")
-        self._register(form, "telegram_notify_inactive", "Inactive employee Telegram alert",
-                       QCheckBox("Send the inactive employee face crop and blocked attendance alert"))
         self.tg_test_button = QPushButton("Verify Bot && Send Test")
         self.tg_test_button.setObjectName("softButton")
-        self.tg_test_result = QLabel("")
+        self.tg_test_result = _FormNote()
         self.tg_test_result.setObjectName("screenSubtitle")
         self.tg_test_result.setWordWrap(True)
         row = QHBoxLayout()
         row.addWidget(self.tg_test_button)
         row.addWidget(self.tg_test_result, 1)
-        container = QWidget()
-        container.setLayout(row)
-        form.addRow("", container)
+        form.addRow("", self._row_widget(row))
+
+        card.add(self._section("Telegram alerts"))
+        self.tg_capture_check, self.tg_unknown_check, _inactive = self._check_rows(card, (
+            ("telegram_notify_capture", "Send photo and details on every attendance capture", ""),
+            ("telegram_notify_unknown", "Send danger alert when an unknown face is detected", ""),
+            ("telegram_notify_inactive", "Send the inactive employee face crop and blocked attendance alert", ""),
+        ))
+        card.add(self._section("Automatic capture"))
+        tuple(self._check_rows(card, (
+            ("auto_capture_unknown", "Save separate unknown / not enrolled face photos and records",
+             "After 2 seconds of unknown status, save one crop per track in captures/unknown. "
+             "Pause stops these captures. These records do not mark attendance."),
+            ("auto_capture_inactive", "Save separate inactive employee scan attempts",
+             "Attendance is always blocked for inactive employees. Capture retains an observation, "
+             "including failed or pending liveness checks, under captures/inactive."),
+        )))
+        self.tg_capture_check.setChecked(True)
+        self.tg_unknown_check.setChecked(True)
         self.tg_test_button.clicked.connect(self._test_telegram)
         return card
 
@@ -547,14 +928,9 @@ class SettingsScreen(QWidget):
         row.addWidget(self.pin_clear_button)
         row.addWidget(self.pin_status)
         row.addStretch(1)
-        container = QWidget()
-        container.setLayout(row)
-        form.addRow("", container)
-        note = QLabel("The PIN protects the dashboard on startup. "
-                      "A SHA-256 hash is stored in settings.json, never the PIN itself.")
-        note.setObjectName("screenSubtitle")
-        note.setWordWrap(True)
-        form.addRow("", note)
+        form.addRow("", self._row_widget(row))
+        form.addRow("", self._hint("The PIN protects the dashboard on startup. "
+                                   "A SHA-256 hash is stored in settings.json, never the PIN itself."))
         self.pin_set_button.clicked.connect(self._set_pin)
         self.pin_clear_button.clicked.connect(self._clear_pin)
         return card
@@ -766,6 +1142,8 @@ class SettingsScreen(QWidget):
                 else:
                     widget.setValue(int(value) if value is not None else 0)
         self._db_backend_changed()
+        self._sync_sound_checks()
+        self._load_ai(settings)
         self.subtitle.setText(f"Stored in {SETTINGS_PATH.name}. "
                               f"Active source: {describe_source(settings.source)}")
 
@@ -794,6 +1172,9 @@ class SettingsScreen(QWidget):
                 values[key] = widget.text().strip()
             else:
                 values[key] = widget.value()
+        self._ai_store_form()
+        values["ai_provider"] = self._ai_current
+        values["ai_profiles"] = dump_profiles(self._ai_profiles)
         return values
 
     def apply(self, restart=False):
@@ -858,6 +1239,25 @@ class SettingsScreen(QWidget):
         apply_button_icon(self.apply_restart_button, "restart", "#FFFFFF")
         apply_button_icon(self.reset_button, "refresh", colors["danger"])
         apply_button_icon(self._backup_button, "download", "#FFFFFF")
+        for action in self._reveal_actions:
+            self._style_reveal(action)
+
+
+class _AICallWorker(QThread):
+    completed = pyqtSignal(object, str)  # (result, error shown to the user)
+
+    def __init__(self, call):
+        super().__init__()
+        self._call = call
+
+    def run(self):
+        try:
+            self.completed.emit(self._call(), "")
+        except AIError as exc:
+            self.completed.emit(None, str(exc))
+        except Exception:
+            logging.exception("AI provider call failed")
+            self.completed.emit(None, "Something went wrong. See the log for details.")
 
 
 class _TelegramTestWorker(QThread):

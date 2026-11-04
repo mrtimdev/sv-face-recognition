@@ -28,6 +28,7 @@ from .engine import AttendanceEngine
 from .errors import DashboardErrorHandler
 from .icons import IconLabel, apply_button_icon, make_icon
 from .login import LoginDialog, UserLoginDialog
+from .screens.ai_angles import AIAnglesScreen
 from .screens.employees import EmployeesScreen
 from .screens.live import LiveScreen
 from license_plate.screen import LicensePlateScreen
@@ -61,6 +62,7 @@ NAV = (
     ("shield", "Users & Access"),
     ("gear", "Settings"),
     ("monitor", "License Plates"),
+    ("image", "AI Face Angles"),
 )
 
 
@@ -177,6 +179,7 @@ class MainWindow(QMainWindow):
             UsersScreen(self.engine, self.settings, current_user=self.current_user),
             SettingsScreen(self.engine, self.settings),
             LicensePlateScreen(self.engine, self.settings),
+            AIAnglesScreen(self.engine, self.settings),
         ]
         for screen in self.screens:
             self.stack.addWidget(screen)
@@ -418,6 +421,7 @@ class MainWindow(QMainWindow):
         ctx.settingsApplied.connect(
             lambda settings, restart: self._broadcast_settings(settings, restart))
         self.screens[4].usersChanged.connect(self._on_users_changed)
+        self.screens[7].openSettingsRequested.connect(self._open_ai_settings)
         updates_page = self.screens[5].updates_page
         updates_page.installRequested.connect(self._install_update)
         updates_page.updateFound.connect(self._on_update_found)
@@ -990,6 +994,11 @@ class MainWindow(QMainWindow):
         self._go("Settings")
         if self.stack.currentWidget() is self.screens[5]:
             self.screens[5].show_updates()
+
+    def _open_ai_settings(self):
+        self._go("Settings")
+        if self.stack.currentWidget() is self.screens[5]:
+            self.screens[5].show_ai()
 
     def _report_install_outcome(self, outcome):
         """Say how the last update attempt ended, once, on the first start after it."""
