@@ -63,9 +63,10 @@ class _StepTrail(QWidget):
 class SetupWizard(QDialog):
     """Settings are saved at the last step, so closing early means setup runs again."""
 
-    def __init__(self, settings, theme="light", version="", parent=None):
+    def __init__(self, settings, theme="light", version="", existing=False, parent=None):
         super().__init__(parent)
         self.settings = settings
+        self._existing = existing
         self._theme = theme
         self._values = {}
         self._has_accounts = False
@@ -139,10 +140,14 @@ class SetupWizard(QDialog):
 
     def _build_welcome(self):
         page, layout = self._page("Setup", "Welcome to SV Face ID",
+                                  "Review how this computer stores its data." if self._existing else
                                   "A few quick steps and this computer is ready to record attendance.")
-        for text in ("Choose where attendance and accounts are stored",
-                     "Create the administrator who signs in first",
-                     "Close this window at any time and setup starts again next time"):
+        for text in (("Keep your current database or move to MySQL on this computer",
+                      "Your existing accounts and attendance are left untouched",
+                      "Close this window to skip; it won't appear again") if self._existing else
+                     ("Choose where attendance and accounts are stored",
+                      "Create the administrator who signs in first",
+                      "Close this window at any time and setup starts again next time")):
             item = QLabel("✓  " + text)
             item.setObjectName("authSubtitle")
             layout.addWidget(item)
@@ -152,10 +157,13 @@ class SetupWizard(QDialog):
     def _build_database(self):
         page, layout = self._page("Database", "Where should data be stored?",
                                   "You can change this later in Settings.")
-        self.sqlite_card = ChoiceCard("database", "Built-in database",
+        self.sqlite_card = ChoiceCard("database", "Keep the current database" if self._existing else "Built-in database",
+                                      "Nothing changes." if self._existing else
                                       "Nothing else to install. Best for one computer.",
                                       tone="green", theme=self._theme)
         self.mysql_card = ChoiceCard("database", "MySQL on this computer",
+                                     "Starts a new MySQL database. Existing accounts and attendance "
+                                     "are not moved into it." if self._existing else
                                      "Uses a MySQL server installed on this computer.",
                                      tone="blue", theme=self._theme)
         self.sqlite_card.setChecked(True)
@@ -243,7 +251,7 @@ class SetupWizard(QDialog):
         return page
 
     def _build_finish(self):
-        page, layout = self._page("Finish", "You're all set", "Sign in to open SV Face ID.")
+        page, layout = self._page("Finish", "You're all set", "SV Face ID is ready to use.")
         self.summary = QLabel("")
         self.summary.setObjectName("authSubtitle")
         self.summary.setWordWrap(True)
@@ -369,11 +377,13 @@ class SetupWizard(QDialog):
         except Exception as exc:
             self.error.setText(str(exc))
             return
-        location = (f"MySQL database “{self.settings.db_name}” on this computer"
-                    if self._uses_mysql() else "the built-in database")
+        if self._uses_mysql():
+            location = f"Data is stored in the MySQL database “{self.settings.db_name}” on this computer."
+        else:
+            location = "Your database is unchanged." if self._existing else "Data is stored in the built-in database."
         account = ("your existing accounts" if self._has_accounts
                    else f"the account “{self.admin_username.text().strip()}”")
-        self.summary.setText(f"Data is stored in {location}. Sign in with {account}.")
+        self.summary.setText(f"{location} Sign in with {account}.")
         self.admin_password.clear()
         self.admin_confirm.clear()
         self._go(FINISH)

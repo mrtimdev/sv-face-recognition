@@ -50,6 +50,12 @@ class TemporarySettings(unittest.TestCase):
         self.settings._path = self.settings_path
 
 
+class _Qt(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+
 class NeedsSetupTests(TemporarySettings):
     def needs(self, frozen=True):
         return first_run.needs_setup(self.settings_path, frozen=frozen, root=self.root)
@@ -74,6 +80,48 @@ class NeedsSetupTests(TemporarySettings):
         (self.root / "attendance.db").unlink()
         self.settings_path.write_text("{}")
         self.assertFalse(self.needs())
+
+
+class ExistingInstallTests(TemporarySettings, _Qt):
+    def admin(self):
+        return UserRepository(self.settings).create_user("old", "", "", "", "old secret", role="admin")
+
+    def offer(self, user, has_accounts=True, forced=False):
+        return first_run.offer_after_sign_in(user, has_accounts, forced=forced, frozen=True, root=self.root)
+
+    def test_shown_once_after_an_administrator_signs_in(self):
+        admin = self.admin()
+        self.settings_path.write_text("{}")
+        self.assertFalse(first_run.needs_setup(self.settings_path, frozen=True, root=self.root))
+        self.assertTrue(self.offer(admin))
+        first_run.mark_setup_complete(self.root)
+        self.assertFalse(self.offer(admin))
+        self.assertTrue(self.offer(admin, forced=True))
+
+    def test_never_shown_without_permission_or_before_sign_in(self):
+        user = UserRepository(self.settings).create_user("staff", "", "", "", "staff secret", role="user")
+        self.assertFalse(self.offer(user))
+        self.assertFalse(self.offer(None))
+        self.assertFalse(self.offer(None, forced=True))  # --setup can't skip sign-in either.
+
+    def test_source_runs_are_not_prompted_and_marker_stops_a_new_install_prompt(self):
+        self.assertFalse(first_run.offer_after_sign_in(self.admin(), True, frozen=False, root=self.root))
+        first_run.mark_setup_complete(self.root)
+        self.assertFalse(first_run.needs_setup(self.settings_path, frozen=True, root=self.root))
+
+    def test_keeping_the_current_database_changes_nothing(self):
+        self.admin()
+        before = self.settings.to_dict()
+        wizard = SetupWizard(self.settings, existing=True)
+        self.addCleanup(wizard.deleteLater)
+        wizard._next()
+        wizard._next()
+        self.assertTrue(wizard.admin_fields.isHidden())
+        wizard._next()
+        self.assertEqual(wizard.pages.currentIndex(), FINISH)
+        self.assertEqual(self.settings.to_dict(), before)
+        self.assertEqual(len(UserRepository(self.settings).list_users()), 1)
+        self.assertIn("unchanged", wizard.summary.text())
 
 
 class ProvisionTests(TemporarySettings):

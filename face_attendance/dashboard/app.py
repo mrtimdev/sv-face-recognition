@@ -19,7 +19,7 @@ from .. import updates
 from ..settings import SETTINGS_PATH, Settings, describe_source
 from ..version import __version__
 from ..config import ROOT
-from ..first_run import needs_setup
+from ..first_run import mark_setup_complete, needs_setup, offer_after_sign_in
 from ..storage import context_path
 from .access import AccessControl, AccountWatcher, NAV_PERMISSIONS, guard
 from .bridge import to_pixmap
@@ -1106,7 +1106,8 @@ def _log_to_file():
     logging.getLogger().addHandler(handler)
 
 
-def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False, reset_admin=False):
+def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False, reset_admin=False,
+                  exit_after_reset=False):
     """Create the application, show the window and block until it closes."""
     import sys
     application = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
@@ -1115,12 +1116,14 @@ def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False, r
     errors.install()
     try:
         # Decided before the splash, whose database check creates an empty file.
-        run_setup = setup or needs_setup(settings_path)
+        new_install = needs_setup(settings_path)
         settings = Settings.load(settings_path)
         if reset_admin:
             _reset_administrator(settings)
+            if exit_after_reset:
+                return 0
 
-        def _show_main():
+        def _show_main(run_setup=new_install, force_setup=setup):
             from ..users import (UserRepository, account_login_required, clear_session,
                                  ensure_default_admin, load_session, save_session)
             application.setStyleSheet(stylesheet(settings.theme))
@@ -1129,6 +1132,7 @@ def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False, r
                 if wizard.exec() != QDialog.DialogCode.Accepted:
                     application.quit()
                     return
+                mark_setup_complete()
             current_user = None
             repo = UserRepository(settings)
             ensure_default_admin(repo)
@@ -1165,6 +1169,17 @@ def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False, r
                     application.quit()
                     return
 
+            if offer_after_sign_in(current_user, has_users, forced=force_setup):
+                database = (settings.db_backend, settings.db_host, settings.db_port, settings.db_name)
+                wizard = SetupWizard(settings, theme=settings.theme, version=APP_VERSION, existing=has_users)
+                wizard.exec()
+                mark_setup_complete()
+                if database != (settings.db_backend, settings.db_host, settings.db_port, settings.db_name):
+                    # That account lives in the old database; sign in to the new one.
+                    clear_session()
+                    _show_main(run_setup=False, force_setup=False)
+                    return
+
             window = MainWindow(settings, autostart=autostart,
                                 current_user=current_user)
             errors.errorRaised.connect(window.on_unhandled_error)
@@ -1196,7 +1211,9 @@ def main(argv=None):
     parser.add_argument("--settings", default=None, help=f"Settings file (default {SETTINGS_PATH})")
     parser.add_argument("--start", action="store_true",
                         help="Open the camera and record attendance as soon as the window opens")
-    parser.add_argument("--setup", action="store_true", help="Show the first-run setup wizard")
+    parser.add_argument("--setup", action="store_true", help="Show the setup wizard after sign-in")
+    parser.add_argument("--exit-after-reset", action="store_true",
+                        help="With --reset-admin, close instead of starting the dashboard")
     parser.add_argument("--reset-admin", action="store_true",
                         help="Restore the default administrator on this computer, then start")
     args = parser.parse_args(argv)
@@ -1204,7 +1221,8 @@ def main(argv=None):
                         datefmt="%H:%M:%S")
     _log_to_file()
     return run_dashboard(args.settings, autostart=args.start, argv=sys.argv,
-                         setup=args.setup, reset_admin=args.reset_admin)
+                         setup=args.setup, reset_admin=args.reset_admin,
+                         exit_after_reset=args.exit_after_reset)
 
 
 if __name__ == "__main__":

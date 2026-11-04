@@ -3,6 +3,7 @@
 Qt-free so every step can be tested on its own. The wizard in
 ``dashboard/setup_wizard.py`` only collects answers and shows progress.
 """
+import logging
 import re
 import secrets
 import socket
@@ -21,6 +22,7 @@ MYSQL_PORT = 3306
 DEFAULT_DATABASE = "sv_attendance"
 APP_DB_USER = "sv_face"
 MIN_PASSWORD_LENGTH = 6
+SETUP_MARKER = ".setup_complete"
 _DATABASE_NAME = re.compile(r"[A-Za-z0-9_]{1,64}")
 _ACCESS_DENIED, _CANNOT_CONNECT = 1045, 2003
 _MYSQL_DOWNLOADS = {"win32": "https://dev.mysql.com/downloads/installer/",
@@ -50,12 +52,36 @@ def _has_local_data(path):
         return True  # Unreadable is never treated as a first run.
 
 
-def needs_setup(settings_path=None, frozen=None, root=None):
-    """Only a released app with no earlier settings or data asks the setup questions."""
+def setup_pending(frozen=None, root=None):
+    """True until this released install has been through the wizard once."""
     frozen = getattr(sys, "frozen", False) if frozen is None else frozen
-    if not frozen or Path(settings_path or SETTINGS_PATH).exists():
+    return bool(frozen) and not Path(root or ROOT, SETUP_MARKER).exists()
+
+
+def mark_setup_complete(root=None):
+    try:
+        path = Path(root or ROOT, SETUP_MARKER)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+    except OSError:
+        logging.exception("Could not record that setup finished")
+
+
+def needs_setup(settings_path=None, frozen=None, root=None):
+    """A brand-new install: no accounts to protect, so the wizard runs before sign-in."""
+    if not setup_pending(frozen, root) or Path(settings_path or SETTINGS_PATH).exists():
         return False
     return not _has_local_data(Path(root or ROOT, "attendance.db").resolve())
+
+
+def offer_after_sign_in(user, has_accounts, forced=False, frozen=None, root=None):
+    """An existing install sees the wizard once, only after someone allowed to change settings
+    signs in, so it can never be used to switch database or add an administrator without an account."""
+    if not (forced or setup_pending(frozen, root)):
+        return False
+    if not has_accounts:
+        return True
+    return user is not None and user.has_permission("manage_settings")
 
 
 def mysql_download_url(platform=None):
