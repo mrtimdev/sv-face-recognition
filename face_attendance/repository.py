@@ -43,6 +43,8 @@ class AttendanceRepository:
     def _migrate(self):
         conn = self.connection
         real = conn.real_type()
+        # MySQL can only index and uniquely constrain sized text.
+        key_text = "VARCHAR(255)" if conn.backend == "mysql" else "TEXT"
         with conn:
             conn.begin_immediate()
 
@@ -51,11 +53,11 @@ class AttendanceRepository:
                     {conn.auto_id_column()}, name TEXT NOT NULL,
                     timestamp TEXT NOT NULL, status TEXT NOT NULL,
                     snapshot TEXT, duration {real},
-                    employee_id TEXT, event_id TEXT,
+                    employee_id {key_text}, event_id {key_text},
                     captured_at_epoch {real}, recorded_at_epoch {real})""")
             else:
                 columns = conn.get_columns("attendance")
-                for name, kind in (("employee_id", "TEXT"), ("event_id", "TEXT"),
+                for name, kind in (("employee_id", key_text), ("event_id", key_text),
                                    ("captured_at_epoch", real), ("recorded_at_epoch", real)):
                     if name not in columns:
                         conn.execute(f"ALTER TABLE attendance ADD COLUMN {name} {kind}")
@@ -69,7 +71,7 @@ class AttendanceRepository:
                 conn.execute(f"""CREATE TABLE IF NOT EXISTS audit_log (
                     {conn.auto_id_column()},
                     timestamp TEXT NOT NULL, action TEXT NOT NULL,
-                    detail TEXT, actor TEXT DEFAULT 'system')""")
+                    detail TEXT, actor VARCHAR(255) DEFAULT 'system')""")
             else:
                 conn.execute("""CREATE TABLE IF NOT EXISTS attendance_cooldowns (
                     employee_id TEXT PRIMARY KEY, last_capture_epoch REAL NOT NULL)""")

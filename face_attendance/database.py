@@ -355,6 +355,7 @@ def connect(settings, readonly=False):
             password=getattr(settings, "db_password", ""),
             database=getattr(settings, "db_name", "sv_attendance"),
             autocommit=False,
+            use_pure=True,  # No native client library to bundle in release builds.
         )
         ssl_ca = getattr(settings, "db_ssl_ca", "")
         if ssl_ca:

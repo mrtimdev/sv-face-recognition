@@ -12,6 +12,7 @@ import os
 import sys
 import platform
 from importlib.util import find_spec
+from PyInstaller.utils.hooks import collect_submodules
 
 # ── Options ──────────────────────────────────────────────────────────
 APP_NAME = "SV Face ID"
@@ -89,6 +90,8 @@ hiddenimports = [
     "face_attendance.runtime",
     "face_attendance.main",
     "face_attendance.report",
+    "face_attendance.first_run",
+    "face_attendance.dashboard.setup_wizard",
     # Remote database drivers are imported lazily in database.connect().
     "psycopg2",
     "psycopg2.extensions",
@@ -101,6 +104,9 @@ _missing = [name for name in ("psycopg2", "mysql.connector") if find_spec(name.s
 if _missing:
     raise SystemExit("Missing database driver(s): " + ", ".join(_missing) +
                      ". Run: pip install -r requirements.txt")
+
+# MySQL's sign-in plugins and error messages are imported by name at run time.
+hiddenimports += collect_submodules("mysql.connector")
 
 # Windows doesn't have fcntl
 if platform.system() == "Windows":

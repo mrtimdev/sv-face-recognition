@@ -5,6 +5,7 @@ signals and are notified of settings changes by ``_broadcast_settings``.
 """
 import logging
 import os
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from .. import updates
 from ..settings import SETTINGS_PATH, Settings, describe_source
 from ..version import __version__
 from ..config import ROOT
+from ..first_run import needs_setup
 from ..storage import context_path
 from .access import AccessControl, AccountWatcher, NAV_PERMISSIONS, guard
 from .bridge import to_pixmap
@@ -33,6 +35,7 @@ from .screens.report import ReportScreen
 from .screens.settings import SettingsScreen
 from .screens.usage import UsageScreen
 from .screens.updates import UpdatePromptDialog
+from .setup_wizard import SetupWizard
 from .screens.users import UsersScreen, ProfileDialog
 from .shutdown import ShutdownSequence, relaunch_command
 from .sysmon import Monitor as SysMonitor, Snapshot as SysSnapshot
@@ -1074,7 +1077,36 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def run_dashboard(settings_path=None, autostart=False, argv=None):
+def _reset_administrator(settings):
+    """Handle ``--reset-admin``; the app has no console, so answer in a window."""
+    from ..users import (DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, UserRepository,
+                         clear_session, reset_default_admin)
+    try:
+        reset_default_admin(UserRepository(settings), settings)
+        clear_session()
+    except Exception as exc:
+        logging.exception("Could not reset the administrator")
+        QMessageBox.critical(None, "Reset administrator", f"The administrator was not reset.\n{exc}")
+    else:
+        QMessageBox.information(None, "Reset administrator",
+                                f"Sign in as {DEFAULT_ADMIN_USERNAME} with password "
+                                f"{DEFAULT_ADMIN_PASSWORD}, then change the password.")
+
+
+def _log_to_file():
+    """A windowed release has no console, so keep failures where they can be read."""
+    try:
+        path = ROOT / "logs" / "dashboard.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+    except OSError:
+        return
+    handler.setLevel(logging.WARNING)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    logging.getLogger().addHandler(handler)
+
+
+def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False, reset_admin=False):
     """Create the application, show the window and block until it closes."""
     import sys
     application = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
@@ -1082,12 +1114,21 @@ def run_dashboard(settings_path=None, autostart=False, argv=None):
     errors = DashboardErrorHandler(ROOT / "logs" / "dashboard-errors.log", application)
     errors.install()
     try:
+        # Decided before the splash, whose database check creates an empty file.
+        run_setup = setup or needs_setup(settings_path)
         settings = Settings.load(settings_path)
+        if reset_admin:
+            _reset_administrator(settings)
 
         def _show_main():
             from ..users import (UserRepository, account_login_required, clear_session,
                                  ensure_default_admin, load_session, save_session)
             application.setStyleSheet(stylesheet(settings.theme))
+            if run_setup:
+                wizard = SetupWizard(settings, theme=settings.theme, version=APP_VERSION)
+                if wizard.exec() != QDialog.DialogCode.Accepted:
+                    application.quit()
+                    return
             current_user = None
             repo = UserRepository(settings)
             ensure_default_admin(repo)
@@ -1155,10 +1196,15 @@ def main(argv=None):
     parser.add_argument("--settings", default=None, help=f"Settings file (default {SETTINGS_PATH})")
     parser.add_argument("--start", action="store_true",
                         help="Open the camera and record attendance as soon as the window opens")
+    parser.add_argument("--setup", action="store_true", help="Show the first-run setup wizard")
+    parser.add_argument("--reset-admin", action="store_true",
+                        help="Restore the default administrator on this computer, then start")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         datefmt="%H:%M:%S")
-    return run_dashboard(args.settings, autostart=args.start, argv=sys.argv)
+    _log_to_file()
+    return run_dashboard(args.settings, autostart=args.start, argv=sys.argv,
+                         setup=args.setup, reset_admin=args.reset_admin)
 
 
 if __name__ == "__main__":

@@ -62,6 +62,8 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, stored: str) -> bool:
+    if not isinstance(password, str) or not isinstance(stored, str):
+        return False
     try:
         if stored.startswith("pbkdf2_sha256$"):
             _, iterations, salt_hex, key_hex = stored.split("$")
@@ -76,7 +78,9 @@ def verify_password(password: str, stored: str) -> bool:
             return False
         key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
         return secrets.compare_digest(key.hex(), key_hex)
-    except (ValueError, AttributeError, TypeError):
+    except (ValueError, TypeError):
+        # A broken hashing library still raises, so it is reported as a failure
+        # to check the password instead of looking like a mistyped one.
         return False
 
 
@@ -219,6 +223,26 @@ def ensure_default_admin(repository, frozen=None):
         return None
 
 
+def reset_default_admin(repository, settings):
+    """Recovery for a locked-out computer: restore the default administrator.
+
+    Run on purpose with ``--reset-admin`` from this computer. A shared remote
+    database is refused, so one machine can never reopen everyone's accounts.
+    """
+    backend = getattr(settings, "db_backend", "sqlite")
+    if backend != "sqlite" and getattr(settings, "db_host", "") not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("The administrator can only be reset for a database on this computer.")
+    user = next((item for item in repository.list_users()
+                 if item.username == DEFAULT_ADMIN_USERNAME), None)
+    if user is None:
+        return repository.create_user(DEFAULT_ADMIN_USERNAME, "Administrator", "", "",
+                                      DEFAULT_ADMIN_PASSWORD, role="admin")
+    repository.update_user(user.uuid, password=DEFAULT_ADMIN_PASSWORD, role="admin",
+                           permissions=list(ALL_PERMISSIONS))
+    repository.set_disabled(user.uuid, False)
+    return repository.get_user(user.uuid)
+
+
 def clear_session():
     SESSION_PATH.unlink(missing_ok=True)
 
@@ -247,10 +271,11 @@ class UserRepository:
         if conn.table_exists("users"):
             cols = {c.lower() for c in conn.get_columns("users")}
             text = "VARCHAR(255)" if conn.backend == "mysql" else "TEXT"
+            long_text = "VARCHAR(1024)" if conn.backend == "mysql" else "TEXT"  # MySQL: no default on TEXT
             migrations = [
                 ("full_name", f"{text} NOT NULL DEFAULT ''"),
-                ("avatar_path", "TEXT NOT NULL DEFAULT ''"),
-                ("permissions", "TEXT NOT NULL DEFAULT '[]'"),
+                ("avatar_path", f"{long_text} NOT NULL DEFAULT ''"),
+                ("permissions", f"{long_text} NOT NULL DEFAULT '[]'"),
                 ("disabled", "INTEGER NOT NULL DEFAULT 0"),
             ]
             for col, typedef in migrations:
@@ -259,6 +284,7 @@ class UserRepository:
                     conn.commit()
             return
         text = "VARCHAR(255)" if conn.backend == "mysql" else "TEXT"
+        long_text = "VARCHAR(1024)" if conn.backend == "mysql" else "TEXT"  # MySQL: no default on TEXT
         pk = f"{text} PRIMARY KEY" if conn.backend == "mysql" else "TEXT PRIMARY KEY"
         conn.execute(f"""CREATE TABLE IF NOT EXISTS users (
             uuid {pk},
@@ -268,8 +294,8 @@ class UserRepository:
             email {text} NOT NULL DEFAULT '',
             password_hash TEXT NOT NULL,
             role {text} NOT NULL DEFAULT 'user',
-            permissions TEXT NOT NULL DEFAULT '[]',
-            avatar_path TEXT NOT NULL DEFAULT '',
+            permissions {long_text} NOT NULL DEFAULT '[]',
+            avatar_path {long_text} NOT NULL DEFAULT '',
             disabled INTEGER NOT NULL DEFAULT 0,
             created_at {text} NOT NULL,
             updated_at {text} NOT NULL)""")
