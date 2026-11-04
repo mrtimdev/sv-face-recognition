@@ -11,6 +11,7 @@ For a single .exe on Windows, set onefile=True below.
 import os
 import sys
 import platform
+from importlib.util import find_spec
 
 # ── Options ──────────────────────────────────────────────────────────
 APP_NAME = "SV Face ID"
@@ -88,7 +89,18 @@ hiddenimports = [
     "face_attendance.runtime",
     "face_attendance.main",
     "face_attendance.report",
+    # Remote database drivers are imported lazily in database.connect().
+    "psycopg2",
+    "psycopg2.extensions",
+    "mysql.connector",
 ]
+
+# Without these drivers a release set to PostgreSQL/MySQL cannot reach the
+# user database, so nobody can sign in. Refuse to build an app like that.
+_missing = [name for name in ("psycopg2", "mysql.connector") if find_spec(name.split(".")[0]) is None]
+if _missing:
+    raise SystemExit("Missing database driver(s): " + ", ".join(_missing) +
+                     ". Run: pip install -r requirements.txt")
 
 # Windows doesn't have fcntl
 if platform.system() == "Windows":

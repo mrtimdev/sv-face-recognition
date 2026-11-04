@@ -304,6 +304,10 @@ def connect(settings, readonly=False):
     if backend == "sqlite":
         import sqlite3
         path = _sqlite_path
+        if not readonly:
+            # A fresh install or a moved data folder must still open (and create)
+            # the database, or sign-in fails before any account can be checked.
+            _Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(path, timeout=1.5)
         conn.row_factory = sqlite3.Row
         if readonly:

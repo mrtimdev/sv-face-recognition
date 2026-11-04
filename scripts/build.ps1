@@ -16,7 +16,8 @@ Set-Location (Split-Path $PSScriptRoot)
 Write-Host "==> Activating venv..." -ForegroundColor Cyan
 & .\venv\Scripts\Activate.ps1
 
-Write-Host "==> Installing PyInstaller..." -ForegroundColor Cyan
+Write-Host "==> Installing dependencies and PyInstaller..." -ForegroundColor Cyan
+pip install -r requirements.txt --quiet
 pip install pyinstaller --quiet
 
 Write-Host "==> Cleaning previous build..." -ForegroundColor Cyan

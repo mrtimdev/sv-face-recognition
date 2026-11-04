@@ -2,6 +2,7 @@ opencv-python==4.10.0.84
 numpy==1.26.4
 PyQt6==6.10.2
 psutil>=5.9.0
-# Remote database (install the one you need):
-# psycopg2-binary>=2.9.0   # PostgreSQL
-# mysql-connector-python>=8.0.0  # MySQL
+# Remote database drivers. Release builds must bundle both, or an app set to
+# PostgreSQL/MySQL cannot open the user database and nobody can sign in.
+psycopg2-binary==2.9.10        # PostgreSQL
+mysql-connector-python==26.7.0  # MySQL

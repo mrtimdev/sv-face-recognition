@@ -12,7 +12,8 @@ cd "$(dirname "$0")/.."
 echo "==> Activating venv..."
 source venv/bin/activate
 
-echo "==> Installing PyInstaller..."
+echo "==> Installing dependencies and PyInstaller..."
+pip install -r requirements.txt --quiet
 pip install pyinstaller --quiet
 
 echo "==> Cleaning previous build..."
