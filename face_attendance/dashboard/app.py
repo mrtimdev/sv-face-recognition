@@ -1086,10 +1086,11 @@ def run_dashboard(settings_path=None, autostart=False, argv=None):
 
         def _show_main():
             from ..users import (UserRepository, account_login_required, clear_session,
-                                 load_session, save_session)
+                                 ensure_default_admin, load_session, save_session)
             application.setStyleSheet(stylesheet(settings.theme))
             current_user = None
             repo = UserRepository(settings)
+            ensure_default_admin(repo)
             has_users = account_login_required(repo)
 
             if has_users:

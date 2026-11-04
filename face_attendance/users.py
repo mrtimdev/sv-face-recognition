@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import secrets
+import sys
 import tempfile
 import uuid as _uuid
 from dataclasses import dataclass, field
@@ -38,6 +39,9 @@ SESSION_PATH = ROOT / ".session"
 # Present once this machine has seen user accounts, so an unreachable database
 # can never silently turn sign-in off.
 ACCOUNTS_MARKER = ROOT / ".accounts"
+# First sign-in for a released app whose user database has no accounts yet.
+DEFAULT_ADMIN_USERNAME = "timdev"
+DEFAULT_ADMIN_PASSWORD = "00000000"
 
 
 class AccountDisabledError(Exception):
@@ -194,6 +198,25 @@ def account_login_required(repository):
     if required:
         remember_accounts_exist()
     return required
+
+
+def ensure_default_admin(repository, frozen=None):
+    """Give a released app its default administrator when no accounts exist.
+
+    Returns the new ``User``, or ``None`` when nothing was created. A database
+    failure is logged and left to ``account_login_required``, which fails closed.
+    """
+    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    if not frozen:
+        return None
+    try:
+        if repository.has_users():
+            return None
+        return repository.create_user(DEFAULT_ADMIN_USERNAME, "Administrator", "", "",
+                                      DEFAULT_ADMIN_PASSWORD, role="admin")
+    except Exception:
+        logging.exception("Could not create the default administrator")
+        return None
 
 
 def clear_session():
