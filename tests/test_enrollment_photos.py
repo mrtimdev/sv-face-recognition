@@ -151,19 +151,13 @@ class EnrollmentGalleryTests(unittest.TestCase):
                 screen._show_profile()
                 app.processEvents()
                 row = screen.rows[0]
-                self.assertEqual(screen.enrolled_count_label.text(), '3 enrolled · 2 photos')
-                photos = [label for label in screen.enrolled_container.findChildren(QLabel)
-                          if label.accessibleName().startswith('Enrolled sample')]
-                self.assertEqual(len(photos), 3)
-                self.assertEqual(photos[0].text(), 'Photo\nunavailable')
-                self.assertFalse(photos[1].pixmap().isNull())
-                self.assertFalse(photos[2].pixmap().isNull())
+                # The profile shows angles only; the activity view still opens the saved photos.
+                self.assertFalse(hasattr(screen, 'enrolled_container'))
+                self.assertNotIn('sample', screen.profile_info.text())
+                self.assertFalse(screen.p_add_btn.isVisibleTo(screen.editor))
+                self.assertFalse(screen.p_del_btn.isVisibleTo(screen.editor))
                 self.assertEqual(enrollment_photos(settings, row['employee_id'], screen.rows),
                                  sample_photos(settings.encodings_path, 'Seed')[1:])
-                with patch.object(screen, '_open_image') as opened:
-                    photos[2].mousePressEvent(None)
-                    opened.assert_called_once_with(sample_photos(settings.encodings_path, 'Seed')[2])
-                self.assertIn('matching', screen.enrolled_hint.text())
                 self.assertEqual(screen.gallery_count_label.text(), 'none')  # Attendance is separate.
             finally:
                 window.close()

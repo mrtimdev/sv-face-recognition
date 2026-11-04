@@ -5,9 +5,11 @@ arrives, so this widget only letter-boxes the newest image.  While no frame is
 available it paints the "position your face in the frame" guide from the
 design: dark canvas, green corner brackets and a dashed face silhouette.
 
-Performance: QImage creation (which copies data for thread safety) happens in
-``set_frame``, but the heavier QPixmap conversion is deferred to ``paintEvent``
-so frames superseded between paint cycles never pay that cost.
+Performance: ``set_frame`` only keeps a reference to the newest frame. The
+copy into a QPixmap happens in ``paintEvent``, so frames superseded between
+paints, and frames sent while this view is hidden (another screen is open),
+cost nothing. Callers must hand over a frame they won't draw on again; camera
+reads and the engine's overlay renderer both produce a new array per frame.
 """
 from PyQt6.QtCore import QPointF, QRect, QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter,
@@ -27,7 +29,7 @@ class VideoView(QWidget):
         super().__init__(parent)
         self.theme = theme
         self._pixmap = None
-        self._pending_qimage = None
+        self._pending_frame = None
         self._title = message
         self._subtitle = subtitle
         self._resolution = ""
@@ -46,12 +48,14 @@ class VideoView(QWidget):
         self.update()
 
     def set_frame(self, frame):
-        """Store the newest frame as a QImage (thread-safe copy); pixmap conversion
-        is deferred to paintEvent so superseded frames skip the GPU upload."""
-        qimage = to_qimage(frame)
-        if qimage.isNull():
+        """Keep the newest frame; it is converted only when it is actually painted."""
+        if frame is None or not hasattr(frame, "shape") or frame.size == 0 or frame.ndim not in (2, 3):
             return
-        self._pending_qimage = qimage
+        if frame.ndim == 3 and frame.shape[2] != 3:
+            return
+        self._pending_frame = frame
+        if not self.isVisible():
+            return
         if self.hud is not None:
             self.hud.sample_frame(frame)
         self.update()
@@ -64,6 +68,13 @@ class VideoView(QWidget):
             self.hud.show()
         return self.hud
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._pending_frame is not None:  # Frames kept while hidden.
+            if self.hud is not None:
+                self.hud.sample_frame(self._pending_frame)
+            self.update()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.hud is not None:
@@ -71,7 +82,7 @@ class VideoView(QWidget):
 
     def show_message(self, title, subtitle=""):
         self._pixmap = None
-        self._pending_qimage = None
+        self._pending_frame = None
         if self.hud is not None:
             self.hud.reset_contrast()
         self._title, self._subtitle = title, subtitle
@@ -79,7 +90,7 @@ class VideoView(QWidget):
 
     def clear_frame(self):
         self._pixmap = None
-        self._pending_qimage = None
+        self._pending_frame = None
         if self.hud is not None:
             self.hud.reset_contrast()
         self.update()
@@ -101,14 +112,16 @@ class VideoView(QWidget):
         self.update()
 
     def has_frame(self):
-        return self._pixmap is not None or self._pending_qimage is not None
+        return self._pixmap is not None or self._pending_frame is not None
 
     # --- painting ---------------------------------------------------------
     def paintEvent(self, event):
-        # Convert pending QImage to QPixmap only when we actually paint.
-        if self._pending_qimage is not None:
-            self._pixmap = QPixmap.fromImage(self._pending_qimage)
-            self._pending_qimage = None
+        # Convert the newest frame only when we actually paint.
+        if self._pending_frame is not None:
+            pixmap = QPixmap.fromImage(to_qimage(self._pending_frame, copy=False))
+            self._pending_frame = None
+            if not pixmap.isNull():
+                self._pixmap = pixmap
 
         colors = palette(self.theme)
         painter = QPainter(self)

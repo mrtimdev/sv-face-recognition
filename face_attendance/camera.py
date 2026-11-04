@@ -12,6 +12,24 @@ from .models import FramePacket
 MAX_RECONNECT_BACKOFF = 30.0
 
 
+MIN_CAMERA_FPS = 30.0
+
+
+def fit_frame(frame, max_width, max_height):
+    """Shrink *frame* to fit inside max_width x max_height, keeping its shape.
+
+    Cameras often ignore the requested size (a Mac webcam asked for 1250x780
+    sends 1280x720). Resizing straight to the requested size would stretch
+    every face, which makes recognition less certain and slower to confirm.
+    """
+    height, width = frame.shape[:2]
+    if width <= max_width and height <= max_height:
+        return frame
+    scale = min(max_width / width, max_height / height)
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+
+
 class CameraManager:
     def __init__(self, config, capture_factory=None, clock=time.monotonic):
         self.config = config
@@ -40,7 +58,9 @@ class CameraManager:
         if cap.isOpened():
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.camera_width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.camera_height)
-            cap.set(cv2.CAP_PROP_FPS, cfg.target_fps)
+            # Ask for at least 30 fps: a webcam told 15 fps lengthens its exposure,
+            # which blurs moving faces and delivers each frame later.
+            cap.set(cv2.CAP_PROP_FPS, max(float(cfg.target_fps), MIN_CAMERA_FPS))
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # best effort; backend dependent
         return cap
 
@@ -80,8 +100,7 @@ class CameraManager:
                         if not ok or frame is None or frame.size == 0:
                             self._set_status("RECONNECTING")
                             break
-                        if frame.shape[1] > cfg_w or frame.shape[0] > cfg_h:
-                            frame = cv2.resize(frame, (cfg_w, cfg_h), interpolation=cv2.INTER_LINEAR)
+                        frame = fit_frame(frame, cfg_w, cfg_h)
                         # Opening succeeds even when a stream never yields a frame.
                         # Reset retry pressure only after actual capture succeeds.
                         backoff = retry_delay

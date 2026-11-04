@@ -41,6 +41,8 @@ hiddenimports = [
     "PyQt6.QtCore",
     "PyQt6.QtGui",
     "PyQt6.QtWidgets",
+    "PyQt6.QtNetwork",
+    "PyQt6.QtWebSockets",
     "PyQt6.sip",
     "sqlite3",
     "csv",

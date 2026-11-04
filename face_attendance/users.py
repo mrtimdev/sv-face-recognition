@@ -5,10 +5,8 @@ handles CRUD against the ``users`` table through the ``database`` abstraction.
 """
 import hashlib
 import json
-import logging
 import os
 import secrets
-import sys
 import tempfile
 import uuid as _uuid
 from dataclasses import dataclass, field
@@ -36,9 +34,6 @@ ROLE_DEFAULTS = {
 }
 
 SESSION_PATH = ROOT / ".session"
-# Present once this machine has seen user accounts, so an unreachable database
-# can never silently turn sign-in off.
-ACCOUNTS_MARKER = ROOT / ".accounts"
 # First sign-in for a released app whose user database has no accounts yet.
 DEFAULT_ADMIN_USERNAME = "timdev"
 DEFAULT_ADMIN_PASSWORD = "00000000"
@@ -98,6 +93,12 @@ class User:
     created_at: str = ""
     updated_at: str = ""
     disabled: bool = False
+    hrm_token: str = field(default="", repr=False)  # Set for an account signed in through SV HRM.
+
+    @property
+    def external(self) -> bool:
+        """True when SV HRM owns this account, not the local ``users`` table."""
+        return bool(self.hrm_token)
 
     @property
     def active(self) -> bool:
@@ -118,6 +119,7 @@ class Session:
     role: str
     token: str
     created_at: str
+    hrm_token: str = field(default="", repr=False)
 
 
 def save_session(user: User) -> Session:
@@ -126,7 +128,7 @@ def save_session(user: User) -> Session:
     session = Session(
         user_uuid=user.uuid, username=user.username,
         full_name=user.full_name, role=user.role,
-        token=token, created_at=now,
+        token=token, created_at=now, hrm_token=user.hrm_token,
     )
     SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({
@@ -136,6 +138,7 @@ def save_session(user: User) -> Session:
         "role": session.role,
         "token": session.token,
         "created_at": session.created_at,
+        "hrm_token": session.hrm_token,
     })
     # The temporary file is private from creation, and replacement is atomic.
     # A crash cannot leave a truncated session or a briefly public token.
@@ -183,6 +186,7 @@ def load_session() -> Session | None:
             user_uuid=data["user_uuid"], username=data["username"],
             full_name=data.get("full_name", ""), role=data.get("role", "user"),
             token=data["token"], created_at=data["created_at"],
+            hrm_token=str(data.get("hrm_token") or ""),
         )
     except (ValueError, TypeError, KeyError, OSError):
         try:
@@ -192,72 +196,8 @@ def load_session() -> Session | None:
         return None
 
 
-def account_login_required(repository):
-    """A failed account query cannot grant an unauthenticated dashboard."""
-    try:
-        required = repository.has_users()
-    except Exception:
-        logging.exception("Could not check user accounts; requiring sign-in")
-        return True
-    if required:
-        remember_accounts_exist()
-    return required
-
-
-def ensure_default_admin(repository, frozen=None):
-    """Give a released app its default administrator when no accounts exist.
-
-    Returns the new ``User``, or ``None`` when nothing was created. A database
-    failure is logged and left to ``account_login_required``, which fails closed.
-    """
-    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
-    if not frozen:
-        return None
-    try:
-        if repository.has_users():
-            return None
-        return repository.create_user(DEFAULT_ADMIN_USERNAME, "Administrator", "", "",
-                                      DEFAULT_ADMIN_PASSWORD, role="admin")
-    except Exception:
-        logging.exception("Could not create the default administrator")
-        return None
-
-
-def reset_default_admin(repository, settings):
-    """Recovery for a locked-out computer: restore the default administrator.
-
-    Run on purpose with ``--reset-admin`` from this computer. A shared remote
-    database is refused, so one machine can never reopen everyone's accounts.
-    """
-    backend = getattr(settings, "db_backend", "sqlite")
-    if backend != "sqlite" and getattr(settings, "db_host", "") not in ("localhost", "127.0.0.1", "::1"):
-        raise ValueError("The administrator can only be reset for a database on this computer.")
-    user = next((item for item in repository.list_users()
-                 if item.username == DEFAULT_ADMIN_USERNAME), None)
-    if user is None:
-        return repository.create_user(DEFAULT_ADMIN_USERNAME, "Administrator", "", "",
-                                      DEFAULT_ADMIN_PASSWORD, role="admin")
-    repository.update_user(user.uuid, password=DEFAULT_ADMIN_PASSWORD, role="admin",
-                           permissions=list(ALL_PERMISSIONS))
-    repository.set_disabled(user.uuid, False)
-    return repository.get_user(user.uuid)
-
-
 def clear_session():
     SESSION_PATH.unlink(missing_ok=True)
-
-
-def remember_accounts_exist():
-    try:
-        ACCOUNTS_MARKER.parent.mkdir(parents=True, exist_ok=True)
-        ACCOUNTS_MARKER.touch(exist_ok=True)
-    except OSError:
-        pass
-
-
-def accounts_expected() -> bool:
-    """True when this machine has had user accounts (see ``ACCOUNTS_MARKER``)."""
-    return ACCOUNTS_MARKER.exists()
 
 
 class UserRepository:

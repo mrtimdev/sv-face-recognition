@@ -50,7 +50,7 @@ class AccessDeniedDialog(WindowOverlay):
         column.addWidget(self.account)
         if not account:
             self.account.hide()
-        hint = QLabel("An administrator can grant it in Users & Access.")
+        hint = QLabel("An administrator can grant it in SV HRM.")
         hint.setObjectName("fieldHelp")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         column.addWidget(hint)

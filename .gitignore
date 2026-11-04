@@ -30,6 +30,9 @@ attendance.db
 attendance.db-wal
 attendance.db-shm
 employees.json
+hrm_employees.json
+hrm_angle_templates.json
+hrm_photos/
 captures/
 
 # Unknown face snapshots (if added later)
@@ -69,9 +72,8 @@ attendance.lock
 logs/
 plate_captures/
 ai_angles/
-# Remembered sign-in token, the "accounts exist" marker and account profile photos
+# Remembered sign-in token and account profile photos
 .session
-.accounts
 avatars/
 
 # IDE / editor

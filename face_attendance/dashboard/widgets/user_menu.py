@@ -78,8 +78,6 @@ class UserChip(QPushButton):
 class UserMenuPanel(PopupPanel):
     """Account dropdown: identity card, shortcuts and sign out."""
 
-    profileRequested = pyqtSignal()
-    usersRequested = pyqtSignal()
     settingsRequested = pyqtSignal()
     signOutRequested = pyqtSignal()
 
@@ -112,26 +110,21 @@ class UserMenuPanel(PopupPanel):
         items = QVBoxLayout()
         items.setContentsMargins(8, 8, 8, 8)
         items.setSpacing(2)
-        self.profile_item = self._item("user", "My profile", self.profileRequested)
-        self.users_item = self._item("shield", "Users && access", self.usersRequested)
         self.settings_item = self._item("gear", "Settings", self.settingsRequested)
-        for item in (self.profile_item, self.users_item, self.settings_item):
-            items.addWidget(item)
+        items.addWidget(self.settings_item)
         self.body.addLayout(items)
         self.sign_out_divider = self._divider()
         self.body.addWidget(self.sign_out_divider)
         bottom = QVBoxLayout()
         bottom.setContentsMargins(8, 8, 8, 8)
         self.sign_out_item = self._item("log-out", "Sign out", self.signOutRequested, danger=True)
-        self._signals = {self.profile_item: self.profileRequested,
-                         self.users_item: self.usersRequested,
-                         self.settings_item: self.settingsRequested,
+        self._signals = {self.settings_item: self.settingsRequested,
                          self.sign_out_item: self.signOutRequested}
         bottom.addWidget(self.sign_out_item)
         self.body.addLayout(bottom)
         self.set_theme(theme)
 
-    def set_user(self, name, meta="", role="", image=None, can_sign_out=True, has_profile=True):
+    def set_user(self, name, meta="", role="", image=None, can_sign_out=True):
         name = name or "Admin"
         self.avatar.set_name(name)
         self.avatar.set_image(image)
@@ -144,15 +137,13 @@ class UserMenuPanel(PopupPanel):
         self.role_pill.setText(role.upper() if role else "")
         self.role_pill.setVisible(bool(role))
         repolish(self.role_pill, "role", "admin" if str(role).lower() in ("admin", "administrator") else "user")
-        self.profile_item.setVisible(has_profile)
         self.sign_out_item.setVisible(can_sign_out)
         self.sign_out_divider.setVisible(can_sign_out)
         self.card.adjustSize()
         self.adjustSize()
 
-    def set_shortcuts(self, users=True, settings=True):
+    def set_shortcuts(self, settings=True):
         """Only offer shortcuts to screens the signed-in account may open."""
-        self.users_item.setVisible(users)
         self.settings_item.setVisible(settings)
         self.card.adjustSize()
         self.adjustSize()
@@ -163,9 +154,7 @@ class UserMenuPanel(PopupPanel):
             return
         c = palette(theme)
         self.avatar.set_theme(theme)
-        for item, glyph, color in ((self.profile_item, "user", c["text_secondary"]),
-                                   (self.users_item, "shield", c["text_secondary"]),
-                                   (self.settings_item, "gear", c["text_secondary"]),
+        for item, glyph, color in ((self.settings_item, "gear", c["text_secondary"]),
                                    (self.sign_out_item, "log-out", c["danger"])):
             item.setIcon(make_icon(glyph, 17, color, ratio=2.0))
 

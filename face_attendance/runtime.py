@@ -7,7 +7,7 @@ import numpy as np
 
 from .attendance import AttendanceService
 from .camera import CameraManager
-from .catalog import FaceCatalog
+from . import hrm_directory
 from .models import RecognitionRequest
 from .persistence import PersistenceWorker
 from .recognition import RecognitionService, RecognitionWorker
@@ -18,7 +18,7 @@ from .ui import UIRenderer
 class AttendanceApplication:
     def __init__(self, config):
         self.config = config
-        self.catalog = FaceCatalog(config.encodings_path, config.employees_path)
+        self.catalog = hrm_directory.live_catalog(config)
         cv2.setNumThreads(config.opencv_threads)
         self.camera = CameraManager(config)
         self.recognition = RecognitionWorker(RecognitionService(config, self.catalog))

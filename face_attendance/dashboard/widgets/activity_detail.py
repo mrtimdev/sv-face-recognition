@@ -10,7 +10,9 @@ from PyQt6.QtWidgets import (QDialog, QFrame, QGraphicsBlurEffect, QHBoxLayout,
 
 from ..icons import apply_button_icon
 from ..theme import palette
+from ...ai_providers import ANGLES
 from ...enrollment_photos import sample_photo_map
+from ...hrm_directory import saved_angles_dir
 
 
 def load_photo(path, limit=1200):
@@ -54,6 +56,14 @@ def enrollment_photos(settings, employee_id, rows):
     return photos
 
 
+def angle_photos(settings, employee_id):
+    """This employee's HRM angle images already on this computer, in the usual angle order."""
+    if not str(employee_id or "").strip():
+        return []
+    folder = saved_angles_dir(settings, str(employee_id).strip())
+    return [path for path in (folder / f"{angle.key}.jpg" for angle in ANGLES) if path.is_file()]
+
+
 class EvidencePhoto(QWidget):
     """Rounded photo surface, preserving the entire image in the detail view."""
     def __init__(self, pixmap=None, theme="light", thumbnail=False, parent=None):
@@ -95,11 +105,13 @@ class EvidencePhoto(QWidget):
 
 
 class ActivityDetailDialog(QDialog):
-    def __init__(self, entry, photo_paths, theme="light", parent=None):
+    def __init__(self, entry, photo_paths, theme="light", parent=None, angles=False):
         super().__init__(parent)
         self.entry = entry
         self.photo_paths = list(photo_paths)
         self._photo_index = 0
+        self._angles = angles                   # Showing HRM's enrolled angles rather than local samples.
+        self._angles_loading = angles
         self._theme = theme
         self.setWindowTitle("Attendance detail")
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
@@ -211,7 +223,8 @@ class ActivityDetailDialog(QDialog):
         capture_col.addWidget(self.capture_caption)
         photos.addLayout(capture_col, 1)
         enrolled_col = QVBoxLayout()
-        enrolled_title = self._label("02   Enrolled images", "evidenceSection")
+        enrolled_title = self._label("02   Enrolled angles" if self._angles else "02   Enrolled images",
+                                     "evidenceSection")
         enrolled_title.setMinimumHeight(38)
         enrolled_col.addWidget(enrolled_title)
         self.enrolled_photo = EvidencePhoto(theme=self._theme)
@@ -267,11 +280,32 @@ class ActivityDetailDialog(QDialog):
             self.capture_caption.setText("Verified face crop from this event")
             self.context_button.setText("Full frame")
 
+    def set_angle_photos(self, paths):
+        """The current angles from HRM arrived. Stays on the angle being looked at when it's still there."""
+        current = self.photo_paths[self._photo_index] if self.photo_paths else None
+        self._angles_loading = False
+        self.photo_paths = list(paths)
+        self._photo_index = self.photo_paths.index(current) if current in self.photo_paths else 0
+        if not self.photo_paths:
+            self.enrolled_photo.set_photo(QPixmap())
+        self._navigate(0)
+
+    def stop_loading_angles(self):
+        """HRM couldn't be reached: keep showing the copies on this computer."""
+        self._angles_loading = False
+        self._navigate(0)
+
     def _navigate(self, delta):
         if self.photo_paths:
             self._photo_index = min(max(0, self._photo_index + delta), len(self.photo_paths) - 1)
-            self.enrolled_photo.set_photo(load_photo(self.photo_paths[self._photo_index]))
-            self.photo_count.setText(f"{self._photo_index + 1} / {len(self.photo_paths)} enrolled images")
+            path = self.photo_paths[self._photo_index]
+            self.enrolled_photo.set_photo(load_photo(path))
+            self.photo_count.setText(
+                f"{self._photo_index + 1} / {len(self.photo_paths)} enrolled angles  ·  {Path(path).stem.capitalize()}"
+                if self._angles else f"{self._photo_index + 1} / {len(self.photo_paths)} enrolled images")
+        elif self._angles:
+            self.photo_count.setText("Loading angles from SV HRM…" if self._angles_loading
+                                     else "No enrolled angles in SV HRM")
         else:
             self.photo_count.setText("No enrollment photo saved")
         self.previous.setEnabled(self._photo_index > 0)

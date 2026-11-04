@@ -58,6 +58,8 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(payload["employeeId"], "E001")
         self.assertEqual(payload["eventId"], "event-one")
         self.assertTrue(payload["capturedAt"].endswith("+00:00"))
+        self.assertIn("matchDistance", payload)
+        self.assertIn("liveScore", payload)
         replay = self.repo.record(self.job, self.snapshots)
         self.assertEqual(replay.snapshot, saved.snapshot)
         duplicate = self.repo.record(replace(self.job, event_id="event-two"), self.snapshots)

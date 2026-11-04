@@ -20,7 +20,12 @@ from ..threads import settle, start_detached
 from ...ai_providers import (AIConfig, AIError, DEFAULT_TEST_MESSAGE, PREFERRED_CHAT_MODELS, PROVIDERS,
                              dump_profiles, list_models, load_profiles, plain_http_warning, send_test_message,
                              split_models)
-from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source, hash_pin
+from ...hrm_sync import HRMConfig, HRMError
+from ...hrm_sync import check_connection as hrm_check_connection
+from ...hrm_sync import configuration_problem as hrm_configuration_problem
+from ...hrm_sync import default_base_url as hrm_default_base_url
+from ...hrm_sync import plain_http_warning as hrm_plain_http_warning
+from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source
 from ..icons import apply_button_icon, make_icon
 from ..theme import palette
 from ..widgets import Card, PageHeader, StatCard, ToastBar
@@ -155,7 +160,6 @@ class SettingsScreen(QWidget):
             self._build_storage_group(), self._build_database_group()))
         self._stack.addWidget(self._make_page(self._build_report_group()))
         self._stack.addWidget(self._make_page(self._build_telegram_group()))
-        self._stack.addWidget(self._make_page(self._build_security_group()))
         self._stack.addWidget(self._build_backup_page())
         self.updates_page = UpdatesPage(self.settings, self._theme)
         self._stack.addWidget(self.updates_page)
@@ -187,7 +191,6 @@ class SettingsScreen(QWidget):
             ("database", "Data && Storage"),
             ("sliders", "Appearance"),
             ("send", "Notifications"),
-            ("shield", "Security"),
             ("download", "Backup"),
             ("refresh", "Updates"),
             ("bolt", "AI Configuration"),
@@ -223,7 +226,7 @@ class SettingsScreen(QWidget):
     def _select_tab(self, index):
         self._stack.setCurrentIndex(index)
         self._update_tab_icons()
-        if index == 6:
+        if index == 5:
             self._refresh_backup_info()
 
     def _update_tab_icons(self):
@@ -489,7 +492,63 @@ class SettingsScreen(QWidget):
         self.ai_load_button.clicked.connect(self._ai_load_models)
         self.ai_test_button.clicked.connect(self._ai_send_test)
         self._load_ai(self.settings)
+        self._build_hrm_section(card)
         return card
+
+    def _build_hrm_section(self, card):
+        """Where Generate 6 angles sends its images: the SV HRM backend, by API key."""
+        card.add(self._section("Send face angles to HRM"))
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        url = QLineEdit()
+        url.setPlaceholderText(hrm_default_base_url())
+        self._register(form, "hrm_api_url", "HRM address", url,
+                       "The SV HRM server. Left empty, this Mac's network IP on port 8082 is used.")
+        self.hrm_url_warning = _FormNote()
+        self.hrm_url_warning.setObjectName("screenSubtitle")
+        self.hrm_url_warning.setWordWrap(True)
+        form.addRow("", self.hrm_url_warning)
+        url.textChanged.connect(lambda text: self.hrm_url_warning.setText(hrm_plain_http_warning(text)))
+        key = QLineEdit()
+        key.setEchoMode(QLineEdit.EchoMode.Password)
+        key.setPlaceholderText("Paste the face-recognition API key from HRM")
+        self._add_reveal(key)
+        self._register(form, "hrm_api_key", "HRM API key", key,
+                       "Set on the server as face-recognition.api-keys. Saved in settings.json on this computer.")
+        self.hrm_test_button = QPushButton("Test HRM connection")
+        self.hrm_test_button.setObjectName("softButton")
+        self.hrm_test_result = _FormNote()
+        self.hrm_test_result.setObjectName("screenSubtitle")
+        self.hrm_test_result.setWordWrap(True)
+        row = QHBoxLayout()
+        row.addWidget(self.hrm_test_button)
+        row.addWidget(self.hrm_test_result, 1)
+        form.addRow("", self._row_widget(row))
+        card.add_layout(form)
+        tuple(self._check_rows(card, (
+            ("hrm_auto_upload", "Send each generated angle to HRM as soon as it is saved",
+             "Only for people with an employee ID. Off: use Send to HRM on the AI Face Angles screen."),
+        )))
+        self.hrm_test_button.clicked.connect(self._hrm_test)
+
+    def _hrm_test(self):
+        config = HRMConfig(base_url=self.fields["hrm_api_url"].text().strip() or hrm_default_base_url(),
+                           api_key=self.fields["hrm_api_key"].text().strip())
+        problem = hrm_configuration_problem(config)
+        if problem:
+            self.hrm_test_result.setText(problem)
+            return
+        self.hrm_test_result.setText("Connecting…")
+        self._ai_run(self.hrm_test_button, lambda: hrm_check_connection(config), self._hrm_test_done)
+
+    def _hrm_test_done(self, angles, error):
+        if error:
+            self.hrm_test_result.setText(error)
+            self.toast.show_message(error, "bad")
+        else:
+            self.hrm_test_result.setText(f"Connected. HRM accepts: {', '.join(angles)}.")
+            self.toast.show_message("HRM accepted the key. Save to keep it.", "ok")
 
     @staticmethod
     def _row_widget(layout):
@@ -794,8 +853,8 @@ class SettingsScreen(QWidget):
         self._bk_size.set_value(info["size_str"], "idle")
         self._bk_size.set_hint(info["size_hint"])
 
-    UPDATES_TAB = 7
-    AI_TAB = 8
+    UPDATES_TAB = 6
+    AI_TAB = 7
 
     def show_updates(self):
         """Open the Updates tab (used by the startup prompt and notifications)."""
@@ -905,36 +964,6 @@ class SettingsScreen(QWidget):
         self.tg_test_button.clicked.connect(self._test_telegram)
         return card
 
-    def _build_security_group(self):
-        card, form = self._card_form("Security",
-                                     "Dashboard access PIN and authentication.", icon="shield")
-        self.pin_edit = QLineEdit()
-        self.pin_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.pin_edit.setPlaceholderText("Enter new PIN (leave empty to disable)")
-        self.pin_confirm_edit = QLineEdit()
-        self.pin_confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.pin_confirm_edit.setPlaceholderText("Confirm PIN")
-        self.pin_set_button = QPushButton("Set PIN")
-        self.pin_set_button.setObjectName("softButton")
-        self.pin_clear_button = QPushButton("Remove PIN")
-        self.pin_clear_button.setObjectName("danger")
-        self.pin_status = QLabel(
-            "PIN is set" if self.settings.dashboard_pin_hash else "No PIN configured")
-        self.pin_status.setObjectName("screenSubtitle")
-        form.addRow("Dashboard PIN", self.pin_edit)
-        form.addRow("Confirm PIN", self.pin_confirm_edit)
-        row = QHBoxLayout()
-        row.addWidget(self.pin_set_button)
-        row.addWidget(self.pin_clear_button)
-        row.addWidget(self.pin_status)
-        row.addStretch(1)
-        form.addRow("", self._row_widget(row))
-        form.addRow("", self._hint("The PIN protects the dashboard on startup. "
-                                   "A SHA-256 hash is stored in settings.json, never the PIN itself."))
-        self.pin_set_button.clicked.connect(self._set_pin)
-        self.pin_clear_button.clicked.connect(self._clear_pin)
-        return card
-
     def _build_backup_page(self):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1011,48 +1040,6 @@ class SettingsScreen(QWidget):
 
         self._backup_button.clicked.connect(self._export_backup)
         return scroll
-
-    def _set_pin(self):
-        pin = self.pin_edit.text()
-        confirm = self.pin_confirm_edit.text()
-        if not pin:
-            self.toast.show_message("Enter a PIN first.", "warn")
-            return
-        if len(pin) < 4:
-            self.toast.show_message("PIN must be at least 4 characters.", "warn")
-            return
-        if pin != confirm:
-            self.toast.show_message("PINs do not match.", "bad")
-            return
-        self.settings.dashboard_pin_hash = hash_pin(pin)
-        try:
-            self.settings.save()
-        except OSError as exc:
-            self.toast.show_message(f"Could not save: {exc}", "bad")
-            return
-        self.pin_edit.clear()
-        self.pin_confirm_edit.clear()
-        self.pin_status.setText("PIN is set")
-        self.toast.show_message("Dashboard PIN saved. It takes effect on next launch.", "ok")
-        self.settingsApplied.emit(self.settings, False)
-
-    def _clear_pin(self):
-        confirmed = QMessageBox.question(
-            self, "Remove PIN",
-            "Remove the dashboard PIN? Anyone with access to this machine will be able to "
-            "open the dashboard without authentication.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if confirmed != QMessageBox.StandardButton.Yes:
-            return
-        self.settings.dashboard_pin_hash = ""
-        try:
-            self.settings.save()
-        except OSError as exc:
-            self.toast.show_message(f"Could not save: {exc}", "bad")
-            return
-        self.pin_status.setText("No PIN configured")
-        self.toast.show_message("Dashboard PIN removed.", "ok")
-        self.settingsApplied.emit(self.settings, False)
 
     def _test_telegram(self):
         token = self.fields["telegram_bot_token"].text().strip()
@@ -1253,7 +1240,7 @@ class _AICallWorker(QThread):
     def run(self):
         try:
             self.completed.emit(self._call(), "")
-        except AIError as exc:
+        except (AIError, HRMError) as exc:
             self.completed.emit(None, str(exc))
         except Exception:
             logging.exception("AI provider call failed")

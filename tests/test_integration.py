@@ -199,7 +199,7 @@ class IntegrationTests(unittest.TestCase):
                              capture_after_sec=.12, stable_recheck_sec=.04, camera_width=480, camera_height=240,
                              db_path=root / "attendance.db", capture_dir=root / "captures",
                              log_path=root / "observations.csv", alert_path=root / "missing.wav")
-            with patch("face_attendance.runtime.FaceCatalog", return_value=catalog), \
+            with patch("face_attendance.hrm_directory.FaceCatalog", return_value=catalog), \
                     patch("face_attendance.runtime.RecognitionService", side_effect=lambda cfg, cat: RecognitionService(cfg, cat, Backend())), \
                     patch("face_attendance.runtime.CameraManager", side_effect=lambda cfg: CameraManager(cfg, lambda: cap)), \
                     patch("face_attendance.runtime.cv2.namedWindow"), \

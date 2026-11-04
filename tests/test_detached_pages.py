@@ -51,7 +51,7 @@ class DetachedPagesTests(unittest.TestCase):
         originals = list(window.screens)
         count = window.stack.count()
         live_window, live = self.detached(0)
-        plates_window, plates = self.detached(6)
+        plates_window, plates = self.detached(5)
         self.assertIsNot(live_window, plates_window)
         window.nav.setCurrentRow(1)
         self.application.processEvents()
@@ -69,17 +69,17 @@ class DetachedPagesTests(unittest.TestCase):
         for index, screen in enumerate(originals):
             window.nav.setCurrentRow(index)
             self.application.processEvents()
-            expected = window._detached_pages[index].host if index in (0, 6) else screen
+            expected = window._detached_pages[index].host if index in (0, 5) else screen
             self.assertIs(window.stack.currentWidget(), expected)
         self.assertTrue(live.host.placeholder.isVisible() or window.nav.currentRow() != 0)
-        window.nav.setCurrentRow(6)
+        window.nav.setCurrentRow(5)
         self.application.processEvents()
         self.assertTrue(plates.host.placeholder.isVisible())
 
     def test_close_and_return_reuse_pages_without_stopping_processing(self):
         window = self.window
         live_window, live = self.detached(0)
-        plates_window, plates = self.detached(6)
+        plates_window, plates = self.detached(5)
         with patch.object(window.engine, 'stop') as engine_stop, \
                 patch.object(plates.screen, 'stop') as plate_stop:
             live_window.close()
@@ -89,10 +89,10 @@ class DetachedPagesTests(unittest.TestCase):
             self.assertIs(window.stack.widget(0), live.screen)
             plates_window.return_button.click()
             self.application.processEvents()
-            self.assertIs(window.attach_page(6), plates.screen)
+            self.assertIs(window.attach_page(5), plates.screen)
             self.assertFalse(plates.is_detached)
             self.assertIsNone(plates.window)
-            self.assertIs(window.stack.widget(6), plates.screen)
+            self.assertIs(window.stack.widget(5), plates.screen)
             engine_stop.assert_not_called()
             plate_stop.assert_not_called()
 
@@ -114,7 +114,7 @@ class DetachedPagesTests(unittest.TestCase):
         self.assertIs(self.window.stack.currentWidget(), controller.screen)
 
     def test_hud_and_menu_toggle_same_page_and_native_close_preserves_other_navigation(self):
-        for index in (0, 6):
+        for index in (0, 5):
             with self.subTest(index=index):
                 screen = self.window.screens[index]
                 self.window.nav.setCurrentRow(index)
@@ -135,7 +135,7 @@ class DetachedPagesTests(unittest.TestCase):
                 self.assertIs(self.window.stack.currentWidget(), self.window.screens[1])
 
     def test_fullscreen_affects_only_external_window_and_redocking_restores_chrome(self):
-        for index in (0, 6):
+        for index in (0, 5):
             with self.subTest(index=index):
                 external, controller = self.detached(index)
                 self.window.nav.setCurrentRow(1)
@@ -154,7 +154,7 @@ class DetachedPagesTests(unittest.TestCase):
 
     def test_return_from_native_fullscreen_reopens_as_normal_window(self):
         # The OS titlebar fullscreen control does not set the screen HUD flag.
-        for index in (0, 6):
+        for index in (0, 5):
             with self.subTest(index=index):
                 external, controller = self.detached(index)
                 external.showFullScreen()
@@ -177,7 +177,7 @@ class DetachedPagesTests(unittest.TestCase):
                 self.window.attach_page(index)
 
     def test_native_fullscreen_close_and_dashboard_return_restore_window_state(self):
-        for index in (0, 6):
+        for index in (0, 5):
             for close_window in (True, False):
                 with self.subTest(index=index, close_window=close_window):
                     external, controller = self.detached(index)
@@ -198,7 +198,7 @@ class DetachedPagesTests(unittest.TestCase):
                     self.window.attach_page(index)
 
     def test_detach_from_native_dashboard_fullscreen_restores_dashboard(self):
-        for index in (0, 6):
+        for index in (0, 5):
             with self.subTest(index=index):
                 self.window.nav.setCurrentRow(index)
                 self.window.showFullScreen()
@@ -211,7 +211,7 @@ class DetachedPagesTests(unittest.TestCase):
                 self.window.attach_page(index)
 
     def test_return_from_hud_fullscreen_can_reopen_and_toggle_again(self):
-        for index in (0, 6):
+        for index in (0, 5):
             with self.subTest(index=index):
                 external, controller = self.detached(index)
                 for _ in range(2):
@@ -232,7 +232,7 @@ class DetachedPagesTests(unittest.TestCase):
     def test_access_is_shared_and_revocation_redocks_sensitive_windows(self):
         from face_attendance.dashboard.access import access_for
         from face_attendance.users import User
-        detached = [self.detached(index) for index in (0, 6)]
+        detached = [self.detached(index) for index in (0, 5)]
         for external, controller in detached:
             self.assertIs(access_for(controller.screen), self.window.access)
             self.assertIs(external.access, self.window.access)
@@ -246,7 +246,7 @@ class DetachedPagesTests(unittest.TestCase):
             self.assertFalse(controller.screen.isVisible())
 
     def test_settings_and_theme_reach_original_detached_screens(self):
-        controllers = [self.detached(index)[1] for index in (0, 6)]
+        controllers = [self.detached(index)[1] for index in (0, 5)]
         updated = replace(self.window.settings, theme='dark', source=3)
         self.window._broadcast_settings(updated, False)
         self.application.processEvents()
@@ -256,7 +256,7 @@ class DetachedPagesTests(unittest.TestCase):
             self.assertTrue(controller.window.isVisible())
 
     def test_root_close_closes_external_windows_without_resurrecting_them(self):
-        detached = [self.detached(index) for index in (0, 6)]
+        detached = [self.detached(index) for index in (0, 5)]
         self.window.close()
         self.application.processEvents()
         self.assertFalse(self.window.isVisible())
@@ -265,7 +265,7 @@ class DetachedPagesTests(unittest.TestCase):
             self.assertFalse(controller.is_detached)
 
     def test_repeated_detach_cycles_reuse_one_window_and_keep_stack_order(self):
-        for index in (0,6):
+        for index in (0, 5):
             first,controller = self.detached(index)
             for _ in range(4):
                 self.window.attach_page(index)
@@ -283,13 +283,13 @@ class DetachedPagesTests(unittest.TestCase):
         controller.screen.settingsRequested.emit()
         self.application.processEvents()
         self.assertFalse(self.window.isMinimized())
-        self.assertEqual(self.window.nav.currentRow(),5)
+        self.assertEqual(self.window.nav.currentRow(),4)
         self.assertTrue(external.isVisible())
         self.window.attach_page(0)
         self.assertIs(self.window.capture_flash.parentWidget(),self.window.centralWidget())
 
     def test_signout_start_hides_external_windows_and_blocks_reopening(self):
-        detached = [self.detached(index) for index in (0,6)]
+        detached = [self.detached(index) for index in (0, 5)]
         from face_attendance.dashboard import app as shell
         with patch.object(shell.ShutdownSequence,'start'):
             self.window._begin_exit('signout')
@@ -306,12 +306,12 @@ class DetachedPagesTests(unittest.TestCase):
         self.window.access.set_user(report_only)
         with patch.object(self.window.access,'deny') as deny:
             self.assertIsNone(self.window.detach_page(0))
-            self.assertIsNone(self.window.detach_page(6))
+            self.assertIsNone(self.window.detach_page(5))
             self.assertEqual(deny.call_count,2)
         self.assertFalse(any(page.is_detached for page in self.window._detached_pages.values()))
 
     def test_plate_worker_and_preview_timer_survive_reparenting(self):
-        screen = self.window.screens[6]
+        screen = self.window.screens[5]
         packet = SimpleNamespace(sequence=1,generation=1,frame=np.zeros((160,240,3),np.uint8))
         worker = SimpleNamespace(isRunning=lambda:True, preview_packet=lambda:packet,
                                  inference_ms=20, manual=threading.Event(),automatic=threading.Event())
@@ -319,13 +319,13 @@ class DetachedPagesTests(unittest.TestCase):
         screen.timer.start()
         try:
             with patch('license_plate.screen.PlateWorker') as factory:
-                external,controller = self.detached(6)
+                external,controller = self.detached(5)
                 self.window.nav.setCurrentRow(1)
                 screen._preview()
                 self.assertTrue(screen.preview.has_frame())
                 self.assertIs(screen.worker,worker)
                 self.assertTrue(screen.timer.isActive())
-                self.window.attach_page(6)
+                self.window.attach_page(5)
                 self.assertIs(screen.worker,worker)
                 self.assertTrue(screen.timer.isActive())
                 factory.assert_not_called()
@@ -334,7 +334,7 @@ class DetachedPagesTests(unittest.TestCase):
             screen.worker = None
 
     def test_detach_from_dashboard_fullscreen_restores_dashboard_first(self):
-        for index in (0,6):
+        for index in (0, 5):
             with self.subTest(index=index):
                 self.window.nav.setCurrentRow(index)
                 screen = self.window.screens[index]

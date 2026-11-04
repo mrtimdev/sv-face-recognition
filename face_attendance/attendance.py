@@ -160,7 +160,8 @@ class AttendanceService:
                              context_frame=evidence.frame.copy(), face_box=track.evidence_box,
                              crop_box=crop_box, source_sequence=evidence.sequence,
                              source_generation=evidence.generation,
-                             last_name=track.employee_last_name)
+                             last_name=track.employee_last_name,
+                             match_distance=track.recognition_distance, live_score=track.spoof_score)
             if self.persistence.submit(job):
                 self.pending[job.employee_id] = job.event_id
                 track.pending_event_id = job.event_id

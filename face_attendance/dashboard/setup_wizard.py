@@ -5,6 +5,8 @@ from PyQt6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, 
                              QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import first_run
+from ..hrm_sync import HRMConfig, HRMError
+from ..hrm_sync import _base_url as hrm_base_url
 from ..users import DEFAULT_ADMIN_USERNAME, UserRepository
 from .login import AuthHero
 from .threads import start_detached
@@ -146,7 +148,7 @@ class SetupWizard(QDialog):
                       "Your existing accounts and attendance are left untouched",
                       "Close this window to skip; it won't appear again") if self._existing else
                      ("Choose where attendance and accounts are stored",
-                      "Create the administrator who signs in first",
+                      "Connect SV HRM, whose accounts sign in to this dashboard",
                       "Close this window at any time and setup starts again next time")):
             item = QLabel("✓  " + text)
             item.setObjectName("authSubtitle")
@@ -227,7 +229,7 @@ class SetupWizard(QDialog):
 
     def _build_admin(self):
         page, layout = self._page("Administrator", "Create the administrator",
-                                  "This account signs in first and can add other users.")
+                                  "This local account is for the mobile API.")
         self.admin_username = TextInput("Username", icon="user", theme=self._theme)
         self.admin_username.setText(DEFAULT_ADMIN_USERNAME)
         self.admin_password = TextInput("Password", password=True, theme=self._theme)
@@ -242,11 +244,16 @@ class SetupWizard(QDialog):
                                    help_text="Leave empty to use the default release password."))
         fields.addWidget(FormField("Repeat password", self.admin_confirm, optional=True, theme=self._theme))
         layout.addWidget(self.admin_fields)
-        self.accounts_note = QLabel("This database already has accounts. Sign in with one of them "
-                                    "after setup; no new account is needed.")
+        self.accounts_note = QLabel("This database already has local accounts for the mobile API; "
+                                    "no new account is needed.")
         self.accounts_note.setObjectName("authSubtitle")
         self.accounts_note.setWordWrap(True)
         layout.addWidget(self.accounts_note)
+        self.hrm_address = TextInput("https://hrm.example.com", theme=self._theme)
+        self.hrm_address.setText(getattr(self.settings, "hrm_api_url", "") or "")
+        layout.addWidget(FormField("SV HRM address", self.hrm_address, optional=True, theme=self._theme,
+                                   help_text="Dashboard sign-in uses SV HRM accounts. Leave empty for "
+                                             "SV HRM on this computer's network address."))
         layout.addStretch(1)
         return page
 
@@ -369,7 +376,14 @@ class SetupWizard(QDialog):
         if not self._has_accounts and password != self.admin_confirm.text():
             self.error.setText("The two passwords don't match.")
             return
-        self.settings.update(self._values)
+        address = self.hrm_address.text().strip()
+        try:
+            if address:
+                hrm_base_url(HRMConfig(base_url=address))
+        except HRMError as exc:
+            self.error.setText(str(exc))
+            return
+        self.settings.update({**self._values, "hrm_api_url": address})
         try:
             if not self._has_accounts:
                 first_run.create_administrator(self.settings, self.admin_username.text(), password)
@@ -383,7 +397,8 @@ class SetupWizard(QDialog):
             location = "Your database is unchanged." if self._existing else "Data is stored in the built-in database."
         account = ("your existing accounts" if self._has_accounts
                    else f"the account “{self.admin_username.text().strip()}”")
-        self.summary.setText(f"{location} Sign in with {account}.")
+        self.summary.setText(f"{location} The mobile API signs in with {account}. "
+                             "The dashboard signs in with your SV HRM account.")
         self.admin_password.clear()
         self.admin_confirm.clear()
         self._go(FINISH)

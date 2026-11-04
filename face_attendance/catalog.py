@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 import numpy as np
 
 from .models import Employee
+from .angle_templates import vector_of
 from .template_store import read_templates
 
 
@@ -49,8 +50,17 @@ def load_employee_map(path):
 
 
 class FaceCatalog:
-    def __init__(self, encodings_path, employees_path, allow_empty=False):
-        self.employee_map = load_employee_map(employees_path)
+    def __init__(self, encodings_path, employees_path, allow_empty=False, resolve=None, angle_store=None):
+        """*resolve* maps each ``Employee`` to its current details (see hrm_directory.resolver).
+
+        With *angle_store* (see angle_templates) faces are matched only against the HRM angles,
+        and the local samples in *encodings_path* aren't used at all.
+        """
+        resolve = resolve or (lambda employee: employee)
+        self.employee_map = {label: resolve(employee) for label, employee in load_employee_map(employees_path).items()}
+        if angle_store is not None:
+            self._load_angles(angle_store, resolve)
+            return
         path = Path(encodings_path)
         if not path.exists():
             if allow_empty:
@@ -64,7 +74,8 @@ class FaceCatalog:
         inactive_ids = {e.employee_id for e in self.employee_map.values() if not e.active}
         for name, samples in data.items():
             employee_id = legacy_employee_id(name)
-            employee = self.employee_map.get(name, Employee(employee_id, name, employee_id not in inactive_ids))
+            employee = self.employee_map.get(name) or resolve(
+                Employee(employee_id, name, employee_id not in inactive_ids))
             self.employee_map[name] = employee
             for sample in samples:
                 vector = np.asarray(sample, dtype=np.float64)
@@ -82,6 +93,23 @@ class FaceCatalog:
         self.employees = tuple(employees)
         self.encodings = np.stack(encodings)
         self.enrolled_count = len({e.employee_id for e in employees})
+
+    def _load_angles(self, store, resolve):
+        known = {employee.employee_id.strip().casefold(): employee for employee in self.employee_map.values()}
+        employees, encodings = [], []
+        for code, angles in store.items():
+            vectors = [vector for vector in map(vector_of, angles.values()) if vector is not None]
+            if not vectors:
+                continue
+            employee = known.get(str(code).strip().casefold())
+            if employee is None:
+                employee = resolve(Employee(str(code), str(code)))
+                self.employee_map[str(code)] = employee
+            employees.extend([employee] * len(vectors))
+            encodings.extend(vectors)
+        self.employees = tuple(employees)
+        self.encodings = np.stack(encodings) if encodings else np.zeros((0, 128), dtype=np.float64)
+        self.enrolled_count = len({employee.employee_id for employee in employees})
 
     def duplicate_identities(self):
         """Find exact enrollment duplicates assigned to different employees at startup."""

@@ -47,8 +47,6 @@ Name: "{autodesktop}\SV Face ID"; Filename: "{app}\SV Face ID.exe"; Tasks: deskt
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"
 
 [Run]
-; Runs before the launch entry and waits, so only one copy of the app starts.
-Filename: "{app}\SV Face ID.exe"; Parameters: "--reset-admin --exit-after-reset"; Description: "Can't sign in? Reset the administrator to the default account"; Flags: postinstall unchecked skipifsilent
 ; Interactive installs offer "Launch SV Face ID" on the last page.
 Filename: "{app}\SV Face ID.exe"; Description: "Launch SV Face ID"; Flags: nowait postinstall skipifsilent
 ; In-app updates run silently with /RELAUNCH=1 and reopen the app when done.

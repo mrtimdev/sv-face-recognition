@@ -255,7 +255,7 @@ class ImageTests(unittest.TestCase):
             path = ai.generate_angle_file(config, self.SOURCE, ai.ANGLES[0], Path(directory) / "run")
             image = cv2.imread(str(path))
             self.assertEqual(image.shape[:2], (100, 100))
-            self.assertEqual(path.name, "left_30.jpg")
+            self.assertEqual(path.name, "straight.jpg")
 
     def test_unreadable_results_are_rejected(self):
         with self.assertRaisesRegex(AIError, "readable image"):

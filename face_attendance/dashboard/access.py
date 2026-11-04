@@ -3,8 +3,8 @@
 ``AccessControl`` answers "may the signed-in account do X?".  Navigation
 entries the account cannot open are hidden; any other route into them, and
 guarded actions inside a screen, show an "Access denied" notice instead.
-Without an account (no users yet, or PIN-only sign-in) everything is allowed,
-exactly as before accounts existed.
+Sign-in always goes through SV HRM, so the running app always has an account;
+without one (screens built on their own, as in tests) everything is allowed.
 
 Screens do not need a reference to the policy: ``guard(widget, ...)`` finds it
 through the widget's window, so a screen built on its own (as in tests) simply
@@ -12,7 +12,8 @@ has full access.
 """
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 
-from ..users import UserRepository
+from .. import hrm_auth
+from ..hrm_sync import config_from_settings as hrm_config_from_settings
 from .threads import settle
 
 # permission -> (glyph, title, description, tile tone)
@@ -20,7 +21,6 @@ PERMISSION_INFO = {
     "view_dashboard": ("monitor", "View dashboard", "Live monitor, usage and notifications", "blue"),
     "view_reports": ("chart", "View reports", "Browse and filter attendance", "green"),
     "manage_employees": ("users", "Manage employees", "Enroll people and delete records", "purple"),
-    "manage_users": ("shield", "Manage users", "Accounts, roles and access", "orange"),
     "manage_settings": ("gear", "Manage settings", "Camera, recognition and alerts", "blue"),
     "export_data": ("download", "Export data", "Exports, snapshots and backups", "green"),
     "control_engine": ("bolt", "Control engine", "Start, pause and restart capture", "red"),
@@ -32,7 +32,6 @@ NAV_PERMISSIONS = {
     "Attendance Report": "view_reports",
     "Enrolled Employees": "manage_employees",
     "Live Usage": "view_dashboard",
-    "Users & Access": "manage_users",
     "Settings": "manage_settings",
     "License Plates": "view_dashboard",
     "AI Face Angles": "manage_employees",
@@ -128,14 +127,14 @@ def guard(widget, permission, action):
 class _AccountCheck(QThread):
     checked = pyqtSignal(object, bool)   # fresh user (None when removed), query succeeded
 
-    def __init__(self, settings, uuid):
+    def __init__(self, settings, account):
         super().__init__()
         self._settings = settings
-        self._uuid = uuid
+        self._account = account
 
     def run(self):
         try:
-            user = UserRepository(self._settings).get_user(self._uuid)
+            user = hrm_auth.check_account(hrm_config_from_settings(self._settings), self._account)
         except Exception:
             self.checked.emit(None, False)
             return
@@ -184,7 +183,7 @@ class AccountWatcher(QObject):
     def check_now(self):
         if self._user is None or (self._worker is not None and self._worker.isRunning()):
             return
-        worker = _AccountCheck(self.settings, self._user.uuid)
+        worker = _AccountCheck(self.settings, self._user)
         worker.checked.connect(self._on_checked)
         self._worker = worker
         worker.start()

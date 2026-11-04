@@ -215,7 +215,8 @@ class AttendanceRepository:
                 payload = {"eventId": job.event_id, "employeeId": job.employee_id,
                            "employeeName": job.employee_name, "capturedAt": utc_iso(job.captured_at),
                            "recordedAt": utc_iso(now), "status": "KNOWN", "snapshotPath": snapshot,
-                           "verifiedPresenceSeconds": round(job.duration, 2)}
+                           "verifiedPresenceSeconds": round(job.duration, 2),
+                           "matchDistance": job.match_distance, "liveScore": job.live_score}
                 conn.execute(
                     "INSERT INTO attendance_outbox(event_id, payload, created_at) VALUES (?, ?, ?)",
                     (job.event_id, json.dumps(payload, ensure_ascii=False), utc_iso(now)))

@@ -14,7 +14,7 @@ import numpy as np
 from face_attendance.config import Config
 from face_attendance.models import CaptureJob, ObservationEvent, SaveResult
 from face_attendance.persistence import PersistenceWorker
-from face_attendance.settings import hash_pin, verify_pin, describe_source
+from face_attendance.settings import describe_source
 from face_attendance.users import UserRepository, hash_password, verify_password
 
 
@@ -30,8 +30,6 @@ class RuntimeSecurityTests(unittest.TestCase):
         self.assertFalse(verify_password('wrong', current))
         for malformed in ('bad', 'pbkdf2_sha256$9999999999$00$00', None):
             self.assertFalse(verify_password('secret', malformed))
-        self.assertTrue(verify_pin('1234', hashlib.sha256(b'1234').hexdigest()))
-        self.assertTrue(verify_pin('1234', hash_pin('1234')))
         with tempfile.TemporaryDirectory() as directory:
             repo = UserRepository(Path(directory) / 'test.db')
             user = repo.create_user('test', 'Test', '', '', 'secret')
@@ -47,7 +45,7 @@ class RuntimeSecurityTests(unittest.TestCase):
         from face_attendance.users import save_session
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / '.session'
-            user = Mock(uuid='id', username='test', full_name='Test', role='user')
+            user = Mock(uuid='id', username='test', full_name='Test', role='user', hrm_token='')
             with patch('face_attendance.users.SESSION_PATH', path):
                 save_session(user)
                 self.assertEqual(json.loads(path.read_text())['user_uuid'], 'id')
@@ -66,17 +64,6 @@ class RuntimeSecurityTests(unittest.TestCase):
         self.assertIn('camera/live', value)
         self.assertNotIn('private', describe_source('https://camera/live?token=private'))
 
-    def test_account_database_outage_fails_closed_even_without_marker(self):
-        from face_attendance.users import account_login_required
-        repository = Mock()
-        repository.has_users.side_effect = OSError('unreachable database')
-        with patch('face_attendance.users.remember_accounts_exist') as marker:
-            self.assertTrue(account_login_required(repository))
-            marker.assert_not_called()
-        repository.has_users.side_effect = None
-        repository.has_users.return_value = False
-        self.assertFalse(account_login_required(repository))
-
     def test_malformed_and_expired_session_fail_closed(self):
         from face_attendance.users import save_session, load_session
         with tempfile.TemporaryDirectory() as directory:
@@ -85,7 +72,7 @@ class RuntimeSecurityTests(unittest.TestCase):
                 for value in ('[]', '{}', 'null', 'x' * 70_000):
                     path.write_text(value)
                     self.assertIsNone(load_session())
-                user = Mock(uuid='id', username='test', full_name='Test', role='user')
+                user = Mock(uuid='id', username='test', full_name='Test', role='user', hrm_token='')
                 save_session(user)
                 self.assertIsNotNone(load_session())
                 payload = json.loads(path.read_text())

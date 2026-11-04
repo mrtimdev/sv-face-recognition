@@ -19,26 +19,41 @@ class RecognitionService:
     def __init__(self, config, catalog, backend=None, anti_spoof=None, quality=None):
         if backend is None:
             backend = OpenCVFaceBackend()
-        self.backend, self.config, self.catalog = backend, config, catalog
+        self.backend, self.config = backend, config
         self.anti_spoof = AntiSpoofService() if anti_spoof is None else anti_spoof
         self.quality = FaceQuality(config) if quality is None else quality
-        self.employee_indices = {}
+        self.set_catalog(catalog)
+
+    def set_catalog(self, catalog):
+        """Use *catalog* from the next match on. Safe while the recognition worker is running."""
+        indices = {}
         for index, employee in enumerate(catalog.employees):
-            self.employee_indices.setdefault(employee.employee_id, []).append(index)
+            indices.setdefault(employee.employee_id, []).append(index)
+        # One assignment, so a match in progress finishes with one consistent catalog.
+        self._active = (catalog, indices)
+
+    @property
+    def catalog(self):
+        return self._active[0]
+
+    @property
+    def employee_indices(self):
+        return self._active[1]
 
     def match(self, encoding):
-        if len(self.catalog.encodings) == 0:
+        catalog, indices_by_employee = self._active
+        if len(catalog.encodings) == 0:
             return None, 1.0
         with FACE_BACKEND_LOCK:
-            distances = self.backend.face_distance(self.catalog.encodings, encoding)
+            distances = self.backend.face_distance(catalog.encodings, encoding)
         ranked = sorted((float(np.min(distances[indices])), indices[0])
-                        for indices in self.employee_indices.values())
+                        for indices in indices_by_employee.values())
         best, index = ranked[0]
         if best > self.config.face_tolerance:
             return None, best
         if len(ranked) > 1 and ranked[1][0] - best < self.config.identity_margin:
             return None, best
-        return self.catalog.employees[index], best
+        return catalog.employees[index], best
 
     def process(self, request):
         started = time.monotonic()

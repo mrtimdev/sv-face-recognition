@@ -63,8 +63,8 @@ Settings screen by type, preserving its actual sound-setting assertions.
   [OPERATIONS.md](OPERATIONS.md), including representative enrollment and both
   monitors if used. No software can guarantee operation during forced sleep,
   closed-lid sleep, power loss, or a native driver that never returns.
-- Configure individual operator accounts or a PIN; an intentionally unconfigured
-  installation still has no dashboard login boundary. Protect the macOS user
+- Give each operator their own SV HRM account; the dashboard always requires an
+  HRM sign-in. Protect the macOS user
   account, FileVault, settings, remembered session, employee data and backup media.
 - Approve retention/capacity/backups for attendance, outbox, audit rows, plate
   history and evidence. Existing production data was not purged. RAM-queued

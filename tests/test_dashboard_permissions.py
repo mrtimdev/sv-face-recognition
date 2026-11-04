@@ -8,6 +8,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,7 +56,7 @@ class AccessControlTests(unittest.TestCase):
     def test_guard_without_a_window_policy_allows(self):
         from PyQt6.QtWidgets import QWidget
         from face_attendance.dashboard.access import guard
-        self.assertTrue(guard(QWidget(), "manage_users", "open Users & Access"))
+        self.assertTrue(guard(QWidget(), "manage_settings", "open Settings"))
 
     def test_notice_names_the_action_and_permission(self):
         from face_attendance.dashboard.widgets.access_denied import AccessDeniedDialog
@@ -100,7 +101,6 @@ class RestrictedWindowTests(_TempAccounts, unittest.TestCase):
         self.assertEqual(self._visible_nav(window),
                          ["Live Monitor", "Attendance Report", "Live Usage", "License Plates"])
         self.assertEqual(window.page_title.text(), "Live Monitor")
-        self.assertTrue(window.user_menu.users_item.isHidden())
         self.assertTrue(window.user_menu.settings_item.isHidden())
         self.assertFalse(window.notif_button.isHidden())
         live = window.screens[0]
@@ -114,7 +114,7 @@ class RestrictedWindowTests(_TempAccounts, unittest.TestCase):
         self.assertEqual(self._dismiss(window), "You don't have permission to open Settings.")
         self.assertEqual(window.page_title.text(), "Live Monitor")
         window.nav.setCurrentRow(4)
-        self.assertEqual(self._dismiss(window), "You don't have permission to open Users & Access.")
+        self.assertEqual(self._dismiss(window), "You don't have permission to open Settings.")
         self.assertEqual(window.nav.currentRow(), 0)
         self.assertIs(window.stack.currentWidget(), window.screens[0])
         window.screens[0].settingsRequested.emit()
@@ -248,62 +248,16 @@ class DisabledAccountTests(_TempAccounts, unittest.TestCase):
         seen = []
         watcher = AccountWatcher(self.settings, self.admin)
         watcher.changed.connect(seen.append)
-        watcher.check_now()
-        wait_until(lambda: False, timeout=0.3)
-        self.assertEqual(seen, [], "an unchanged account emits nothing")
-        self.repo.set_disabled(self.admin.uuid, True)
-        watcher.check_now()
-        self.assertTrue(wait_until(lambda: seen))
+        with patch("face_attendance.dashboard.access.hrm_auth.check_account") as check:
+            check.return_value = self.admin
+            watcher.check_now()
+            wait_until(lambda: False, timeout=0.3)
+            self.assertEqual(seen, [], "an unchanged account emits nothing")
+            check.return_value = replace(self.admin, disabled=True)
+            watcher.check_now()
+            self.assertTrue(wait_until(lambda: seen))
         self.assertTrue(seen[0].disabled)
         watcher.stop()
-
-    def test_users_screen_disables_and_enables_accounts(self):
-        from PyQt6.QtWidgets import QLabel, QMessageBox
-        from face_attendance.dashboard.screens.users import UsersScreen
-        dara = self.repo.create_user("dara", "Dara Kim", "", "", "secret1", "user")
-        screen = UsersScreen(None, self.settings, current_user=self.admin)
-        screen.show()
-        self.addCleanup(lambda: (screen.close(), _app().processEvents()))
-        self.assertTrue(wait_until(lambda: len(screen._users) == 2))
-        target = next(user for user in screen._users if user.uuid == dara.uuid)
-        with patch.object(QMessageBox, "exec", lambda box: 0), \
-                patch.object(QMessageBox, "clickedButton", _accept_destructive):
-            screen._toggle_disabled(target)
-        self.assertTrue(self.repo.get_user(dara.uuid).disabled)
-        self.assertTrue(wait_until(lambda: any(user.disabled for user in screen._users)))
-        self.assertEqual(screen._st_disabled.value_label.text(), "1")
-        screen._set_filter("disabled")
-        self.assertEqual(screen._table.rowCount(), 1)
-        status = screen._table.cellWidget(0, 3).findChild(QLabel)
-        self.assertEqual(status.property("state"), "disabled")
-        # Enabling needs no confirmation.
-        screen._toggle_disabled(next(user for user in screen._users if user.uuid == dara.uuid))
-        self.assertFalse(self.repo.get_user(dara.uuid).disabled)
-        # The signed-in account can never disable itself.
-        screen._toggle_disabled(self.admin)
-        self.assertFalse(self.repo.get_user(self.admin.uuid).disabled)
-
-    def test_editing_yourself_cannot_lock_you_out(self):
-        from face_attendance.dashboard.screens.users import UserDialog
-        dialog = UserDialog(user=self.admin, is_self=True)
-        keep = dialog.perm_tiles["manage_users"]
-        self.assertTrue(keep.isChecked())
-        self.assertFalse(keep.isEnabled())
-        self.assertFalse(dialog.role_cards["user"].isEnabled())
-        self.assertIsNone(dialog.status_tile)
-        dialog._set_permissions([])
-        self.assertEqual(dialog._granted(), ["manage_users"])
-        self.assertFalse(dialog.result_data()["disabled"])
-
-    def test_editing_someone_else_can_disable_them(self):
-        from face_attendance.dashboard.screens.users import UserDialog
-        dara = self.repo.create_user("dara", "Dara Kim", "", "", "secret1", "user")
-        dialog = UserDialog(user=dara)
-        self.assertTrue(dialog.status_tile.isChecked())
-        self.assertEqual(dialog.status_tile.title_label.text(), "Can sign in")
-        dialog.status_tile.clicked.emit()
-        self.assertEqual(dialog.status_tile.title_label.text(), "Sign-in disabled")
-        self.assertTrue(dialog.result_data()["disabled"])
 
 
 if __name__ == "__main__":

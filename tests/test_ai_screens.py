@@ -12,6 +12,7 @@ import numpy as np
 from PyQt6.QtWidgets import QApplication, QFormLayout, QLineEdit, QMessageBox
 
 from face_attendance import ai_providers as ai
+from face_attendance.hrm_sync import HRMError
 from face_attendance.ai_providers import AIError
 from face_attendance.dashboard.screens import ai_angles
 from face_attendance.dashboard.screens.ai_angles import AIAnglesScreen, EXISTING, NEW
@@ -299,19 +300,75 @@ class AnglesScreenTests(Base):
 
     def test_one_failure_does_not_stop_the_others_and_redo_replaces_it(self):
         self._new_person()
-        with self._fake_generate(failing={"chin_up"}):
+        with self._fake_generate(failing={"up"}):
             self.screen.generate_button.click()
             self.assertTrue(pump(lambda: not self.screen.busy))
-        self.assertIsNone(self.screen.tiles["chin_up"].path)
-        self.assertIn("No image", self.screen.tiles["chin_up"].status.text())
+        self.assertIsNone(self.screen.tiles["up"].path)
+        self.assertIn("No image", self.screen.tiles["up"].status.text())
         self.assertEqual(sum(1 for tile in self.screen.tiles.values() if tile.path), 5)
         folder = self.screen.output_dir
         with self._fake_generate() as generate:
-            self.screen.tiles["chin_up"].retry.click()
+            self.screen.tiles["up"].retry.click()
             self.assertTrue(pump(lambda: not self.screen.busy))
         self.assertEqual(generate.call_count, 1)
-        self.assertTrue(self.screen.tiles["chin_up"].path)
+        self.assertTrue(self.screen.tiles["up"].path)
         self.assertEqual(self.screen.output_dir, folder)
+
+    def _with_hrm(self, auto=True):
+        self.settings.hrm_api_url = "https://hrm.example.com"
+        self.settings.hrm_api_key = "k" * 40
+        self.settings.hrm_auto_upload = auto
+
+    def test_each_generated_angle_goes_to_hrm_for_the_employee_id(self):
+        self._with_hrm()
+        self._new_person()
+        self.screen.id_edit.setText("EMP002")
+        with self._fake_generate(), patch.object(ai_angles, "upload_angle", return_value={}) as upload:
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        self.assertEqual([c.args[2] for c in upload.call_args_list], [a.key for a in ai.ANGLES])
+        self.assertTrue(all(c.args[1] == "EMP002" for c in upload.call_args_list))
+        self.assertTrue(all(tile.hrm_sent for tile in self.screen.tiles.values()))
+        self.assertIn("HRM", self.screen.toast.label.text())
+
+    def test_rejected_hrm_key_stops_uploads_but_not_generation(self):
+        self._with_hrm()
+        self._new_person()
+        self.screen.id_edit.setText("EMP002")
+        with self._fake_generate(), patch.object(ai_angles, "upload_angle",
+                                                 side_effect=HRMError("HRM rejected the API key.", 401)) as upload:
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        self.assertEqual(upload.call_count, 1)
+        self.assertEqual(sum(1 for tile in self.screen.tiles.values() if tile.path), 6)
+        self.assertFalse(any(tile.hrm_sent for tile in self.screen.tiles.values()))
+
+    def test_no_upload_without_an_employee_id_or_when_auto_upload_is_off(self):
+        self._with_hrm()
+        self._new_person()
+        with self._fake_generate(), patch.object(ai_angles, "upload_angle") as upload:
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        upload.assert_not_called()
+        self._with_hrm(auto=False)
+        self.screen.id_edit.setText("EMP002")
+        with self._fake_generate(), patch.object(ai_angles, "upload_angle") as upload:
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        upload.assert_not_called()
+
+    def test_send_to_hrm_uploads_the_ready_angles(self):
+        self._with_hrm(auto=False)
+        self._new_person()
+        self.screen.id_edit.setText("EMP002")
+        with self._fake_generate(failing={"blink"}):
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        with patch.object(ai_angles, "upload_angle", return_value={}) as upload:
+            self.screen.hrm_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        self.assertEqual(upload.call_count, 5)
+        self.assertIn("stored all 5", self.screen.toast.label.text())
 
     def test_rejected_key_stops_the_run(self):
         self._new_person()
@@ -384,7 +441,7 @@ class AnglesScreenTests(Base):
     def test_new_employee_enrolls_the_real_photo_first_and_only_checked_images(self):
         self._new_person()
         self._generated()
-        self.screen.tiles["left_90"].include.setChecked(False)
+        self.screen.tiles["blink"].include.setChecked(False)
         with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Yes), \
                 patch.object(self.screen.runner, "submit") as submit:
             self.screen.enroll_button.click()

@@ -20,14 +20,18 @@ from ..settings import SETTINGS_PATH, Settings, describe_source
 from ..version import __version__
 from ..config import ROOT
 from ..first_run import mark_setup_complete, needs_setup, offer_after_sign_in
+from ..hrm_sync import config_from_settings as hrm_config_from_settings
 from ..storage import context_path
 from .access import AccessControl, AccountWatcher, NAV_PERMISSIONS, guard
 from .bridge import to_pixmap
 from .detached import DetachedPageController
 from .engine import AttendanceEngine
 from .errors import DashboardErrorHandler
+from .hrm_angles import AngleTemplateWorker
+from .hrm_attendance import AttendanceUplink
+from .hrm_live import HrmLiveLink
 from .icons import IconLabel, apply_button_icon, make_icon
-from .login import LoginDialog, UserLoginDialog
+from .login import UserLoginDialog
 from .screens.ai_angles import AIAnglesScreen
 from .screens.employees import EmployeesScreen
 from .screens.live import LiveScreen
@@ -37,7 +41,6 @@ from .screens.settings import SettingsScreen
 from .screens.usage import UsageScreen
 from .screens.updates import UpdatePromptDialog
 from .setup_wizard import SetupWizard
-from .screens.users import UsersScreen, ProfileDialog
 from .shutdown import ShutdownSequence, relaunch_command
 from .sysmon import Monitor as SysMonitor, Snapshot as SysSnapshot
 from .telegram import TelegramService
@@ -59,7 +62,6 @@ NAV = (
     ("chart", "Attendance Report"),
     ("users", "Enrolled Employees"),
     ("bolt", "Live Usage"),
-    ("shield", "Users & Access"),
     ("gear", "Settings"),
     ("monitor", "License Plates"),
     ("image", "AI Face Angles"),
@@ -176,7 +178,6 @@ class MainWindow(QMainWindow):
             ReportScreen(self.engine, self.settings),
             EmployeesScreen(self.engine, self.settings),
             UsageScreen(self.engine, self.settings),
-            UsersScreen(self.engine, self.settings, current_user=self.current_user),
             SettingsScreen(self.engine, self.settings),
             LicensePlateScreen(self.engine, self.settings),
             AIAnglesScreen(self.engine, self.settings),
@@ -185,7 +186,7 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(screen)
         self._detached_pages = {
             index:DetachedPageController(self,index,NAV[index][1],self.screens[index])
-            for index in (0,6)
+            for index in (0,5)
         }
         for index,controller in self._detached_pages.items():
             controller.screen.detachRequested.connect(lambda i=index:self._toggle_detached_page(i))
@@ -273,8 +274,6 @@ class MainWindow(QMainWindow):
         account.addWidget(self.user_chip, 0, Qt.AlignmentFlag.AlignVCenter)
         self.avatar = self.user_chip.avatar
         self.user_menu = UserMenuPanel(theme, self)
-        self.user_menu.profileRequested.connect(self._show_profile)
-        self.user_menu.usersRequested.connect(lambda: self._go("Users & Access"))
         self.user_menu.settingsRequested.connect(lambda: self._go("Settings"))
         self.user_menu.signOutRequested.connect(self._logout)
         self.user_menu.closed.connect(lambda: self.user_chip.set_open(False))
@@ -417,12 +416,24 @@ class MainWindow(QMainWindow):
         live.viewAllRequested.connect(lambda: self._go_from_monitor("Attendance Report"))
         live.settingsRequested.connect(lambda: self._go_from_monitor("Settings"))
         live.settingsApplied.connect(self._broadcast_settings)
-        ctx = self.screens[5]
+        ctx = self.screens[4]
         ctx.settingsApplied.connect(
             lambda settings, restart: self._broadcast_settings(settings, restart))
-        self.screens[4].usersChanged.connect(self._on_users_changed)
-        self.screens[7].openSettingsRequested.connect(self._open_ai_settings)
-        updates_page = self.screens[5].updates_page
+        self.screens[6].openSettingsRequested.connect(self._open_ai_settings)
+        self.screens[2].hrmSyncDone.connect(self.screens[6].on_hrm_synced)
+        self.screens[2].anglesRequested.connect(self._open_ai_angles)
+        self.hrm_live = HrmLiveLink(self)
+        self.hrm_live.employeesChanged.connect(self.screens[2].request_hrm_refresh)
+        self.hrm_live.connectedChanged.connect(self.screens[2].set_hrm_live)
+        self.hrm_live.anglesChanged.connect(self._on_hrm_angles_changed)
+        self.hrm_angles = AngleTemplateWorker(lambda: self.settings, self)
+        self.hrm_angles.updated.connect(self.screens[2].on_angle_templates_updated)
+        self.hrm_angles.failed.connect(lambda message: self._note(f"Could not update face angles from HRM: {message}"))
+        self.hrm_live.employeesChanged.connect(self.hrm_angles.request)
+        self.hrm_uplink = AttendanceUplink(self.hrm_live, lambda: self.engine.config or self.settings.to_config(), self)
+        self.engine.attendanceSaved.connect(lambda _result: self.hrm_uplink.kick())
+        self.hrm_live.configure(hrm_config_from_settings(self.settings))
+        updates_page = self.screens[4].updates_page
         updates_page.installRequested.connect(self._install_update)
         updates_page.updateFound.connect(self._on_update_found)
         self.clock_timer = QTimer(self)
@@ -572,7 +583,7 @@ class MainWindow(QMainWindow):
         column.addWidget(title)
         column.addSpacing(6)
         body = QLabel("Your account is signed in but has no permissions yet.\n"
-                      "Ask an administrator to grant access in Users & Access.")
+                      "Ask your SV HRM administrator for an HR or manager role.")
         body.setObjectName("dialogSubtitle")
         body.setAlignment(Qt.AlignmentFlag.AlignCenter)
         column.addWidget(body)
@@ -619,8 +630,7 @@ class MainWindow(QMainWindow):
                 self.attach_page(index)
         self.nav_section.setVisible(bool(allowed))
         self.no_access_account.setText(access.account_label())
-        self.user_menu.set_shortcuts(users=access.allows_nav("Users & Access"),
-                                     settings=access.allows_nav("Settings"))
+        self.user_menu.set_shortcuts(settings=access.allows_nav("Settings"))
         live_events = access.allows("view_dashboard")
         if not live_events:
             self.notification_panel.close()
@@ -649,7 +659,7 @@ class MainWindow(QMainWindow):
         if self.current_user is None:
             return
         if fresh is None or fresh.disabled:
-            self._force_sign_out("Your account was removed." if fresh is None
+            self._force_sign_out("Your account was removed or your session ended." if fresh is None
                                  else "Your account was disabled by an administrator.")
             return
         access_changed = ((fresh.role, sorted(fresh.permissions))
@@ -657,7 +667,6 @@ class MainWindow(QMainWindow):
         self.current_user = fresh
         if self.account_watcher is not None:
             self.account_watcher.set_user(fresh)
-        self.screens[4].set_current_user(fresh)
         self._sync_identity()
         self.access.set_user(fresh)
         if access_changed:
@@ -686,21 +695,12 @@ class MainWindow(QMainWindow):
         if user is not None:
             return (user.full_name or user.username, role_title(user.role), user.avatar_path,
                     user.email or f"@{user.username}", role_title(user.role))
-        mode = "PIN access" if self.settings.dashboard_pin_hash else "Local access"
-        return "Administrator", mode, None, "Signed in on this computer", ""
+        return "Administrator", "Local access", None, "Signed in on this computer", ""
 
     def _sync_identity(self):
         name, subtitle, image, meta, role = self._identity()
         self.user_chip.set_user(name, subtitle, image)
-        self.user_menu.set_user(name, meta, role, image,
-                                can_sign_out=bool(self.current_user or self.settings.dashboard_pin_hash),
-                                has_profile=self.current_user is not None)
-
-    def _on_users_changed(self, users):
-        if self.current_user is None:
-            return
-        fresh = next((user for user in users if user.uuid == self.current_user.uuid), None)
-        self._apply_account(fresh)
+        self.user_menu.set_user(name, meta, role, image, can_sign_out=self.current_user is not None)
 
     def _toggle_user_menu(self):
         menu = self.user_menu
@@ -712,23 +712,6 @@ class MainWindow(QMainWindow):
         self._sync_identity()
         self.user_chip.set_open(True)
         menu.open_below(self.user_chip)
-
-    def _show_profile(self):
-        if not self.current_user:
-            self._note("No user session active.")
-            return
-        try:
-            from ..users import UserRepository
-            repo = UserRepository(self.settings)
-            fresh = repo.get_user(self.current_user.uuid)
-            if fresh:
-                self.current_user = fresh
-        except Exception:
-            pass
-        dlg = ProfileDialog(self.current_user, self.settings,
-                            theme=self.settings.theme, parent=self)
-        dlg.exec()
-        self._sync_identity()
 
     def _logout(self):
         from ..users import clear_session
@@ -826,6 +809,7 @@ class MainWindow(QMainWindow):
         self.settings = settings
         if self.account_watcher is not None:
             self.account_watcher.settings = settings
+        self.hrm_live.configure(hrm_config_from_settings(settings))
         self.apply_theme(settings.theme)
         self.telegram.reconfigure(
             bot_token=settings.telegram_bot_token,
@@ -860,6 +844,12 @@ class MainWindow(QMainWindow):
         now = datetime.now()
         self.clock_label.setText(now.strftime("%H:%M:%S"))
         self.date_label.setText(now.strftime("%a %d %b %Y"))
+
+    def _on_hrm_angles_changed(self, employee_code):
+        self.engine.logMessage.emit(f"Face angle images changed in HRM for {employee_code}")
+        self.screens[6].on_hrm_angles_changed(employee_code)
+        self.screens[2].on_hrm_angles_changed(employee_code)
+        self.hrm_angles.request()
 
     def _check_catalog(self):
         if self._exit is not None or self._exit_done:
@@ -937,7 +927,7 @@ class MainWindow(QMainWindow):
         self.capture_flash.cancel()
         self._note({"quit": "Shutting down\u2026", "signout": "Signing out\u2026",
                     "update": "Installing update\u2026"}.get(mode, "Restarting\u2026"))
-        self.screens[6].stop()
+        self.screens[5].stop()
         self._exit = ShutdownSequence(self, mode, services=(self.telegram, self._sys_monitor),
                                       detail=detail)
         self._exit.finished.connect(self._complete_exit)
@@ -958,7 +948,7 @@ class MainWindow(QMainWindow):
         if self._exit is not None or not self.access.allows("manage_settings"):
             return
         self._prompt_for_update = True
-        self.screens[5].updates_page.check_now()
+        self.screens[4].updates_page.check_now()
 
     def _on_update_found(self, release):
         if self._notified_version != release.version:
@@ -982,7 +972,7 @@ class MainWindow(QMainWindow):
         prompt, self._update_prompt = self._update_prompt, None
         if prompt is None:
             return
-        page = self.screens[5].updates_page
+        page = self.screens[4].updates_page
         if prompt.choice == prompt.INSTALL:
             self._open_updates()
             page.install_update()
@@ -992,13 +982,18 @@ class MainWindow(QMainWindow):
 
     def _open_updates(self):
         self._go("Settings")
-        if self.stack.currentWidget() is self.screens[5]:
-            self.screens[5].show_updates()
+        if self.stack.currentWidget() is self.screens[4]:
+            self.screens[4].show_updates()
 
     def _open_ai_settings(self):
         self._go("Settings")
-        if self.stack.currentWidget() is self.screens[5]:
-            self.screens[5].show_ai()
+        if self.stack.currentWidget() is self.screens[4]:
+            self.screens[4].show_ai()
+
+    def _open_ai_angles(self, employee_code):
+        self._go("AI Face Angles")
+        if self.stack.currentWidget() is self.screens[6]:
+            self.screens[6].select_employee(employee_code)
 
     def _report_install_outcome(self, outcome):
         """Say how the last update attempt ended, once, on the first start after it."""
@@ -1011,7 +1006,7 @@ class MainWindow(QMainWindow):
             return
         self._install_problem = outcome
         self._notified_version = outcome.version   # this notice replaces "is available"
-        self.screens[5].updates_page.set_install_problem(outcome)
+        self.screens[4].updates_page.set_install_problem(outcome)
         self.notifications.add("update_failed", f"Version {outcome.version} wasn't installed",
                                outcome.reason)
         logging.warning("The update to %s wasn't installed: %s", outcome.version, outcome.reason)
@@ -1073,6 +1068,8 @@ class MainWindow(QMainWindow):
         self.user_menu.close()
         self.capture_flash.cancel()
         self.clock_timer.stop()
+        self.hrm_uplink.close()
+        self.hrm_live.stop()
         if not self._exit_done:
             # Programmatic close (tests, error paths): stop synchronously.
             self._sys_monitor.stop()
@@ -1084,22 +1081,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 logging.debug("screen cleanup failed", exc_info=True)
         super().closeEvent(event)
-
-
-def _reset_administrator(settings):
-    """Handle ``--reset-admin``; the app has no console, so answer in a window."""
-    from ..users import (DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, UserRepository,
-                         clear_session, reset_default_admin)
-    try:
-        reset_default_admin(UserRepository(settings), settings)
-        clear_session()
-    except Exception as exc:
-        logging.exception("Could not reset the administrator")
-        QMessageBox.critical(None, "Reset administrator", f"The administrator was not reset.\n{exc}")
-    else:
-        QMessageBox.information(None, "Reset administrator",
-                                f"Sign in as {DEFAULT_ADMIN_USERNAME} with password "
-                                f"{DEFAULT_ADMIN_PASSWORD}, then change the password.")
 
 
 def _log_to_file():
@@ -1115,8 +1096,7 @@ def _log_to_file():
     logging.getLogger().addHandler(handler)
 
 
-def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False, reset_admin=False,
-                  exit_after_reset=False):
+def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False):
     """Create the application, show the window and block until it closes."""
     import sys
     application = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
@@ -1127,14 +1107,12 @@ def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False, r
         # Decided before the splash, whose database check creates an empty file.
         new_install = needs_setup(settings_path)
         settings = Settings.load(settings_path)
-        if reset_admin:
-            _reset_administrator(settings)
-            if exit_after_reset:
-                return 0
 
         def _show_main(run_setup=new_install, force_setup=setup):
-            from ..users import (UserRepository, account_login_required, clear_session,
-                                 ensure_default_admin, load_session, save_session)
+            from .. import hrm_auth
+            from ..hrm_sync import HRMError
+            from ..hrm_sync import config_from_settings as hrm_config_from_settings
+            from ..users import clear_session, load_session, save_session
             application.setStyleSheet(stylesheet(settings.theme))
             if run_setup:
                 wizard = SetupWizard(settings, theme=settings.theme, version=APP_VERSION)
@@ -1142,52 +1120,33 @@ def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False, r
                     application.quit()
                     return
                 mark_setup_complete()
+            # SV HRM owns every account, so sign-in is always required and never reads the local database.
             current_user = None
-            repo = UserRepository(settings)
-            ensure_default_admin(repo)
-            has_users = account_login_required(repo)
-
-            if has_users:
-                notice = ""
-                session = load_session()
-                if session:
-                    try:
-                        user = repo.get_user(session.user_uuid)
-                    except Exception:
-                        logging.exception("Could not restore the remembered session")
-                    else:
-                        if user is not None and not user.disabled:
-                            current_user = user
-                        else:
-                            clear_session()
-                            if user is not None:
-                                notice = "Your account has been disabled. Ask an administrator to enable it again."
-                if not current_user:
-                    dialog = UserLoginDialog(settings, theme=settings.theme, version=APP_VERSION,
-                                             notice=notice)
-                    if dialog.exec() != QDialog.DialogCode.Accepted:
-                        application.quit()
-                        return
-                    current_user = dialog.current_user
-                    if dialog.remember and current_user:
-                        save_session(current_user)
-            elif settings.dashboard_pin_hash:
-                dialog = LoginDialog(settings.dashboard_pin_hash, theme=settings.theme,
-                                     version=APP_VERSION)
+            notice = ""
+            session = load_session()
+            if session:
+                try:
+                    current_user = hrm_auth.restore(hrm_config_from_settings(settings), session)
+                except HRMError as exc:
+                    logging.warning("Could not restore the remembered session: %s", exc)
+                    notice = str(exc)
+                else:
+                    if current_user is None:
+                        clear_session()
+            if not current_user:
+                dialog = UserLoginDialog(settings, theme=settings.theme, version=APP_VERSION,
+                                         notice=notice)
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     application.quit()
                     return
+                current_user = dialog.current_user
+                if dialog.remember and current_user:
+                    save_session(current_user)
 
-            if offer_after_sign_in(current_user, has_users, forced=force_setup):
-                database = (settings.db_backend, settings.db_host, settings.db_port, settings.db_name)
-                wizard = SetupWizard(settings, theme=settings.theme, version=APP_VERSION, existing=has_users)
+            if offer_after_sign_in(current_user, True, forced=force_setup):
+                wizard = SetupWizard(settings, theme=settings.theme, version=APP_VERSION, existing=True)
                 wizard.exec()
                 mark_setup_complete()
-                if database != (settings.db_backend, settings.db_host, settings.db_port, settings.db_name):
-                    # That account lives in the old database; sign in to the new one.
-                    clear_session()
-                    _show_main(run_setup=False, force_setup=False)
-                    return
 
             window = MainWindow(settings, autostart=autostart,
                                 current_user=current_user)
@@ -1221,17 +1180,11 @@ def main(argv=None):
     parser.add_argument("--start", action="store_true",
                         help="Open the camera and record attendance as soon as the window opens")
     parser.add_argument("--setup", action="store_true", help="Show the setup wizard after sign-in")
-    parser.add_argument("--exit-after-reset", action="store_true",
-                        help="With --reset-admin, close instead of starting the dashboard")
-    parser.add_argument("--reset-admin", action="store_true",
-                        help="Restore the default administrator on this computer, then start")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         datefmt="%H:%M:%S")
     _log_to_file()
-    return run_dashboard(args.settings, autostart=args.start, argv=sys.argv,
-                         setup=args.setup, reset_admin=args.reset_admin,
-                         exit_after_reset=args.exit_after_reset)
+    return run_dashboard(args.settings, autostart=args.start, argv=sys.argv, setup=args.setup)
 
 
 if __name__ == "__main__":

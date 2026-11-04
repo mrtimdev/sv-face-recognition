@@ -583,7 +583,7 @@ class UpdateFlowTests(unittest.TestCase):
     def test_startup_prompt_can_skip_the_version(self):
         from face_attendance.settings import Settings
         window = self._window()
-        page = window.screens[5].updates_page
+        page = window.screens[4].updates_page
         page._release = self._release()
         window._prompt_for_update = True
         with patch("face_attendance.updates.install_support", return_value=(True, "")):
@@ -616,7 +616,7 @@ class UpdateFlowTests(unittest.TestCase):
         [notice] = window.notifications.items()
         self.assertEqual((notice.kind, notice.title), ("update_failed", "Version 9.9.9 wasn't installed"))
         self.assertIn("Couldn't copy", notice.body)
-        self.assertFalse(window.screens[5].updates_page.problem_banner.isHidden())
+        self.assertFalse(window.screens[4].updates_page.problem_banner.isHidden())
         # The automatic check finds the same version: the prompt says what went wrong.
         window._prompt_for_update = True
         with patch("face_attendance.updates.install_support", return_value=(True, "")):
@@ -635,14 +635,14 @@ class UpdateFlowTests(unittest.TestCase):
         window._report_install_outcome(None)
         [notice] = window.notifications.items()
         self.assertEqual((notice.kind, notice.title), ("update", "Updated to version 9.9.9"))
-        self.assertTrue(window.screens[5].updates_page.problem_banner.isHidden())
+        self.assertTrue(window.screens[4].updates_page.problem_banner.isHidden())
 
     def test_only_accounts_that_manage_settings_are_asked(self):
         from face_attendance.users import User
         user = User(uuid="u", username="dara", full_name="Dara", phone="", email="",
                     password_hash="x", role="user", permissions=["view_dashboard"])
         window = self._window(current_user=user)
-        with patch.object(window.screens[5].updates_page, "check_now") as check:
+        with patch.object(window.screens[4].updates_page, "check_now") as check:
             window._auto_check_updates()
         check.assert_not_called()
 

@@ -103,19 +103,17 @@ class UIRenderer:
         self.capture_effects = capture_effects
         self.animations = AnimationManager(config)
         self.canvas = None
-        self.overlay_canvas = None
 
     def render_overlay(self, clean_frame, tracks, now, wall_time, camera_status, recognition_error=""):
         """Brackets, scan line and notifications only: no HUD, no resizing.
 
         Used by the dashboard, which draws its statistics as Qt widgets beside
         the video. The camera frame itself is never modified; the caller keeps
-        ownership of ``clean_frame`` and receives an internal canvas.
+        ownership of ``clean_frame`` and receives a new image it may keep.
         """
-        if self.overlay_canvas is None or self.overlay_canvas.shape != clean_frame.shape:
-            self.overlay_canvas = np.empty_like(clean_frame)
-        image = self.overlay_canvas
-        np.copyto(image, clean_frame)
+        # A new image every call: the dashboard paints it on another thread, and
+        # drawing the next frame into a shared canvas tore the picture mid-paint.
+        image = clean_frame.copy()
         height, width = image.shape[:2]
         layout = Layout(width, height)
         scan_y = int((now * height / 5) % height)

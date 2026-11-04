@@ -4,6 +4,7 @@ Encoding is CPU work, so it runs on a short-lived worker thread and reports
 back through a Qt signal. The catalog is reloaded into the engine afterwards,
 which is why enrollment pauses recording and restarts the engine on save.
 """
+import logging
 import threading
 import time
 import hashlib
@@ -24,6 +25,10 @@ from ...enrollment import EnrollmentOutcome, EnrollmentService, FACE_BACKEND_LOC
 from ...storage import delete_capture, read_image
 from ...enrollment_photos import portrait_name, sample_photo_map
 from ...transfer import TransferError, export_employees, import_employees
+from ... import angle_templates
+from ... import hrm_directory as hd
+from ...ai_providers import ANGLES
+from ...hrm_sync import HRMError, config_from_settings
 from ..access import guard
 from ..bridge import to_pixmap
 from ..icons import apply_button_icon, make_icon
@@ -44,6 +49,17 @@ ENROLLMENT_PREVIEW_HEIGHT = 380
 MAX_GALLERY_ITEMS = 12
 ENROLLMENT_PHOTOS_DIR = "enrollment_photos"
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff")
+DEFAULT_PAGE_SIZE = 25
+HRM_AUTO_SYNC_SEC = 15 * 60     # Refresh the HRM list on open when the cache is older than this.
+HRM_REFRESH_CHECK_MS = 5 * 60 * 1000
+HRM_PHOTO_WORKERS = 4
+# Enrollment filter entries, in status_filter order.
+ENROLLMENT_FILTERS = (("All employees", hd.ANY), ("Ready for attendance", hd.READY),
+                      ("Needs enrollment", hd.NEEDS), ("Possible duplicate faces", hd.DUPLICATE),
+                      ("Active employees", hd.LOCAL_ACTIVE), ("Inactive employees", hd.LOCAL_INACTIVE),
+                      ("Not in HRM", hd.NOT_IN_HRM))
+NOT_IN_HRM_TIP = ("SV HRM doesn't list this employee as active, so their attendance isn't recorded. "
+                  "They may have left, or their employee ID may not match.")
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +291,11 @@ class EmployeeDialog(QDialog):
 class EmployeesScreen(QWidget):
     probeReady = pyqtSignal(object)
     duplicatesReady = pyqtSignal(object)
+    hrmSyncDone = pyqtSignal(object)
+    anglesRequested = pyqtSignal(str)  # Employee code: enroll their face angles on AI Face Angles.
+    hrmSyncProgress = pyqtSignal(int, int)
+    hrmPhotoReady = pyqtSignal(str)
+    hrmAnglesReady = pyqtSignal(str, object)  # employee code, (items, problems) or an exception
 
     def __init__(self, engine, settings, parent=None, preview_capture_factory=None):
         super().__init__(parent)
@@ -294,7 +315,18 @@ class EmployeesScreen(QWidget):
         self.saving = False
         self._editing_label = None
         self.upload = None
-        self.rows = []
+        self.rows = []                 # Local enrollments (one per label)
+        self.directory_rows = []       # HRM employees merged with local enrollments
+        self.filtered_rows = []
+        self._page_rows = []           # The rows the table shows, by table row
+        self.page = 0
+        self.page_count = 1
+        self._hrm_directory = hd.load(hd.cache_path(settings))
+        self._hrm_syncing = False
+        self._hrm_sync_error = ""
+        self._hrm_photo_pending = set()
+        self._hrm_photo_missing = set()
+        self._hrm_photo_lock = threading.Lock()
         self.countdown = 0
         self.probing = False
         self.validating = False
@@ -314,10 +346,21 @@ class EmployeesScreen(QWidget):
         self._captures_map = {}
         self._sample_photos_map = {}
         self._captures_dirty = True
+        self._hrm_sync_again = False
+        self._profile_angles_code = None      # Whose angles the profile shows.
+        self._profile_angles_loading = None   # Whose angles are downloading now.
+        self._profile_angles_again = False
+        self._hrm_live = False
         self._theme = settings.theme if hasattr(settings, "theme") else "dark"
         self._build()
         self._connect()
         self.reload()
+        self._auto_sync_hrm()
+        # The Live Monitor reads this cache, so it stays current without this screen being open.
+        self.hrm_refresh_timer = QTimer(self)
+        self.hrm_refresh_timer.setInterval(HRM_REFRESH_CHECK_MS)
+        self.hrm_refresh_timer.timeout.connect(self._auto_sync_hrm)
+        self.hrm_refresh_timer.start()
 
     # =======================================================================
     #  Layout
@@ -336,6 +379,9 @@ class EmployeesScreen(QWidget):
         self.header.layout().setStretch(0, 1)
         self.enrolled_pill = StatusPill("0 enrolled", "idle", dot=True)
         self.reload_button = QPushButton("Refresh")
+        self.hrm_sync_button = QPushButton("Sync from HRM")
+        self.hrm_sync_button.setToolTip("Load every employee from SV HRM. Uses the HRM address and API key "
+                                        "in Settings > AI Configuration.")
         self.folder_button = QPushButton("Open data folder")
         self.folder_button.hide()
         self.enroll_cta = QPushButton("Add employee")
@@ -347,6 +393,7 @@ class EmployeesScreen(QWidget):
         self.import_action = more.addAction("Import employees…", self._import_employees)
         self.export_action = more.addAction("Export employees…", self._export_employees)
         self.more_button.setMenu(more)
+        self.header.add_action(self.hrm_sync_button)
         self.header.add_action(self.reload_button)
         self.header.add_action(self.more_button)
         self.header.add_action(self.enroll_cta)
@@ -397,16 +444,32 @@ class EmployeesScreen(QWidget):
         card = Card("Employee directory", "", icon="users", theme=self._theme)
         self.directory_card = card
         tools = QHBoxLayout()
+        tools.setSpacing(8)
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Search by name or employee ID")
+        self.search_edit.setPlaceholderText("Search name, employee ID, department or position")
+        self.search_edit.setClearButtonEnabled(True)
         self.status_filter = QComboBox()
-        self.status_filter.addItems(["All employees", "Ready for attendance", "Needs enrollment"])
-        self.status_filter.addItem("Possible duplicate faces")
-        self.status_filter.addItems(["Active employees", "Inactive employees"])
+        for label, _ in ENROLLMENT_FILTERS:
+            self.status_filter.addItem(label)
         self.status_filter.setMinimumWidth(180)
+        self.status_filter.setToolTip("Face enrollment status")
         tools.addWidget(self.search_edit, 1)
         tools.addWidget(self.status_filter)
         card.add_layout(tools)
+
+        filters = QHBoxLayout()
+        filters.setSpacing(8)
+        self.department_filter = self._filter_combo("All departments", "Department in HRM")
+        self.position_filter = self._filter_combo("All positions", "Position in HRM")
+        self.location_filter = self._filter_combo("All locations", "Work location in HRM")
+        self.employee_type_filter = self._filter_combo("All employee types", "Employee type in HRM")
+        self.clear_filters_button = QPushButton("Clear filters")
+        for widget in (self.department_filter, self.position_filter, self.location_filter, self.employee_type_filter):
+            widget.setMinimumWidth(150)
+            filters.addWidget(widget, 1)
+        filters.addWidget(self.clear_filters_button)
+        card.add_layout(filters)
+
         self.employee_table = QTableWidget(0, 6)
         self.employee_table.setHorizontalHeaderLabels(["PHOTO", "EMPLOYEE", "EMPLOYEE ID", "STATUS", "SAMPLES", "ACTIONS"])
         self.employee_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -429,14 +492,48 @@ class EmployeesScreen(QWidget):
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_label.setObjectName("screenSubtitle")
         card.add(self.empty_label)
+
+        pager = QHBoxLayout()
+        pager.setSpacing(6)
         self.result_count = QLabel()
         self.result_count.setObjectName("screenSubtitle")
-        card.add(self.result_count)
+        pager.addWidget(self.result_count, 1)
+        pager.addWidget(QLabel("Rows per page"))
+        self.page_size_combo = QComboBox()
+        for size in hd.PAGE_SIZES:
+            self.page_size_combo.addItem(str(size), size)
+        self.page_size_combo.setCurrentIndex(hd.PAGE_SIZES.index(DEFAULT_PAGE_SIZE))
+        pager.addWidget(self.page_size_combo)
+        self.first_page_button = QPushButton("«")
+        self.prev_page_button = QPushButton("‹ Prev")
+        self.page_label = QLabel("Page 1 of 1")
+        self.page_label.setMinimumWidth(90)
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.next_page_button = QPushButton("Next ›")
+        self.last_page_button = QPushButton("»")
+        self.first_page_button.setToolTip("First page")
+        self.last_page_button.setToolTip("Last page")
+        for widget in (self.first_page_button, self.prev_page_button, self.page_label,
+                       self.next_page_button, self.last_page_button):
+            pager.addWidget(widget)
+        card.add_layout(pager)
+
+        self.hrm_status_label = QLabel()
+        self.hrm_status_label.setObjectName("screenSubtitle")
+        self.hrm_status_label.setWordWrap(True)
+        card.add(self.hrm_status_label)
         self.duplicate_review = QLabel()
         self.duplicate_review.setObjectName("screenSubtitle")
         self.duplicate_review.setWordWrap(True)
         card.add(self.duplicate_review)
         return card
+
+    @staticmethod
+    def _filter_combo(any_label, tooltip):
+        combo = QComboBox()
+        combo.setToolTip(tooltip)
+        combo.addItem(any_label, hd.ANY)
+        return combo
 
     def _build_wizard(self):
         card = Card("Add employee", "Enter their details, then capture or upload a clear face photo.", icon="user-plus", theme=self._theme)
@@ -597,30 +694,30 @@ class EmployeesScreen(QWidget):
         header.addLayout(info, 1)
         card.add_layout(header)
 
-        enrolled_header = QHBoxLayout()
-        enrolled_title = QLabel("Enrolled samples")
-        enrolled_title.setObjectName("sectionTitle")
-        self.enrolled_count_label = QLabel()
-        self.enrolled_count_label.setObjectName("screenSubtitle")
-        enrolled_header.addWidget(enrolled_title)
-        enrolled_header.addStretch()
-        enrolled_header.addWidget(self.enrolled_count_label)
-        card.add_layout(enrolled_header)
-        self.enrolled_scroll = QScrollArea()
-        self.enrolled_scroll.setWidgetResizable(True)
-        self.enrolled_scroll.setObjectName("panel")
-        self.enrolled_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.enrolled_scroll.setFixedHeight(GALLERY_THUMB_SIZE + 66)
-        self.enrolled_container = QWidget()
-        self.enrolled_layout = QHBoxLayout(self.enrolled_container)
-        self.enrolled_layout.setContentsMargins(8, 8, 8, 8)
-        self.enrolled_layout.setSpacing(8)
-        self.enrolled_scroll.setWidget(self.enrolled_container)
-        card.add(self.enrolled_scroll)
-        self.enrolled_hint = QLabel()
-        self.enrolled_hint.setObjectName("screenSubtitle")
-        self.enrolled_hint.setWordWrap(True)
-        card.add(self.enrolled_hint)
+        angles_header = QHBoxLayout()
+        angles_title = QLabel("Enrolled angles")
+        angles_title.setObjectName("sectionTitle")
+        self.angles_count_label = QLabel()
+        self.angles_count_label.setObjectName("screenSubtitle")
+        angles_header.addWidget(angles_title)
+        angles_header.addStretch()
+        angles_header.addWidget(self.angles_count_label)
+        card.add_layout(angles_header)
+        self.angles_scroll = QScrollArea()
+        self.angles_scroll.setWidgetResizable(True)
+        self.angles_scroll.setObjectName("panel")
+        self.angles_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.angles_scroll.setFixedHeight(GALLERY_THUMB_SIZE + 84)
+        self.angles_container = QWidget()
+        self.angles_layout = QHBoxLayout(self.angles_container)
+        self.angles_layout.setContentsMargins(8, 8, 8, 8)
+        self.angles_layout.setSpacing(8)
+        self.angles_scroll.setWidget(self.angles_container)
+        card.add(self.angles_scroll)
+        self.angles_hint = QLabel()
+        self.angles_hint.setObjectName("screenSubtitle")
+        self.angles_hint.setWordWrap(True)
+        card.add(self.angles_hint)
 
         gallery_header = QHBoxLayout()
         gallery_title = QLabel("Evidence captures")
@@ -660,6 +757,9 @@ class EmployeesScreen(QWidget):
         self.p_rem_btn.setObjectName("danger")
         for btn in (self.p_add_btn, self.p_del_btn, self.p_rem_btn):
             actions.addWidget(btn)
+        # Faces are enrolled as angles; these two only ever changed local samples.
+        self.p_add_btn.hide()
+        self.p_del_btn.hide()
         actions.addStretch()
         card.add_layout(actions)
 
@@ -707,6 +807,11 @@ class EmployeesScreen(QWidget):
         self.drop.dropped.connect(self._load_photo)
         self.add_upload_button.clicked.connect(self._add_upload_sample)
         self.reload_button.clicked.connect(self._refresh_directory)
+        self.hrm_sync_button.clicked.connect(lambda: self.sync_hrm(quiet=False))
+        self.hrmSyncDone.connect(self._on_hrm_synced)
+        self.hrmSyncProgress.connect(self._on_hrm_progress)
+        self.hrmPhotoReady.connect(self._on_hrm_photo)
+        self.hrmAnglesReady.connect(self._on_profile_angles)
         self.folder_button.clicked.connect(self._open_folder)
         self.enroll_cta.clicked.connect(self._switch_to_wizard)
 
@@ -714,12 +819,24 @@ class EmployeesScreen(QWidget):
         self.seg_capture.clicked.connect(lambda: self._switch_segment(0))
         self.seg_upload.clicked.connect(lambda: self._switch_segment(1))
 
-        # Search
-        self.search_edit.textChanged.connect(self._filter_employees)
-        self.status_filter.currentIndexChanged.connect(lambda _: self._filter_employees(self.search_edit.text()))
+        # Search, filters and pages. Typing waits briefly so each keystroke doesn't rebuild the table.
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(180)
+        self.search_timer.timeout.connect(lambda: self._filter_employees(self.search_edit.text()))
+        self.search_edit.textChanged.connect(lambda _: self.search_timer.start())
+        for combo in (self.status_filter, self.department_filter, self.position_filter,
+                      self.location_filter, self.employee_type_filter):
+            combo.currentIndexChanged.connect(lambda _: self._filter_employees(self.search_edit.text()))
+        self.clear_filters_button.clicked.connect(self._clear_filters)
+        self.page_size_combo.currentIndexChanged.connect(lambda _: self._go_to_page(0))
+        self.first_page_button.clicked.connect(lambda: self._go_to_page(0))
+        self.prev_page_button.clicked.connect(lambda: self._go_to_page(self.page - 1))
+        self.next_page_button.clicked.connect(lambda: self._go_to_page(self.page + 1))
+        self.last_page_button.clicked.connect(lambda: self._go_to_page(self.page_count - 1))
 
         # Employee list
-        self.employee_table.cellDoubleClicked.connect(lambda *_: self._show_profile())
+        self.employee_table.cellDoubleClicked.connect(lambda *_: self._activate_selected())
 
         # Profile card actions
         self.p_add_btn.clicked.connect(self._use_selected)
@@ -756,25 +873,70 @@ class EmployeesScreen(QWidget):
             btn.style().polish(btn)
         self._tab_changed(index)
 
+    def _filters(self, text=None):
+        return hd.Filters(search=self.search_edit.text() if text is None else text,
+                          department=self.department_filter.currentData() or hd.ANY,
+                          position=self.position_filter.currentData() or hd.ANY,
+                          location=self.location_filter.currentData() or hd.ANY,
+                          employee_type=self.employee_type_filter.currentData() or hd.ANY,
+                          enrollment=ENROLLMENT_FILTERS[max(0, self.status_filter.currentIndex())][1])
+
     def _filter_employees(self, text):
-        text = text.casefold().strip()
-        shown = 0
-        for index, row in enumerate(self.rows):
-            matches = not text or any(text in str(row.get(key, "")).casefold()
-                                     for key in ("employee_name", "first_name", "last_name",
-                                                 "employee_id", "name"))
-            status = self.status_filter.currentIndex()
-            visible = matches and (status == 0 or (status == 1 and row["samples"] > 0 and row.get("active", True))
-                                   or (status == 2 and row["samples"] == 0)
-                                   or (status == 3 and row["name"] in self._duplicates_by_label)
-                                   or (status == 4 and row.get("active", True))
-                                   or (status == 5 and not row.get("active", True)))
-            self.employee_table.setRowHidden(index, not visible)
-            shown += visible
-        self.result_count.setText(f"Showing {shown} of {len(self.rows)} enrollment records • Double-click a row to view details")
-        self.empty_label.setText("No employees match your search." if self.rows else
-                                 "No employees yet. Click Add employee to enroll your first person.")
-        self.empty_label.setVisible(not shown)
+        """Filters changed: show the first page of the new result."""
+        self.search_timer.stop()
+        self._apply_filters(text, page=0)
+
+    def _apply_filters(self, text=None, page=None):
+        self.filtered_rows = self._filters(text).apply(self.directory_rows, self._duplicates_by_label)
+        self._go_to_page(self.page if page is None else page)
+
+    def _clear_filters(self):
+        widgets = (self.search_edit, self.status_filter, self.department_filter, self.position_filter,
+                   self.location_filter, self.employee_type_filter)
+        for widget in widgets:
+            widget.blockSignals(True)
+        self.search_edit.clear()
+        for combo in widgets[1:]:
+            combo.setCurrentIndex(0)
+        for widget in widgets:
+            widget.blockSignals(False)
+        self._filter_employees("")
+
+    def _page_size(self):
+        return int(self.page_size_combo.currentData() or DEFAULT_PAGE_SIZE)
+
+    def _go_to_page(self, page):
+        rows, self.page, self.page_count = hd.paginate(self.filtered_rows, page, self._page_size())
+        self._render_page(rows)
+        total, size = len(self.filtered_rows), self._page_size()
+        first = self.page * size + 1 if total else 0
+        last = min(total, (self.page + 1) * size)
+        enrolled = sum(1 for row in self.directory_rows if hd.face_count(row))
+        self.result_count.setText(
+            f"Showing {first}–{last} of {total} employees"
+            + (f" (filtered from {len(self.directory_rows)})" if total != len(self.directory_rows) else "")
+            + f" • {enrolled} enrolled • Double-click a row to open it")
+        self.page_label.setText(f"Page {self.page + 1} of {self.page_count}")
+        self.first_page_button.setEnabled(self.page > 0)
+        self.prev_page_button.setEnabled(self.page > 0)
+        self.next_page_button.setEnabled(self.page < self.page_count - 1)
+        self.last_page_button.setEnabled(self.page < self.page_count - 1)
+        self.clear_filters_button.setEnabled(self._filters().active)
+        self.empty_label.setText("No employees match your filters." if self.directory_rows else
+                                 "No employees yet. Click Sync from HRM, or Add employee to enroll your first person.")
+        self.empty_label.setVisible(not rows)
+
+    def _set_filter_options(self, combo, values):
+        current = combo.currentData() or hd.ANY
+        combo.blockSignals(True)
+        while combo.count() > 1:
+            combo.removeItem(1)
+        for value in values:
+            combo.addItem(value, value)
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+        combo.setEnabled(bool(values))
 
     def _apply_icons(self):
         colors = palette(self._theme)
@@ -958,17 +1120,12 @@ class EmployeesScreen(QWidget):
             f"ID: {row['employee_id']}" if row["employee_id"] else "No employee ID")
         duplicates = self._duplicates_by_label.get(row["name"], [])
         self.profile_pill.set_status(
-            "Inactive" if not row.get("active", True) else "Review face match" if duplicates else ("Active" if row["samples"] else "Needs enrollment"),
-            "bad" if not row.get("active", True) else "warn" if duplicates or not row["samples"] else "ok")
-        lines = [f"First name: {row.get('first_name') or '—'}  •  Last name: {row.get('last_name') or '—'}",
-                 f"{row['samples']} enrolled sample(s)"]
+            "Inactive" if not row.get("active", True) else "Not in HRM" if row.get("hrm_blocked") else "Review face match" if duplicates else ("Active" if hd.face_count(row) else "Needs enrollment"),
+            "bad" if not row.get("active", True) or row.get("hrm_blocked") else "warn" if duplicates or not hd.face_count(row) else "ok")
+        lines = [f"First name: {row.get('first_name') or '—'}  •  Last name: {row.get('last_name') or '—'}"]
         if duplicates:
             lines.append("Possible duplicate face with " + "; ".join(owner for _, owner in duplicates))
             lines.append("Compare both profiles. Delete only a confirmed mistaken enrollment using its directory action.")
-        if enrollment_photo:
-            lines.append(f"Enrollment photo: {enrollment_photo.name}")
-        else:
-            lines.append("No enrollment photo (re-enroll to save one)")
         if captures:
             lines.append(f"{len(captures)} attendance capture(s)")
             try:
@@ -983,22 +1140,84 @@ class EmployeesScreen(QWidget):
         self.p_del_btn.setEnabled(row["samples"] > 0)
 
         if refresh_photos:
-            self._populate_enrolled_samples(row)
+            self._load_profile_angles(row)
             # -- gallery shows evidence captures --
             self._populate_gallery(captures)
 
-    def _populate_enrolled_samples(self, row):
-        while self.enrolled_layout.count():
-            item = self.enrolled_layout.takeAt(0)
+    # --- enrolled angles, from SV HRM ---------------------------------------
+
+    def _load_profile_angles(self, row):
+        code = str(row.get("employee_id") or "").strip()
+        if code != self._profile_angles_code:
+            self._profile_angles_code = code
+            self._render_profile_angles({})
+            self.angles_count_label.setText("")
+        config = self._hrm_config()
+        if not row.get("in_hrm"):
+            self.angles_hint.setText("This employee isn't in SV HRM, so there are no saved angles to show.")
+            return
+        if hd.hrm_sync.configuration_problem(config):
+            self.angles_hint.setText("Add the HRM address and API key in Settings > AI Configuration to see saved angles.")
+            return
+        if self._profile_angles_loading == code:
+            return
+        self._profile_angles_loading = code
+        self.angles_hint.setText("Loading angles from SV HRM…")
+        settings = self.settings
+
+        def work():
+            try:
+                result = hd.fetch_saved_angles(config, settings, code)
+            except (HRMError, OSError) as exc:
+                result = exc
+            try:
+                self.hrmAnglesReady.emit(code, result)
+            except RuntimeError:
+                pass  # The screen was closed meanwhile.
+
+        threading.Thread(target=work, name="hrm-profile-angles", daemon=True).start()
+
+    def _on_profile_angles(self, code, result):
+        if self._profile_angles_loading == code:
+            self._profile_angles_loading = None
+        again, self._profile_angles_again = self._profile_angles_again, False
+        if code != self._profile_angles_code:
+            # Another employee is on screen now; start the download skipped while this one ran.
+            row = getattr(self, "_profile_row", None)
+            if row and self._profile_angles_loading is None and str(row.get("employee_id") or "").strip() == self._profile_angles_code:
+                self._load_profile_angles(row)
+            return
+        if isinstance(result, Exception):
+            self.angles_hint.setText(f"Couldn't load angles from SV HRM. {result}")
+        else:
+            items, problems = result
+            self._render_profile_angles({item["key"]: item for item in items})
+            self.angles_count_label.setText(f"{len(items)} of {len(ANGLES)} in SV HRM")
+            if problems:
+                self.angles_hint.setText(f"{len(problems)} angle(s) couldn't be loaded from SV HRM.")
+            elif items:
+                unusable = angle_templates.problems_for(angle_templates.load(
+                    angle_templates.store_path(self.settings)), code)
+                self.angles_hint.setText(
+                    "Can't be matched on the Live Monitor: " + "; ".join(
+                        f"{angle.capitalize()} ({why})" for angle, why in unusable.items()) if unusable else
+                    "The Live Monitor recognizes this employee from these angles. Click one to view it full size.")
+            else:
+                self.angles_hint.setText("No angles saved in SV HRM yet. Generate them in AI Face Angles.")
+        if again:
+            row = getattr(self, "_profile_row", None)
+            if row:
+                self._load_profile_angles(row)
+
+    def _render_profile_angles(self, items):
+        while self.angles_layout.count():
+            item = self.angles_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        photos = self._sample_photos_map.get(row["name"], [])
-        available = 0
-        for index in range(row["samples"]):
-            path = photos[index] if index < len(photos) else None
-            pixmap = self._thumbnail_for(path, GALLERY_THUMB_SIZE) if path else None
+        for angle in ANGLES:
+            saved = items.get(angle.key)
             tile = QWidget()
-            tile.setFixedWidth(104)
+            tile.setFixedWidth(96)
             column = QVBoxLayout(tile)
             column.setContentsMargins(0, 0, 0, 0)
             column.setSpacing(6)
@@ -1006,31 +1225,48 @@ class EmployeesScreen(QWidget):
             photo.setFixedSize(GALLERY_THUMB_SIZE, GALLERY_THUMB_SIZE)
             photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
             photo.setObjectName("panel")
+            photo.setAccessibleName(f"Enrolled angle: {angle.label}")
+            # Not from the thumbnail cache: a replaced angle keeps the same file name.
+            pixmap = QPixmap(str(saved["path"])) if saved else None
             if pixmap is not None and not pixmap.isNull():
-                available += 1
-                photo.setPixmap(pixmap)
+                photo.setPixmap(_rounded_pixmap(pixmap, GALLERY_THUMB_SIZE))
                 photo.setCursor(Qt.CursorShape.PointingHandCursor)
-                photo.setToolTip(f"Sample {index + 1} · Click to view full size")
-                photo.mousePressEvent = lambda _event, p=path: self._open_image(p)
+                photo.setToolTip(f"{angle.label} · Click to view full size")
+                photo.mousePressEvent = lambda _event, p=saved["path"]: self._open_image(p)
             else:
-                photo.setText("Photo\nunavailable")
-                photo.setToolTip("The face encoding is enrolled, but its original photo is unavailable.")
-            photo.setAccessibleName(f"Enrolled sample {index + 1}")
+                photo.setText("Not\nenrolled")
+                photo.setToolTip(f"{angle.label} isn't saved in SV HRM yet.")
             column.addWidget(photo, 0, Qt.AlignmentFlag.AlignHCenter)
-            caption = QLabel(f"Sample {index + 1}")
+            caption = QLabel(f"{angle.key.capitalize()}\n{angle.label_km}" if angle.label_km else angle.key.capitalize())
             caption.setObjectName("screenSubtitle")
             caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            caption.setWordWrap(True)
             column.addWidget(caption)
-            self.enrolled_layout.addWidget(tile)
-        self.enrolled_layout.addStretch()
-        total = row["samples"]
-        self.enrolled_count_label.setText(f"{total} enrolled · {available} photos")
-        self.enrolled_hint.setText(
-            "Some samples have no saved original photo. Their encodings still work for matching. "
-            "Add samples to save new views; old photos cannot be recovered from encodings."
-            if available < total else
-            "Click a sample to view its original photo. These samples are used for face matching."
-            if total else "No enrolled samples yet. Add samples to enroll this employee.")
+            self.angles_layout.addWidget(tile)
+        self.angles_layout.addStretch()
+
+    def _angle_counts(self):
+        """{code: usable angles} once connected to HRM; None means matching still uses local samples."""
+        directory = self._hrm_directory
+        if not directory.synced or not directory.employees:
+            return None
+        return angle_templates.counts(angle_templates.load(angle_templates.store_path(self.settings)))
+
+    def on_angle_templates_updated(self, result):
+        """The Live Monitor's templates were rebuilt from HRM's angles."""
+        if result.changed:
+            self.reload(refresh_profile_photos=False)
+
+    def on_hrm_angles_changed(self, code):
+        """HRM says this employee's angles changed; refresh the profile if it's open."""
+        row = getattr(self, "_profile_row", None)
+        if (not row or not self.editor.isVisible() or self.right_stack.currentIndex() != 1
+                or str(row.get("employee_id") or "").casefold() != str(code).casefold()):
+            return
+        if self._profile_angles_loading == row["employee_id"]:
+            self._profile_angles_again = True
+        else:
+            self._load_profile_angles(row)
 
     def _populate_gallery(self, captures):
         """Fill the scrollable gallery with clickable thumbnails."""
@@ -1589,9 +1825,11 @@ class EmployeesScreen(QWidget):
         self.reload(refresh_profile_photos=False)
 
     def _show_duplicate_profile(self, label):
-        for index, row in enumerate(self.rows):
-            if row["name"] == label:
-                self.employee_table.selectRow(index)
+        for row in self.directory_rows:
+            if row.get("name") == label:
+                if not self.select_row(row):
+                    self._clear_filters()
+                    self.select_row(row)
                 self._populate_profile(row)
                 self._switch_to_profile()
                 self.editor.setWindowTitle("Employee details — duplicate-face review")
@@ -1612,6 +1850,52 @@ class EmployeesScreen(QWidget):
             self._captures_dirty = False
         self._thumb_cache.clear()
         self.rows = self.service.employees()
+        angle_counts = self._angle_counts()
+        self.directory_rows = hd.merge(self.rows, self._hrm_directory, angle_counts)
+        matching_on_angles = angle_counts is not None
+        self.employee_table.horizontalHeaderItem(4).setText("ANGLES" if matching_on_angles else "SAMPLES")
+        self.stat_samples.title_label.setText("Face angles" if matching_on_angles else "Face samples")
+        self.stat_samples.set_hint("Enrolled angles available for matching" if matching_on_angles
+                                   else "Face samples available for matching")
+        self._set_filter_options(self.department_filter, hd.options(self.directory_rows, "department"))
+        self._set_filter_options(self.position_filter, hd.options(self.directory_rows, "position"))
+        self._set_filter_options(self.location_filter, hd.options(self.directory_rows, "location"))
+        self._set_filter_options(self.employee_type_filter, hd.options(self.directory_rows, "employee_type"))
+        enrolled = {row["employee_id"] for row in self.directory_rows if hd.face_count(row)}
+        review = {row["employee_id"] for row in self.rows if row["name"] in self._duplicates_by_label}
+        inactive = {row["employee_id"] for row in self.rows if not row.get("active", True)}
+        ready = len(enrolled-review-inactive)
+        pending = len({row["employee_id"] for row in self.directory_rows
+                       if not hd.face_count(row) and row.get("active", True)} - enrolled)
+        self.stat_enrolled.set_value(ready, "warn" if review else "ok" if ready else "idle")
+        self.stat_enrolled.set_hint(f"{len(review)} employees need face-match review" if review
+                                    else f"{len(inactive)} inactive · active employees ready for attendance")
+        self.stat_latest.set_value(pending, "warn" if pending else "idle")
+        self.stat_samples.set_value(sum(hd.face_count(row) for row in self.directory_rows))
+        self.enrolled_pill.set_status(f"{len(enrolled)} enrolled", "warn" if review else "ok" if ready else "idle")
+        self._apply_filters()
+        self._update_hrm_status()
+        if key != self._duplicates_cached_key:
+            self.duplicate_review.setText("Checking enrolled faces for possible duplicate employees…")
+        elif self._duplicates_error:
+            self.duplicate_review.setText("Duplicate-face review unavailable: " + self._duplicates_error
+                                          + ". Refresh to retry.")
+        elif self._duplicates_by_label:
+            self.duplicate_review.setText(
+                f"{len(self._duplicates_by_label)} enrollment profiles need face-match review. "
+                "Use Edit → Review match to inspect the other employee. "
+                "No profiles are merged or deleted automatically.")
+        else:
+            self.duplicate_review.setText("No cross-employee face matches found.")
+        self._request_duplicate_scan(key)
+        if self.editor.isVisible() and self.right_stack.currentIndex() == 1:
+            shown = getattr(self, "_profile_row", {}).get("name")
+            # The merged list, so the profile shows the same HRM name and status as the table.
+            current = next((row for row in self.directory_rows if row.get("name") == shown), None)
+            if current is not None:
+                self._populate_profile(current, refresh_photos=refresh_profile_photos)
+
+    def _render_page(self, rows):
         # Qt defers deleting replaced cell widgets; hide old chips/actions now
         # so an asynchronous review refresh cannot briefly paint both versions.
         for index in range(self.employee_table.rowCount()):
@@ -1619,30 +1903,51 @@ class EmployeesScreen(QWidget):
                 previous = self.employee_table.cellWidget(index,column)
                 if previous is not None:
                     previous.hide()
-        self.employee_table.setRowCount(len(self.rows))
-        for index, row in enumerate(self.rows):
-            photo = self._find_enrollment_photo(row["name"], row["employee_name"])
-            pixmap = self._thumbnail_for(photo, 48) if photo else None
-            if pixmap is None or pixmap.isNull():
-                pixmap = _placeholder_pixmap(48, "".join(word[0] for word in row["employee_name"].split()[:2]), self._theme)
-            image_item = QTableWidgetItem()
-            image_item.setIcon(QIcon(pixmap))
-            image_item.setToolTip("Saved enrollment photo" if photo else "No saved enrollment photo")
-            self.employee_table.setItem(index, 0, image_item)
-            for col, value in ((1, row["employee_name"]), (2, row["employee_id"]), (4, str(row["samples"]))):
+        self._page_rows = list(rows)
+        self.employee_table.setUpdatesEnabled(False)
+        self.employee_table.clearSelection()
+        self.employee_table.setRowCount(len(self._page_rows))
+        for index, row in enumerate(self._page_rows):
+            self._set_photo_cell(index, row)
+            org = " · ".join(part for part in (row.get("department"), row.get("position")) if part)
+            name_text = row["employee_name"] + ("\n" + org if org else "")
+            details = [row["employee_name"]]
+            for label, key in (("Department", "department"), ("Position", "position"),
+                               ("Location", "location"), ("Cost center", "cost_center"),
+                               ("Employee type", "employee_type")):
+                if row.get(key):
+                    details.append(f"{label}: {row[key]}")
+            if row.get("in_hrm"):
+                details.append(f"HRM status: {str(row.get('hrm_status') or '').title()}")
+            elif self._hrm_directory.synced:
+                details.append("Not listed as active in HRM")
+            for col, value, tip in ((1, name_text, "\n".join(details)), (2, row["employee_id"], row["employee_id"]),
+                                    (4, str(hd.face_count(row)), str(hd.face_count(row)))):
                 item = QTableWidgetItem(value)
-                item.setToolTip(value)
+                item.setToolTip(tip)
                 if col == 4:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.employee_table.setItem(index, col, item)
+            if not row.get("enrolled", True):
+                self._render_hrm_only_row(index, row)
+                continue
             status = QWidget()
             status_layout = QHBoxLayout(status)
             status_layout.setContentsMargins(8, 0, 8, 0)
             duplicates = self._duplicates_by_label.get(row["name"], [])
-            pill = StatusPill("Inactive" if not row.get("active", True) else "Review match" if duplicates else
-                              ("Active" if row["samples"] else "Needs enrollment"),
-                              "bad" if not row.get("active", True) else
-                              "warn" if duplicates or not row["samples"] else "ok")
+            hrm_left = row.get("in_hrm") and row.get("hrm_status") not in ("", "ACTIVE")
+            pill = StatusPill("Inactive" if not row.get("active", True) else
+                              "Not in HRM" if row.get("hrm_blocked") else
+                              f"HRM {str(row['hrm_status']).title()}" if hrm_left else
+                              "Review match" if duplicates else
+                              ("Active" if hd.face_count(row) else "Needs enrollment"),
+                              "bad" if not row.get("active", True) or row.get("hrm_blocked") else
+                              "warn" if hrm_left or duplicates or not hd.face_count(row) else "ok")
+            if row.get("hrm_blocked"):
+                pill.setToolTip(NOT_IN_HRM_TIP)
+            if hrm_left:
+                pill.setToolTip("HRM lists this employee as " + str(row["hrm_status"]).lower()
+                                + ". Use Mark inactive to block their attendance here.")
             if duplicates:
                 explanation = ("Possible duplicate face with " + "; ".join(owner for _, owner in duplicates)
                                + ". Review both profiles before making changes. No records were changed.")
@@ -1690,37 +1995,253 @@ class EmployeesScreen(QWidget):
             action_layout.addStretch()
             self.employee_table.setCellWidget(index, 5, actions)
             self.employee_table.setRowHeight(index, 64)
-        enrolled = {row["employee_id"] for row in self.rows if row["samples"]}
-        review = {row["employee_id"] for row in self.rows if row["name"] in self._duplicates_by_label}
-        inactive = {row["employee_id"] for row in self.rows if not row.get("active", True)}
-        ready = len(enrolled-review-inactive)
-        pending = len({row["employee_id"] for row in self.rows if not row["samples"]}
-                      - {row["employee_id"] for row in self.rows if row["samples"]})
-        self.stat_enrolled.set_value(ready, "warn" if review else "ok" if ready else "idle")
-        self.stat_enrolled.set_hint(f"{len(review)} employees need face-match review" if review
-                                    else f"{len(inactive)} inactive · active employees ready for attendance")
-        self.stat_latest.set_value(pending, "warn" if pending else "idle")
-        self.stat_samples.set_value(sum(row["samples"] for row in self.rows))
-        self.enrolled_pill.set_status(f"{len(enrolled)} enrolled", "warn" if review else "ok" if ready else "idle")
-        self._filter_employees(self.search_edit.text())
-        if key != self._duplicates_cached_key:
-            self.duplicate_review.setText("Checking enrolled faces for possible duplicate employees…")
-        elif self._duplicates_error:
-            self.duplicate_review.setText("Duplicate-face review unavailable: " + self._duplicates_error
-                                          + ". Refresh to retry.")
-        elif self._duplicates_by_label:
-            self.duplicate_review.setText(
-                f"{len(self._duplicates_by_label)} enrollment profiles need face-match review. "
-                "Use Edit → Review match to inspect the other employee. "
-                "No profiles are merged or deleted automatically.")
+        self.employee_table.setUpdatesEnabled(True)
+        self._request_hrm_photos(self._page_rows)
+
+    def _set_photo_cell(self, index, row):
+        photo = self._find_enrollment_photo(row["name"], row["employee_name"]) if row.get("name") else None
+        tip = "Saved enrollment photo" if photo else "No saved enrollment photo"
+        if photo is None and row.get("in_hrm"):
+            photo = hd.cached_photo(self.settings, row["employee_id"])
+            if photo is not None:
+                tip = "HRM profile photo"
+        pixmap = self._thumbnail_for(photo, 48) if photo else None
+        if pixmap is None or pixmap.isNull():
+            initials = "".join(word[0] for word in row["employee_name"].split()[:2]) or "?"
+            pixmap = _placeholder_pixmap(48, initials, self._theme)
+        image_item = QTableWidgetItem()
+        image_item.setIcon(QIcon(pixmap))
+        image_item.setToolTip(tip)
+        self.employee_table.setItem(index, 0, image_item)
+
+    def _render_hrm_only_row(self, index, row):
+        """An HRM employee with no face enrolled yet: one action, Enroll face."""
+        status = QWidget()
+        status.setObjectName("employeeCell")
+        status.setStyleSheet("QWidget#employeeCell { background: transparent; }")
+        status_layout = QHBoxLayout(status)
+        status_layout.setContentsMargins(8, 0, 8, 0)
+        active = row.get("hrm_status") == "ACTIVE"
+        ready = active and hd.face_count(row) > 0
+        pill = StatusPill("Active" if ready else "Not enrolled" if active
+                          else f"HRM {str(row.get('hrm_status') or '').title()}",
+                          "ok" if ready else "warn" if active else "idle")
+        pill.setToolTip("The Live Monitor recognizes this employee from their enrolled angles." if ready else
+                        "In HRM, no angles enrolled yet. Generate them in AI Face Angles." if active else
+                        "HRM lists this employee as " + str(row.get("hrm_status") or "").lower() + ".")
+        pill.setFixedHeight(28)
+        status_layout.addWidget(pill)
+        status_layout.addStretch()
+        self.employee_table.setCellWidget(index, 3, status)
+        actions = QWidget()
+        actions.setObjectName("employeeCell")
+        actions.setStyleSheet("QWidget#employeeCell { background: transparent; }")
+        action_layout = QHBoxLayout(actions)
+        action_layout.setContentsMargins(4, 8, 4, 8)
+        enroll = QPushButton("Enroll")
+        enroll.setObjectName("controlButton")
+        enroll.setToolTip(f"Enroll a face for {row['employee_name']} ({row['employee_id']})")
+        apply_button_icon(enroll, "camera", palette(self._theme)["text_secondary"])
+        enroll.clicked.connect(lambda checked=False, i=index: self._row_action(i, self._enroll_selected_from_hrm))
+        action_layout.addWidget(enroll)
+        action_layout.addStretch()
+        self.employee_table.setCellWidget(index, 5, actions)
+        self.employee_table.setRowHeight(index, 64)
+
+    def _activate_selected(self):
+        row = self.selected_row()
+        if row is None:
+            return
+        if row.get("enrolled", True):
+            self._show_profile()
         else:
-            self.duplicate_review.setText("No cross-employee face matches found.")
-        self._request_duplicate_scan(key)
-        if self.editor.isVisible() and self.right_stack.currentIndex() == 1:
-            shown = getattr(self, "_profile_row", {}).get("name")
-            current = next((row for row in self.rows if row["name"] == shown), None)
-            if current is not None:
-                self._populate_profile(current, refresh_photos=refresh_profile_photos)
+            self._enroll_selected_from_hrm()
+
+    def _enroll_selected_from_hrm(self):
+        """Enroll someone HRM lists: as angles when matching on them, else as local samples."""
+        row = self.selected_row()
+        if row is None or row.get("enrolled", True):
+            return
+        if self._angle_counts() is not None:
+            # Local samples aren't used for matching now, so they would never recognize this person.
+            self.anglesRequested.emit(row["employee_id"])
+            return
+        self._open_enrollment()
+        self.names.set_values(row.get("first_name", ""), row.get("last_name", ""), row["employee_name"])
+        self.id_edit.setText(row["employee_id"])
+        self.id_edit.setReadOnly(True)
+        self.wizard_card.set_subtitle(f"Enroll {row['employee_name']} from HRM. Capture or upload a clear face photo.")
+
+    def select_row(self, row):
+        """Show the page holding *row* and select it. False if the filters hide it."""
+        if row not in self.filtered_rows:
+            return False
+        position = self.filtered_rows.index(row)
+        self._go_to_page(position // self._page_size())
+        self.employee_table.selectRow(position % self._page_size())
+        return True
+
+    # --- HRM directory -------------------------------------------------------
+
+    def _hrm_config(self):
+        return config_from_settings(self.settings)
+
+    def _auto_sync_hrm(self):
+        config = self._hrm_config()
+        if not config.configured:
+            return
+        if self._hrm_directory.outdated or time.time() - self._hrm_directory.fetched_at > HRM_AUTO_SYNC_SEC:
+            self.sync_hrm(quiet=True)
+
+    def request_hrm_refresh(self):
+        """HRM says something changed. Sync now, or once more if a sync is already running,
+        because that sync may have read the employee before the change."""
+        if self._hrm_syncing:
+            self._hrm_sync_again = True
+            return
+        self.sync_hrm(quiet=True)
+
+    def set_hrm_live(self, connected):
+        """Show whether HRM changes are arriving instantly."""
+        self._hrm_live = bool(connected)
+        self._update_hrm_status()
+
+    def sync_hrm(self, quiet=False):
+        """Download every HRM employee on a worker thread; the table updates when it's done."""
+        if self._hrm_syncing:
+            return False
+        config = self._hrm_config()
+        if not config.configured:
+            if not quiet:
+                problem = hd.hrm_sync.configuration_problem(config)
+                self._notify(problem.replace("send angles to HRM", "load employees from HRM"), "warn")
+            return False
+        self._hrm_syncing = True
+        self._hrm_quiet = quiet
+        self.hrm_sync_button.setEnabled(False)
+        self.hrm_sync_button.setText("Syncing…")
+        self._update_hrm_status()
+        path = hd.cache_path(self.settings)
+
+        def work():
+            try:
+                result = hd.sync(config, path, progress=lambda done, total: self.hrmSyncProgress.emit(done, total))
+            except HRMError as exc:
+                result = exc
+            except Exception as exc:  # Never let a worker die silently.
+                result = HRMError(f"Could not load employees from HRM: {exc}")
+            try:
+                self.hrmSyncDone.emit(result)
+            except RuntimeError:
+                pass  # The screen was closed while syncing.
+
+        threading.Thread(target=work, name="hrm-directory-sync", daemon=True).start()
+        return True
+
+    def _on_hrm_progress(self, done, total):
+        if self._hrm_syncing:
+            self.hrm_status_label.setText(f"Loading employees from HRM… {done} of {total}")
+
+    def _on_hrm_synced(self, result):
+        self._hrm_syncing = False
+        self.hrm_sync_button.setEnabled(True)
+        self.hrm_sync_button.setText("Sync from HRM")
+        again, self._hrm_sync_again = self._hrm_sync_again, False
+        if isinstance(result, Exception):
+            self._hrm_sync_error = str(result)
+            self._update_hrm_status()
+            if not getattr(self, "_hrm_quiet", False):
+                self._notify(str(result), "bad")
+            if again:
+                self.sync_hrm(quiet=True)
+            return
+        self._hrm_sync_error = ""
+        self._hrm_directory = result
+        self._hrm_photo_missing.clear()
+        self.reload(refresh_profile_photos=False)
+        # The Live Monitor takes the new names and statuses now, not on its next file check.
+        try:
+            self.engine.reload_if_directory_changed()
+        except Exception as exc:
+            logging.exception("Could not apply the HRM sync to the Live Monitor")
+            self._notify(f"Could not update the Live Monitor: {exc}", "bad")
+        if again:
+            self.sync_hrm(quiet=True)
+        if not getattr(self, "_hrm_quiet", False):
+            missing = sum(1 for row in self.directory_rows if row.get("in_hrm") and not row.get("enrolled", True)
+                          and row.get("hrm_status") == "ACTIVE")
+            self._notify(f"Loaded {len(result.employees)} employees from HRM. "
+                         f"{missing} active employees still need a face enrolled.", "ok")
+
+    def _update_hrm_status(self):
+        directory = self._hrm_directory
+        if self._hrm_syncing:
+            text = "Loading employees from HRM…"
+        elif not self._hrm_config().configured and not directory.synced:
+            text = ("Showing local enrollments only. Add the HRM address and API key in "
+                    "Settings > AI Configuration, then click Sync from HRM to list every employee.")
+        elif not directory.synced:
+            text = "Not synced with HRM yet. Click Sync from HRM to list every employee."
+        else:
+            in_hrm = len(directory.employees)
+            local_only = sum(1 for row in self.directory_rows if not row.get("in_hrm"))
+            text = (f"{in_hrm} active employees from HRM, synced {directory.age_text()}."
+                    + (" Live updates on." if self._hrm_live else "")
+                    + (f" {local_only} local enrollments are not active in HRM." if local_only else ""))
+        if self._hrm_sync_error and not self._hrm_syncing:
+            text += f" Last sync failed: {self._hrm_sync_error}"
+        self.hrm_status_label.setText(text)
+
+    def _request_hrm_photos(self, rows):
+        """Fetch HRM photos for rows on screen that show initials, a few at a time, in the background."""
+        config = self._hrm_config()
+        if not config.configured:
+            return
+        wanted = []
+        for row in rows:
+            code = row.get("employee_id")
+            if (not row.get("in_hrm") or not row.get("has_photo") or code in self._hrm_photo_missing
+                    or (row.get("name") and self._find_enrollment_photo(row["name"], row["employee_name"]))
+                    or hd.cached_photo(self.settings, code) is not None):
+                continue
+            with self._hrm_photo_lock:
+                if code in self._hrm_photo_pending:
+                    continue
+                self._hrm_photo_pending.add(code)
+            wanted.append(code)
+        if not wanted:
+            return
+        settings = self.settings
+        lock, pending, missing = self._hrm_photo_lock, self._hrm_photo_pending, self._hrm_photo_missing
+        queue = list(wanted)
+
+        def work():
+            while True:
+                with lock:
+                    if not queue:
+                        return
+                    code = queue.pop(0)
+                try:
+                    path = hd.fetch_photo(config, settings, code)
+                except (HRMError, OSError):
+                    path = None
+                with lock:
+                    pending.discard(code)
+                    if path is None:
+                        missing.add(code)
+                if path is not None:
+                    try:
+                        self.hrmPhotoReady.emit(code)
+                    except RuntimeError:
+                        return
+
+        for number in range(min(HRM_PHOTO_WORKERS, len(wanted))):
+            threading.Thread(target=work, name=f"hrm-photo-{number}", daemon=True).start()
+
+    def _on_hrm_photo(self, code):
+        for index, row in enumerate(self._page_rows):
+            if row.get("employee_id") == code and index < self.employee_table.rowCount():
+                self._set_photo_cell(index, row)
 
     def _row_action(self, index, action):
         self.employee_table.selectRow(index)
@@ -1729,11 +2250,15 @@ class EmployeesScreen(QWidget):
     def selected_row(self):
         selected = self.employee_table.selectionModel().selectedRows()
         index = selected[0].row() if selected else -1
-        return self.rows[index] if 0 <= index < len(self.rows) else None
+        return self._page_rows[index] if 0 <= index < len(self._page_rows) else None
 
     def _edit_selected(self):
         row = self.selected_row()
         if row is None:
+            return
+        if row.get("in_hrm"):
+            self._notify("This name comes from SV HRM. Change it there and it updates here "
+                         "and on the Live Monitor automatically.", "info")
             return
         names = EditNameDialog.ask(row, self)
         if names is None:

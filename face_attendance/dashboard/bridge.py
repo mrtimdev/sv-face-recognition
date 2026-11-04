@@ -8,7 +8,9 @@ import numpy as np
 from PyQt6.QtGui import QImage, QPixmap
 
 
-def to_qimage(frame):
+def to_qimage(frame, copy=True):
+    """*copy* False wraps the numpy buffer: use it only while *frame* is alive
+    and unchanged, e.g. straight into ``QPixmap.fromImage``, which copies."""
     if frame is None or not hasattr(frame, "shape") or frame.size == 0:
         return QImage()
     if not frame.flags["C_CONTIGUOUS"]:
@@ -21,7 +23,7 @@ def to_qimage(frame):
         if channels != 3:
             return QImage()
         image = QImage(frame.data, width, height, channels * width, QImage.Format.Format_BGR888)
-    return image.copy()
+    return image.copy() if copy else image
 
 
 def to_pixmap(frame):

@@ -431,10 +431,11 @@ class EmployeesScreenTests(unittest.TestCase):
                 self.assertEqual(screen.employee_table.item(0, 0).toolTip(), "Saved enrollment photo")
                 self.assertFalse(screen.employee_table.item(0, 0).icon().isNull())
                 screen.status_filter.setCurrentIndex(2)
-                self.assertTrue(screen.employee_table.isRowHidden(0))
-                self.assertFalse(screen.employee_table.isRowHidden(1))
+                self.assertEqual([row["name"] for row in screen._page_rows], ["Waiting"])
+                self.assertEqual(screen.employee_table.rowCount(), 1)
                 screen.search_edit.setText("missing")
-                self.assertTrue(screen.employee_table.isRowHidden(1))
+                screen._filter_employees(screen.search_edit.text())  # skip the typing delay
+                self.assertEqual(screen.employee_table.rowCount(), 0)
                 self.assertFalse(screen.empty_label.isHidden())
             finally:
                 screen.close()

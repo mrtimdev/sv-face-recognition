@@ -182,6 +182,8 @@ class CaptureJob:
     source_sequence: Optional[int] = None
     source_generation: Optional[int] = None
     last_name: str = ""
+    match_distance: Optional[float] = None
+    live_score: Optional[float] = None
 
 
 @dataclass(frozen=True)

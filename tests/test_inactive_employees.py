@@ -237,9 +237,9 @@ class InactiveMonitoringTests(unittest.TestCase):
                 self.assertFalse(screen.rows[0]['active'])
                 self.assertFalse(window.engine.catalog.employees[0].active)
                 screen.status_filter.setCurrentText('Ready for attendance')
-                self.assertTrue(screen.employee_table.isRowHidden(0))
+                self.assertEqual(screen.employee_table.rowCount(), 0)
                 screen.status_filter.setCurrentText('Inactive employees')
-                self.assertFalse(screen.employee_table.isRowHidden(0))
+                self.assertEqual(screen.employee_table.rowCount(), 1)
                 # A delivered observation populates both monitoring screens and notifications.
                 info = dict(employee_name='Seed', employee_id=screen.rows[0]['employee_id'],
                             snapshot='', captured_at='UTC', track_id=1,

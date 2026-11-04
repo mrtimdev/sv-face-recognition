@@ -14,8 +14,8 @@ from PyQt6.QtWidgets import QApplication
 from face_attendance import first_run
 from face_attendance.dashboard.setup_wizard import ADMIN, DATABASE, FINISH, MYSQL, SetupWizard
 from face_attendance.settings import Settings
-from face_attendance.users import (DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME, UserRepository,
-                                   reset_default_admin, verify_password)
+from face_attendance.users import (DEFAULT_ADMIN_PASSWORD, UserRepository,
+                                   verify_password)
 
 
 class FakeCursor:
@@ -175,25 +175,6 @@ class RecoveryTests(TemporarySettings):
     def setUp(self):
         super().setUp()
         self.repository = UserRepository(self.settings)
-
-    def test_adds_default_admin_beside_older_accounts(self):
-        self.repository.create_user("old", "Old", "", "", "old secret", role="admin")
-        reset_default_admin(self.repository, self.settings)
-        self.assertEqual(self.repository.authenticate(DEFAULT_ADMIN_USERNAME, DEFAULT_ADMIN_PASSWORD).role, "admin")
-        self.assertIsNotNone(self.repository.authenticate("old", "old secret"))
-
-    def test_restores_an_existing_timdev_with_a_forgotten_password(self):
-        user = self.repository.create_user("timdev", "Tim", "", "", "forgotten", role="user")
-        self.repository.set_disabled(user.uuid, True)
-        reset_default_admin(self.repository, self.settings)
-        restored = self.repository.authenticate("timdev", DEFAULT_ADMIN_PASSWORD)
-        self.assertEqual((restored.uuid, restored.role, restored.disabled), (user.uuid, "admin", False))
-        self.assertIsNone(self.repository.authenticate("timdev", "forgotten"))
-
-    def test_shared_remote_database_is_refused(self):
-        remote = Settings(db_backend="mysql", db_host="db.example.com")
-        with self.assertRaises(ValueError):
-            reset_default_admin(self.repository, remote)
 
     def test_broken_hashing_is_an_error_not_a_wrong_password(self):
         stored = self.repository.create_user("a", "", "", "", "secret value").password_hash

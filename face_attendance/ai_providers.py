@@ -400,21 +400,32 @@ class Angle:
     key: str
     label: str
     instruction: str
+    label_km: str = ""
 
 
+# The six angles HRM stores per employee. Keys match the backend's FaceAngle enum
+# (straight, blink, left, right, up, down), so a saved file name is also its HRM angle.
 ANGLES = (
-    Angle("left_30", "30° left",
-          "the head is turned 30 degrees toward the person's own left, a three-quarter view"),
-    Angle("right_30", "30° right",
-          "the head is turned 30 degrees toward the person's own right, a three-quarter view"),
-    Angle("left_90", "90° left",
-          "the head is turned 90 degrees toward the person's own left, a full side profile"),
-    Angle("right_90", "90° right",
-          "the head is turned 90 degrees toward the person's own right, a full side profile"),
-    Angle("chin_up", "Chin up",
-          "the head is tilted back with the chin raised about 20 degrees, still facing the camera"),
-    Angle("chin_down", "Chin down",
-          "the head is tilted forward with the chin lowered about 20 degrees, still facing the camera"),
+    Angle("straight", "Looking straight ahead",
+          "the head faces the camera directly and the eyes look straight into the lens",
+          "មើលត្រង់"),
+    Angle("blink", "Blinking",
+          "the head faces the camera directly and both eyes are fully closed, as in the middle of a "
+          "natural blink",
+          "ព្រិចភ្នែក"),
+    Angle("left", "Turning face to the left",
+          "the head is turned 30 degrees toward the person's own left, a three-quarter view, eyes open",
+          "បែរមុខទៅឆ្វេង"),
+    Angle("right", "Turning face to the right",
+          "the head is turned 30 degrees toward the person's own right, a three-quarter view, eyes open",
+          "បែរមុខទៅស្ដាំ"),
+    Angle("up", "Tilting head upward",
+          "the head is tilted back with the chin raised about 20 degrees, still facing the camera, eyes open",
+          "ងើយមុខឡើងលើ"),
+    Angle("down", "Bowing head downward",
+          "the head is tilted forward with the chin lowered about 20 degrees, still facing the camera, "
+          "eyes open",
+          "ឱនមុខចុះក្រោម"),
 )
 
 
@@ -424,7 +435,7 @@ def angle_prompt(angle):
             "eye shape, eyebrows, nose, lips, jawline, ears, skin tone and natural skin texture, with "
             "any marks, facial hair and glasses. Keep the same hairstyle, clothing, neutral expression, "
             "background and soft even light. A single person alone in the frame. "
-            f"Only the head angle changes: {angle.instruction}. Sharp focus, 85mm portrait lens, "
+            f"Only the pose changes: {angle.instruction}. Sharp focus, 85mm portrait lens, "
             "no retouching, no text, no watermark.")
 
 

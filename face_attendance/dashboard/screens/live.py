@@ -3,6 +3,8 @@ from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 
+import threading
+
 import cv2
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QKeySequence, QShortcut
@@ -11,6 +13,8 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QF
                              QListWidget, QListWidgetItem, QMenu, QPushButton,
                              QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
+from ... import hrm_directory
+from ...hrm_sync import HRMError, config_from_settings, configuration_problem
 from ...settings import describe_source
 from ...config import ATTENDANCE_MODES
 from ...storage import context_path, write_jpeg
@@ -22,7 +26,7 @@ from ...audio import format_checkin_speech
 from ..theme import palette, tone_color
 from ..widgets import (ActivityFeed, Card, StatCard,
                        ToastBar, ToggleSwitch, VideoView)
-from ..widgets.activity_detail import ActivityDetailDialog, enrollment_photos, load_photo
+from ..widgets.activity_detail import ActivityDetailDialog, angle_photos, enrollment_photos, load_photo
 
 STATUS_TONES = {"CONNECTED": "ok", "CONNECTING": "warn", "RECONNECTING": "warn",
                 "CAMERA DISCONNECTED": "bad", "STOPPED": "idle"}
@@ -69,11 +73,13 @@ class LiveScreen(QWidget):
     viewAllRequested = pyqtSignal()
     settingsRequested = pyqtSignal()
     settingsApplied = pyqtSignal(object, bool)
+    _detailAnglesReady = pyqtSignal(str, bool)      # Employee code, and whether HRM answered.
 
     def __init__(self, engine, settings, parent=None):
         super().__init__(parent)
         self.engine = engine
         self.settings = settings
+        self._detailAnglesReady.connect(self._on_detail_angles)
         self.cards = {}
         self._status_rows = {}
         self._log_rows = []
@@ -574,8 +580,10 @@ class LiveScreen(QWidget):
     # ── slots ────────────────────────────────────────────────────────────
 
     def on_frame(self, frame):
+        had_frame = self.video.has_frame()
         self.video.set_frame(frame)
-        self._sync_preview_controls()
+        if not had_frame:  # Per-frame restyling of the controls cost GUI time for nothing.
+            self._sync_preview_controls()
 
     def on_stats(self, stats):
         # KPI cards
@@ -875,14 +883,51 @@ class LiveScreen(QWidget):
         if getattr(self, "_activity_dialog", None) is not None:
             self._activity_dialog.raise_()
             return
+        # The same rule as matching: connected to HRM means angles, otherwise local samples.
+        directory = hrm_directory.load(hrm_directory.cache_path(self.settings))
+        on_angles = directory.synced and bool(directory.employees)
+        code = str(entry.get("employee_id") or "").strip()
         try:
-            photos = enrollment_photos(self.settings, entry.get("employee_id"), self.engine.employee_rows())
+            photos = (angle_photos(self.settings, code) if on_angles else
+                      enrollment_photos(self.settings, entry.get("employee_id"), self.engine.employee_rows()))
         except (OSError, ValueError, EOFError):
             photos = []
-        dialog = ActivityDetailDialog(entry, photos, self._theme, self.window())
+        dialog = ActivityDetailDialog(entry, photos, self._theme, self.window(), angles=on_angles)
         self._activity_dialog = dialog
+        self._activity_dialog_code = code
         dialog.finished.connect(self._close_activity_detail)
         dialog.open()
+        if on_angles:
+            self._fetch_detail_angles(code)
+
+    def _fetch_detail_angles(self, code):
+        """Bring the window's images up to date from HRM without holding up the window."""
+        config, settings = config_from_settings(self.settings), self.settings
+        if not code or configuration_problem(config):
+            self._on_detail_angles(code, False)
+            return
+
+        def work():
+            try:
+                hrm_directory.fetch_saved_angles(config, settings, code)
+                answered = True
+            except (HRMError, OSError):
+                answered = False
+            try:
+                self._detailAnglesReady.emit(code, answered)
+            except RuntimeError:
+                pass  # The window closed meanwhile.
+
+        threading.Thread(target=work, name="hrm-detail-angles", daemon=True).start()
+
+    def _on_detail_angles(self, code, answered):
+        dialog = getattr(self, "_activity_dialog", None)
+        if dialog is None or code != getattr(self, "_activity_dialog_code", None):
+            return      # Closed, or now showing someone else.
+        if answered:
+            dialog.set_angle_photos(angle_photos(self.settings, code))
+        else:
+            dialog.stop_loading_angles()
 
     def _close_activity_detail(self, _result):
         dialog = self._activity_dialog

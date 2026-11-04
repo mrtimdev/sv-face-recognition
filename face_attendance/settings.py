@@ -5,10 +5,8 @@ only stores overrides and rebuilds a validated ``Config`` from them. Because
 ``Config`` is frozen and the workers capture it at construction time, saved
 changes take effect when the engine is restarted.
 """
-import hashlib
 import json
 import os
-import secrets
 import tempfile
 from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass, fields, replace
@@ -20,19 +18,6 @@ from .config import ROOT, Config, parse_source
 SETTINGS_PATH = ROOT / "settings.json"
 LOCK_PATH = ROOT / "attendance.lock"
 THEMES = ("dark", "light")
-
-
-def hash_pin(pin):
-    from .users import hash_password
-    return hash_password(pin)
-
-
-def verify_pin(pin, stored):
-    from .users import verify_password
-    if stored.startswith("pbkdf2_sha256$"):
-        return verify_password(pin, stored)
-    # Existing installations can still unlock their legacy PIN configuration.
-    return secrets.compare_digest(hashlib.sha256(pin.encode("utf-8")).hexdigest(), stored)
 
 
 def mask_url_credentials(value):
@@ -129,12 +114,14 @@ class Settings:
     auto_capture_unknown: bool = True
     auto_capture_inactive: bool = True
     telegram_notify_inactive: bool = True
-    dashboard_pin_hash: str = ""
     update_auto_check: bool = True
     update_skipped_version: str = ""
     update_last_checked: str = ""     # ISO timestamp of the last successful check
     ai_provider: str = "openai"
     ai_profiles: str = ""             # JSON per provider; see ai_providers.load_profiles
+    hrm_api_url: str = ""             # SV HRM server, e.g. https://hrm.example.com; see hrm_sync
+    hrm_api_key: str = ""             # X-API-KEY for /api/face-recognition/** on that server
+    hrm_auto_upload: bool = True      # Send each generated face angle to HRM as soon as it is saved
 
     def to_config(self):
         """Build a validated ``Config``; raises ``ValueError`` for bad values."""

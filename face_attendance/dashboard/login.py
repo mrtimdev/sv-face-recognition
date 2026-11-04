@@ -15,8 +15,9 @@ from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QRadialG
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
                              QVBoxLayout, QWidget)
 
-from ..settings import verify_pin
-from ..users import AccountDisabledError, UserRepository
+from .. import hrm_auth
+from ..hrm_sync import config_from_settings as hrm_config_from_settings
+from ..users import AccountDisabledError
 from .icons import IconLabel, make_pixmap
 from .theme import palette
 from .threads import start_detached
@@ -25,6 +26,7 @@ from .widgets.loading import LoadingButton, ProgressLine
 
 MAX_ATTEMPTS = 5
 DISABLED_MESSAGE = "This account has been disabled. Ask an administrator to enable it again."
+NO_ACCESS_MESSAGE = "This SV HRM account has no access to SV Face ID. Ask an administrator for an HR or manager role."
 STAGE_MIN_MS = 380
 SUCCESS_HOLD_MS = 560
 LOCKOUT_CLOSE_MS = 1800
@@ -45,11 +47,14 @@ class _SignInWorker(QThread):
 
     def run(self):
         try:
-            user = UserRepository(self._settings).authenticate(
-                self._username, self._password,
+            user = hrm_auth.sign_in(
+                hrm_config_from_settings(self._settings), self._username, self._password,
                 on_stage=lambda name: self.stage.emit(self._token, name))
         except AccountDisabledError:
             self.result.emit(self._token, "disabled", None)
+            return
+        except hrm_auth.NoAccessError:
+            self.result.emit(self._token, "no_access", None)
             return
         except Exception as exc:
             self.result.emit(self._token, "error", str(exc) or type(exc).__name__)
@@ -275,7 +280,7 @@ class _AlertBanner(QWidget):
 
 
 class _SignInDialog(QDialog):
-    """Two-pane shell shared by account sign-in and PIN unlock.
+    """Two-pane sign-in shell.
 
     Subclasses provide ``_validate``, ``_start_work`` and the stage table; the
     shell owns the progress choreography, attempts, lockout and the shake.
@@ -479,7 +484,7 @@ class _SignInDialog(QDialog):
         detail = " ".join(str(detail).split())
         if len(detail) > 140:
             detail = detail[:137] + "…"
-        self.alert.show_message(f"Couldn't reach the user database. {detail}".strip())
+        self.alert.show_message(f"Couldn't sign in. {detail}".strip())
 
     def _set_status(self, text, tone=None):
         self.status.setText(text)
@@ -507,19 +512,18 @@ class _SignInDialog(QDialog):
 
 
 class UserLoginDialog(_SignInDialog):
-    """Username and password sign-in against the ``users`` table."""
+    """Username and password sign-in against SV HRM."""
 
     busy_text = "Signing in…"
     stages = {
-        "connect": (0.36, "Connecting to the user database…"),
+        "connect": (0.36, "Connecting to SV HRM…"),
         "verify": (0.74, "Verifying your credentials…"),
     }
 
     def __init__(self, settings, theme="light", parent=None, version="", notice=""):
         super().__init__("Face ID Attendance - Sign In", "Secure sign-in", "Welcome back",
                          "Sign in to manage attendance, employees and access.", "Sign in",
-                         footer="New here? An administrator can create your account "
-                                "in Users & Access.",
+                         footer="Use your SV HRM username and password.",
                          theme=theme, version=version, parent=parent)
         self._settings = settings
         self.current_user = None
@@ -550,7 +554,7 @@ class UserLoginDialog(_SignInDialog):
             self.alert.show_message(notice)
 
     def _explain_reset(self):
-        self._set_status("Ask an administrator to reset it in Users & Access.")
+        self._set_status("Ask an administrator to reset it in SV HRM.")
 
     def _validate(self):
         missing = []
@@ -584,6 +588,8 @@ class UserLoginDialog(_SignInDialog):
             self._post(token, "failure", "Incorrect username or password.")
         elif outcome == "disabled":
             self._post(token, "blocked", DISABLED_MESSAGE)
+        elif outcome == "no_access":
+            self._post(token, "blocked", NO_ACCESS_MESSAGE)
         else:
             self._post(token, "error", payload)
 
@@ -603,47 +609,3 @@ class UserLoginDialog(_SignInDialog):
     def _after_failure(self):
         self.password.clear()
         self.password.setFocus()
-
-
-class LoginDialog(_SignInDialog):
-    """Dashboard PIN unlock, used when no user accounts exist yet."""
-
-    busy_text = "Checking PIN…"
-    stages = {"verify": (0.7, "Checking your PIN…")}
-
-    def __init__(self, pin_hash, parent=None, theme="light", version=""):
-        super().__init__("Face ID Attendance - Login", "Dashboard lock", "Unlock the dashboard",
-                         "Enter the dashboard PIN to continue.", "Unlock",
-                         footer="The PIN can be changed or removed in Settings.",
-                         theme=theme, version=version, parent=parent)
-        self._pin_hash = pin_hash
-        self.pin = TextInput("Enter the dashboard PIN", icon="lock", password=True, theme=theme)
-        self.pin_field = FormField("PIN", self.pin, theme=theme)
-        self.fields.addWidget(self.pin_field)
-        self.pin.returnPressed.connect(self._submit)
-        self.pin.setFocus()
-
-    def _validate(self):
-        if not self.pin.text():
-            self.pin_field.set_error("Enter the PIN.")
-            self.pin.setFocus()
-            return False
-        return True
-
-    def _start_work(self, token):
-        correct = verify_pin(self.pin.text(), self._pin_hash)
-        self._post(token, "verify")
-        if correct:
-            self._post(token, "success", None)
-        else:
-            self._post(token, "failure", "Incorrect PIN.")
-
-    def _welcome_text(self, _result):
-        return "Unlocked"
-
-    def _set_inputs_enabled(self, enabled):
-        self.pin.setEnabled(enabled)
-
-    def _after_failure(self):
-        self.pin.clear()
-        self.pin.setFocus()

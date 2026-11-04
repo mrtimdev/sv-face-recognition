@@ -22,8 +22,8 @@ from ..liveness import MAX_SAMPLE_GAP
 from ..camera import CameraManager
 from ..capture import face_capture
 from ..unknown_capture import save_unknown_capture
-from ..catalog import FaceCatalog
 from ..enrollment import employee_rows as load_employee_rows
+from .. import angle_templates, hrm_directory
 from ..models import RecognitionRequest
 from ..persistence import PersistenceWorker
 from ..power import SleepInhibitor
@@ -34,7 +34,7 @@ from ..ui import UIRenderer
 from .lock import EngineLock
 
 
-PUBLISH_INTERVAL = 0.066  # ~15 Hz stats/track updates; frames still follow target_fps.
+PUBLISH_INTERVAL = 0.066  # ~15 Hz stats/track updates; frames follow the camera, capped at target_fps.
 JOIN_TIMEOUT = 3.0
 MAX_RESTART_BACKOFF = 60.0
 UNKNOWN_ALERT_EXPIRY = 3600.0
@@ -120,8 +120,7 @@ class AttendanceEngine(QObject):
         # Taken before loading, so a write racing the load is still seen later.
         self._catalog_seen = self._catalog_signature()
         self._catalog_pending = None
-        self.catalog = FaceCatalog(self.config.encodings_path, self.config.employees_path,
-                                    allow_empty=True)
+        self.catalog = self._load_catalog()
         self.camera = (CameraManager(self.config) if self._capture_factory is None else
                        CameraManager(self.config, capture_factory=self._capture_factory))
         self.recognition = RecognitionWorker(
@@ -131,6 +130,9 @@ class AttendanceEngine(QObject):
         self.attendance = AttendanceService(self.config, self.persistence)
         # Qt paints the dashboard-wide flash without altering camera pixels.
         self.renderer = UIRenderer(self.config, capture_effects=False)
+
+    def _load_catalog(self):
+        return hrm_directory.live_catalog(self.config, allow_empty=True)
 
     @property
     def running(self):
@@ -267,29 +269,66 @@ class AttendanceEngine(QObject):
         return load_employee_rows(self.config.encodings_path, self.config.employees_path)
 
     def reload_catalog(self):
-        """Re-read encodings and mappings after enrollment or a settings change.
+        """Re-read encodings, mappings and HRM names after any employee change.
 
-        Workers capture the catalog at construction, so a fresh catalog means
-        rebuilding them. A running engine is restarted (camera, recognition and
-        persistence all reopen) and the dashboard is told about the new rows.
+        A running engine switches to the new catalog in place: the camera keeps
+        running and the next recognition uses the new names and face samples.
+        If the files can't be read, it keeps recognizing with the catalog it has.
         """
         if self.running:
-            self.restart()
+            try:
+                self._swap_catalog()
+            except Exception as exc:
+                logging.exception("Could not reload the employee catalog")
+                self.errorRaised.emit(f"Could not reload employees: {exc}")
+                return
         else:
             self._build()
         self.catalogChanged.emit(self.employee_rows())
         self.logMessage.emit(f"Catalog reloaded: {self.catalog.enrolled_count} employee(s)")
 
+    def _swap_catalog(self):
+        # Marked seen first, so an unreadable file is reported once and not on every poll.
+        self._catalog_seen = self._catalog_signature()
+        self._catalog_pending = None
+        catalog = self._load_catalog()
+        self.recognition.service.set_catalog(catalog)
+        # The persistence worker's repository keeps a reference to this dict, so update it
+        # rather than replace it. Stale labels go last: a save in progress always finds one.
+        shared = self.persistence.employee_map
+        shared.update(catalog.employee_map)
+        for label in [label for label in shared if label not in catalog.employee_map]:
+            shared.pop(label, None)
+        catalog.employee_map = shared
+        self.catalog = catalog
+
     def _catalog_signature(self):
         signature = []
-        for path in (self.config.encodings_path, self.config.employees_path):
+        for path in (self.config.encodings_path, self.config.employees_path,
+                     angle_templates.store_path(self.config)):
             try:
                 stat = Path(path).stat()
             except OSError:
                 signature.append(None)
             else:
                 signature.append((stat.st_mtime_ns, stat.st_size))
+        signature.append(self._directory_signature())
         return tuple(signature)
+
+    def _directory_signature(self):
+        """What the HRM cache says, re-read only when its file changes. A sync that changes
+        nobody's name or status must not restart the camera."""
+        path = hrm_directory.cache_path(self.config)
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = getattr(self, "_directory_cached", None)
+        if cached is None or cached[0] != stamp:
+            cached = (stamp, hrm_directory.fingerprint(hrm_directory.load(path)))
+            self._directory_cached = cached
+        return cached[1]
 
     def reload_if_catalog_changed(self):
         """Reload when another process (e.g. the mobile API) rewrote the catalog.
@@ -306,6 +345,13 @@ class AttendanceEngine(QObject):
             self._catalog_pending = current
             return False
         self.logMessage.emit("Employee catalog changed outside the dashboard; reloading")
+        self.reload_catalog()
+        return True
+
+    def reload_if_directory_changed(self):
+        """Apply a finished HRM sync right away. A sync that changed nothing does nothing."""
+        if self._catalog_signature() == self._catalog_seen:
+            return False
         self.reload_catalog()
         return True
 
@@ -334,9 +380,12 @@ class AttendanceEngine(QObject):
         sequence, submitted, generation = -1, -cfg.detection_interval, None
         preview_fps, count, fps_since = 0.0, 0, time.monotonic()
         recognition_error, published, last_liveness_log = "", 0.0, float("-inf")
+        frame_budget = 1 / max(1.0, float(cfg.target_fps))
+        rendered_at, frames_version = float("-inf"), -1
         while not self._stop.is_set():
             started = now = time.monotonic()
             wall_time = time.time()
+            frames_version = self.camera.frames.version
             packet = self.camera.frames.get()
             status = self.camera.status(now)
             paused = self._paused
@@ -378,9 +427,13 @@ class AttendanceEngine(QObject):
             elapsed = now - fps_since
             if elapsed >= 1.0:
                 preview_fps, count, fps_since = count / elapsed, 0, now
-            image = self.renderer.render_overlay(frame, self.tracker.tracks, now, wall_time,
-                                                 status, "" if paused else recognition_error)
-            updates = {'frame': image}
+            updates = {}
+            # Draw only when something can have changed: a new camera frame, a new
+            # recognition result, or (for the scan line and animations) once per budget.
+            if new_frame or result is not None or now - rendered_at >= frame_budget:
+                rendered_at = now
+                updates['frame'] = self.renderer.render_overlay(frame, self.tracker.tracks, now, wall_time,
+                                                                status, "" if paused else recognition_error)
             if now - published >= PUBLISH_INTERVAL:
                 published = now
                 updates['tracks'] = [track_snapshot(track, now, self.tracker)
@@ -393,10 +446,14 @@ class AttendanceEngine(QObject):
                                          self._stats["liveness_details"].replace("\n", "; "))
                 self._expire_unknown_alerts(now)
                 self._capture_observations(now, generation, status, paused)
-            self._queue_preview(**updates)
-            delay = 1 / cfg.target_fps - (time.monotonic() - started)
-            if delay > 0:
-                self._stop.wait(delay)
+            if updates:
+                self._queue_preview(**updates)
+            # Keep to target_fps, then wake the moment the camera delivers the next
+            # frame instead of sleeping a fixed interval and showing it late.
+            delay = frame_budget - (time.monotonic() - started)
+            if delay > 0 and self._stop.wait(delay):
+                break
+            self.camera.frames.wait_newer(frames_version, frame_budget)
 
     def _capture_observations(self, now, generation, status, paused):
         if paused or status != "CONNECTED":

@@ -43,7 +43,7 @@ After sleep/wake, confirm the camera and attendance state before resuming. A sto
 
 ## Sign-in and optional login launch
 
-Create individual accounts in Users & Access, give operators only the permissions they need, and retain an administrator recovery account. A deployment with no users and no PIN opens without a dashboard sign-in boundary. A remembered session deliberately reduces interactive login requirements; reserve it for a dedicated, physically secured operator account. Do not enable macOS automatic login just to avoid the application's sign-in flow. Verify Camera permission for the actual launcher in macOS Privacy & Security before unattended operation; a LaunchAgent cannot grant it.
+Dashboard sign-in uses SV HRM accounts: create and disable them in HRM, and their HRM role decides what they can open here. HRM must be reachable to sign in. A remembered session deliberately reduces interactive login requirements; reserve it for a dedicated, physically secured operator account. Do not enable macOS automatic login just to avoid the application's sign-in flow. Verify Camera permission for the actual launcher in macOS Privacy & Security before unattended operation; a LaunchAgent cannot grant it.
 
 A user LaunchAgent can optionally start the dashboard after that user logs in. It does not start before login or unlock FileVault. The following is a **reviewable example, not an installed service**. No agent is created or enabled by this guide. Adapt paths if the checkout moves. Do not add secrets to its arguments or logs.
 
@@ -103,9 +103,8 @@ Model downloads require initial network access. A packaged application needs an
 external plate environment and `SV_PLATE_PYTHON`; the child script is included as data.
 
 Remembered desktop sign-ins expire after 30 days on the next startup. They do not
-interrupt a running attendance session. New passwords and PINs use salted
-PBKDF2-SHA256; legacy account hashes upgrade after successful sign-in. Existing
-SHA256 PINs remain readable until a new PIN is saved. OS account/file permissions
+interrupt a running attendance session. SV HRM must also still accept the
+saved token, and signing in again on this computer replaces it. OS account/file permissions
 remain the trust boundary for a remembered desktop sign-in file.
 
 Attendance evidence and plate captures are sensitive personal data. In a source run, defaults live under the checkout; a packaged macOS build defaults to `~/Library/Application Support/SV Face ID`. Settings may point elsewhere. Inspect actual configured database, capture, catalog, and output paths before backing up or clearing anything.
