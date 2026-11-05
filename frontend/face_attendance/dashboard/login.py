@@ -6,6 +6,7 @@ freezes the window.  Progress is reported in stages ("connect", "verify"); each
 stage stays on screen for a minimum time and the progress line eases between
 milestones, so a fast local login reads as a smooth sequence instead of a flash.
 """
+import logging
 import math
 import random
 
@@ -15,7 +16,7 @@ from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QRadialG
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
                              QVBoxLayout, QWidget)
 
-from .. import hrm_auth
+from .. import hrm_auth, hrm_servers
 from ..hrm_sync import config_from_settings as hrm_config_from_settings
 from ..users import AccountDisabledError
 from .icons import IconLabel, make_pixmap
@@ -23,6 +24,7 @@ from .theme import palette
 from .threads import start_detached
 from .widgets.form import FormField, TextInput, repolish
 from .widgets.loading import LoadingButton, ProgressLine
+from .widgets.server_picker import ServerPicker
 
 MAX_ATTEMPTS = 5
 DISABLED_MESSAGE = "This account has been disabled. Ask an administrator to enable it again."
@@ -47,6 +49,9 @@ class _SignInWorker(QThread):
 
     def run(self):
         try:
+            choice = hrm_servers.profile(self._settings)
+            if choice.mode == hrm_servers.AUTO:
+                hrm_servers.resolve(choice)  # Picks the network; a failure is reported by the sign-in below.
             user = hrm_auth.sign_in(
                 hrm_config_from_settings(self._settings), self._username, self._password,
                 on_stage=lambda name: self.stage.emit(self._token, name))
@@ -300,7 +305,7 @@ class _SignInDialog(QDialog):
         self._shake_anim = None
         self._shake_origin = QPoint()
         self.setWindowTitle(window_title)
-        self.setFixedSize(860, 540)
+        self.setFixedSize(860, 620)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         root = QHBoxLayout(self)
@@ -359,6 +364,10 @@ class _SignInDialog(QDialog):
         self.status.setMinimumHeight(18)
         content.addWidget(self.status)
         content.addStretch(1)
+        self.below_form = QVBoxLayout()
+        self.below_form.setSpacing(6)
+        content.addLayout(self.below_form)
+        content.addSpacing(10)
         self.footer = QLabel(footer)
         self.footer.setObjectName("authFooter")
         self.footer.setContentsMargins(3, 0, 0, 0)
@@ -547,11 +556,32 @@ class UserLoginDialog(_SignInDialog):
         self.forgot.clicked.connect(self._explain_reset)
         self.options.addWidget(self.forgot)
 
+        server_label = QLabel("Server")
+        server_label.setObjectName("authFooter")
+        server_label.setContentsMargins(3, 0, 0, 0)
+        self.below_form.addWidget(server_label)
+        self.server = ServerPicker()
+        self.server.set_profile(hrm_servers.profile(settings))
+        self.server.modeChanged.connect(self._server_changed)
+        self.below_form.addWidget(self.server)
+
         self.username.returnPressed.connect(self.password.setFocus)
         self.password.returnPressed.connect(self._submit)
         self.username.setFocus()
         if notice:
             self.alert.show_message(notice)
+
+    def _server_changed(self, _mode):
+        self._settings.update(hrm_servers.to_settings(self.server.profile()))
+        try:
+            self._settings.save()
+        except OSError as exc:
+            # Still used for this sign-in; it only won't be remembered.
+            logging.warning("Could not save the server choice: %s", exc)
+
+    def _error(self, detail):
+        super()._error(detail)
+        self.server.check()
 
     def _explain_reset(self):
         self._set_status("Ask an administrator to reset it in SV HRM.")
@@ -603,7 +633,7 @@ class UserLoginDialog(_SignInDialog):
         return f"Welcome back, {name[0]}" if name else "Welcome back"
 
     def _set_inputs_enabled(self, enabled):
-        for widget in (self.username, self.password, self.remember_check, self.forgot):
+        for widget in (self.username, self.password, self.remember_check, self.forgot, self.server):
             widget.setEnabled(enabled)
 
     def _after_failure(self):

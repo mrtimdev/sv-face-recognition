@@ -121,7 +121,7 @@ def sign_in(config, username, password, app_version="", opener=None, on_stage=No
         raise HRMError(message[:300] or "SV HRM refused this sign-in.")
     token = data.get("accessToken")
     if status != 200 or not isinstance(token, str) or not token:
-        raise HRMError(f"SV HRM returned an unexpected answer (HTTP {status}). Check its address in settings.json.")
+        raise HRMError(f"SV HRM returned an unexpected answer (HTTP {status}). Check the server on the sign-in form.")
     user = _build_user(data.get("userId"), str(data.get("username") or username),
                        str(data.get("employeeName") or ""), data.get("roles"), token)
     if not user.permissions:

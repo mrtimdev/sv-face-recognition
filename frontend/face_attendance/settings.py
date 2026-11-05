@@ -119,7 +119,10 @@ class Settings:
     update_last_checked: str = ""     # ISO timestamp of the last successful check
     ai_provider: str = "openai"
     ai_profiles: str = ""             # JSON per provider; see ai_providers.load_profiles
-    hrm_api_url: str = ""             # SV HRM server, e.g. https://hrm.example.com; see hrm_sync
+    hrm_api_url: str = ""             # One fixed SV HRM server (first-run wizard, older installs); see hrm_servers
+    hrm_server_mode: str = ""         # auto, online or office; see hrm_servers
+    hrm_online_url: str = ""          # SV HRM over the internet; empty uses the default
+    hrm_office_url: str = ""          # SV HRM on the office network; empty uses this computer's address
     hrm_api_key: str = ""             # X-API-KEY for /api/face-recognition/** on that server
     hrm_auto_upload: bool = True      # Send each generated face angle to HRM as soon as it is saved
 

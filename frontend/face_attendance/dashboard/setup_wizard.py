@@ -4,7 +4,7 @@ from PyQt6.QtGui import QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                              QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import first_run
+from .. import first_run, hrm_servers
 from ..hrm_sync import HRMConfig, HRMError
 from ..hrm_sync import _base_url as hrm_base_url
 from ..users import DEFAULT_ADMIN_USERNAME, UserRepository
@@ -383,7 +383,8 @@ class SetupWizard(QDialog):
         except HRMError as exc:
             self.error.setText(str(exc))
             return
-        self.settings.update({**self._values, "hrm_api_url": address})
+        server = hrm_servers.single_address_settings(address) if address else {"hrm_api_url": ""}
+        self.settings.update({**self._values, **server})
         try:
             if not self._has_accounts:
                 first_run.create_administrator(self.settings, self.admin_username.text(), password)

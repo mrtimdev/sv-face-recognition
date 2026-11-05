@@ -20,19 +20,27 @@ from ..threads import settle, start_detached
 from ...ai_providers import (AIConfig, AIError, DEFAULT_TEST_MESSAGE, PREFERRED_CHAT_MODELS, PROVIDERS,
                              dump_profiles, list_models, load_profiles, plain_http_warning, send_test_message,
                              split_models)
+from ... import hrm_servers
 from ...hrm_sync import HRMConfig, HRMError
 from ...hrm_sync import check_connection as hrm_check_connection
 from ...hrm_sync import configuration_problem as hrm_configuration_problem
-from ...hrm_sync import default_base_url as hrm_default_base_url
-from ...hrm_sync import plain_http_warning as hrm_plain_http_warning
 from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source
 from ..icons import apply_button_icon, make_icon
 from ..theme import palette
 from ..widgets import Card, PageHeader, StatCard, ToastBar
+from ..widgets.server_picker import ServerPicker
 from .updates import UpdatesPage
 
 
 CHECK_ROW_HEIGHT = 24
+
+
+def _test_hrm_key(choice, key):
+    """Find the server first, so the key only goes to an address that really is SV HRM."""
+    connection = hrm_servers.resolve(choice)
+    if not connection.ok:
+        raise HRMError(connection.detail)
+    return hrm_check_connection(HRMConfig(base_url=connection.url, api_key=key))
 
 
 class _FormNote(QLabel):
@@ -491,18 +499,12 @@ class SettingsScreen(QWidget):
 
     def _build_hrm_section(self, card):
         """Where Generate 6 angles sends its images: the SV HRM backend, by API key."""
-        card.add(self._section("Send face angles to HRM"))
+        card.add(self._section("SV HRM connection"))
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        url = QLineEdit()
-        url.setPlaceholderText(hrm_default_base_url())
-        self._register(form, "hrm_api_url", "HRM address", url,
-                       "The SV HRM server. Left empty, this Mac's network IP on port 8082 is used.")
-        self.hrm_url_warning = _FormNote()
-        self.hrm_url_warning.setObjectName("screenSubtitle")
-        form.addRow("", self.hrm_url_warning)
-        url.textChanged.connect(lambda text: self.hrm_url_warning.setText(hrm_plain_http_warning(text)))
+        self.hrm_server = ServerPicker(editable=True)
+        form.addRow("Connection", self.hrm_server)
         key = QLineEdit()
         key.setEchoMode(QLineEdit.EchoMode.Password)
         key.setPlaceholderText("Paste the face-recognition API key from HRM")
@@ -525,14 +527,16 @@ class SettingsScreen(QWidget):
         self.hrm_test_button.clicked.connect(self._hrm_test)
 
     def _hrm_test(self):
-        config = HRMConfig(base_url=self.fields["hrm_api_url"].text().strip() or hrm_default_base_url(),
-                           api_key=self.fields["hrm_api_key"].text().strip())
-        problem = hrm_configuration_problem(config)
+        problem = self.hrm_server.address_problem()
+        choice = self.hrm_server.profile()
+        key = self.fields["hrm_api_key"].text().strip()
+        if not problem and not key:
+            problem = hrm_configuration_problem(HRMConfig(base_url=choice.candidates()[0][1]))
         if problem:
             self.hrm_test_result.setText(problem)
             return
         self.hrm_test_result.setText("Connecting…")
-        self._ai_run(self.hrm_test_button, lambda: hrm_check_connection(config), self._hrm_test_done)
+        self._ai_run(self.hrm_test_button, lambda: _test_hrm_key(choice, key), self._hrm_test_done)
 
     def _hrm_test_done(self, angles, error):
         if error:
@@ -1110,6 +1114,7 @@ class SettingsScreen(QWidget):
         self._db_backend_changed()
         self._sync_sound_checks()
         self._load_ai(settings)
+        self.hrm_server.set_profile(hrm_servers.profile(settings))
         self.subtitle.setText(f"Stored in {SETTINGS_PATH.name}. "
                               f"Active source: {describe_source(settings.source)}")
 
@@ -1138,6 +1143,10 @@ class SettingsScreen(QWidget):
                 values[key] = widget.text().strip()
             else:
                 values[key] = widget.value()
+        problem = self.hrm_server.address_problem()
+        if problem:
+            raise ValueError(problem)
+        values.update(hrm_servers.to_settings(self.hrm_server.profile()))
         self._ai_store_form()
         values["ai_provider"] = self._ai_current
         values["ai_profiles"] = dump_profiles(self._ai_profiles)

@@ -67,7 +67,8 @@ class HRMConfig:
 
 
 def config_from_settings(settings):
-    return HRMConfig(base_url=str(getattr(settings, "hrm_api_url", "") or "").strip() or default_base_url(),
+    from .hrm_servers import current_url  # hrm_servers builds on this module.
+    return HRMConfig(base_url=current_url(settings),
                      api_key=str(getattr(settings, "hrm_api_key", "") or "").strip(),
                      auto_upload=bool(getattr(settings, "hrm_auto_upload", True)))
 

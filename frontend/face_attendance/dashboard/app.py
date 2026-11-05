@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel,
                              QMessageBox, QPushButton, QSizePolicy,
                              QStackedWidget, QStatusBar, QVBoxLayout, QWidget)
 
-from .. import updates
+from .. import hrm_servers, updates
 from ..settings import SETTINGS_PATH, Settings, describe_source
 from ..version import __version__
 from ..config import ROOT
@@ -45,16 +45,19 @@ from .shutdown import ShutdownSequence, relaunch_command
 from .sysmon import Monitor as SysMonitor
 from .telegram import TelegramService
 from .theme import palette, stylesheet
+from .threads import start_detached
 from .widgets import (IconTile, NotificationButton, NotificationCenter, NotificationPanel,
                       StatusPill, UserChip, UserMenuPanel)
 from .splash import SplashScreen
 from .widgets.activity_detail import load_photo
 from .widgets.capture_flash import CaptureFlash
+from .widgets.server_picker import ServerCheckWorker
 from .widgets.user_menu import role_title
 
 APP_VERSION = f"v{__version__}"
 UPDATE_CHECK_DELAY_MS = 4000
 CATALOG_POLL_MS = 2000  # Mobile API enrollments appear within ~2-4 s.
+SERVER_CHECK_MS = 60_000
 SIDEBAR_WIDTH = 244
 DEFAULT_WINDOW_SIZE = (1280, 1000)
 
@@ -461,6 +464,12 @@ class MainWindow(QMainWindow):
         self.catalog_timer.setInterval(CATALOG_POLL_MS)
         self.catalog_timer.timeout.connect(self._check_catalog)
         self.catalog_timer.start()
+        self._server_worker = None
+        self._server_url = hrm_config_from_settings(self.settings).base_url
+        self.server_timer = QTimer(self)
+        self.server_timer.setInterval(SERVER_CHECK_MS)
+        self.server_timer.timeout.connect(self._check_server)
+        self.server_timer.start()
 
     # --- state propagation ------------------------------------------------
     def _engine_state(self, running):
@@ -824,6 +833,8 @@ class MainWindow(QMainWindow):
         if self.account_watcher is not None:
             self.account_watcher.settings = settings
         self.hrm_live.configure(hrm_config_from_settings(settings))
+        self._server_url = hrm_config_from_settings(settings).base_url
+        self._check_server()
         self.apply_theme(settings.theme)
         self.telegram.reconfigure(
             bot_token=settings.telegram_bot_token,
@@ -878,6 +889,25 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             logging.exception("Catalog reload after external change failed")
             self._note(f"ERROR: could not reload employees: {exc}")
+
+    def _check_server(self):
+        """Automatic follows the computer between the office and the internet."""
+        choice = hrm_servers.profile(self.settings)
+        if choice.mode != hrm_servers.AUTO:
+            return
+        worker = ServerCheckWorker(0, choice)
+        worker.checked.connect(self._server_checked)
+        self._server_worker = worker
+        start_detached(worker)
+
+    def _server_checked(self, _token, connection):
+        config = hrm_config_from_settings(self.settings)
+        if not connection.ok or config.base_url == self._server_url:
+            return
+        self._server_url = config.base_url
+        self.hrm_live.configure(config)
+        name = hrm_servers.NETWORK_NAMES.get(connection.network, "server")
+        self._note(f"Now connected to SV HRM over: {name} ({hrm_servers.host_of(connection.url)}).")
 
     def _note(self, message):
         logging.info("dashboard: %s", message)
@@ -1145,6 +1175,8 @@ def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False):
             session = load_session()
             if session:
                 try:
+                    if hrm_servers.profile(settings).mode == hrm_servers.AUTO:
+                        hrm_servers.resolve(hrm_servers.profile(settings))
                     current_user = hrm_auth.restore(hrm_config_from_settings(settings), session)
                 except HRMError as exc:
                     logging.warning("Could not restore the remembered session: %s", exc)
