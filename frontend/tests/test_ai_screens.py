@@ -277,6 +277,15 @@ class AnglesScreenTests(Base):
         self.screen = AIAnglesScreen(self.engine, self.settings)
         self.addCleanup(self.screen.deleteLater)
         self.photo = np.full((80, 80, 3), 100, np.uint8)
+        # The fake images are blank, so by default leave the real face check out of these tests.
+        self.checks = {}
+        checker = patch.object(ai_angles.angle_templates, "generated_image_checker",
+                               return_value=lambda _content: self._next_check())
+        checker.start()
+        self.addCleanup(checker.stop)
+
+    def _next_check(self):
+        return self.checks.pop("next", "matched") if len(self.checks) else "matched"
 
     def _new_person(self, name="Jane Smith"):
         self.screen.new_button.setChecked(True)
@@ -295,6 +304,32 @@ class AnglesScreenTests(Base):
             write_jpeg(path, self.photo)
             return path
         return patch.object(ai_angles, "generate_angle_file", side_effect=generate)
+
+    def test_a_generated_image_that_fails_the_face_check_warns_on_its_tile_and_in_the_message(self):
+        self._new_person()
+        self.checks["next"] = "mismatch"  # Only the first image generated.
+        with self._fake_generate():
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        first, *others = self.screen.tiles.values()
+        self.assertFalse(first.warning.isHidden())
+        self.assertIn("different person", first.warning.text())
+        self.assertFalse(first.include.isChecked())  # Not added to enrollment unless someone chooses to.
+        self.assertTrue(all(tile.warning.isHidden() and tile.include.isChecked() for tile in others))
+        self.assertIn("1 of the angles may not show this person", self.screen.toast.label.text())
+
+    def test_redo_clears_the_old_warning(self):
+        self._new_person()
+        with self._fake_generate():
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        tile = next(iter(self.screen.tiles.values()))
+        tile.set_check("no_face")
+        self.assertFalse(tile.warning.isHidden())
+        with self._fake_generate():
+            tile.retry.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        self.assertTrue(tile.warning.isHidden())
 
     def test_generating_fills_all_six_tiles_in_one_folder(self):
         self._new_person()
@@ -414,7 +449,7 @@ class AnglesScreenTests(Base):
         self.assertFalse(any(tile.path for tile in self.screen.tiles.values()))
         self.assertIsNone(self.screen.output_dir)
 
-    def test_existing_employee_uses_their_enrolled_photo(self):
+    def test_employee_who_is_not_in_hrm_uses_their_enrolled_photo(self):
         row = {"name": "Jane", "employee_name": "Jane", "employee_id": "E1", "active": True}
         photo = self.root / "enrolled.jpg"
         write_jpeg(photo, self.photo)

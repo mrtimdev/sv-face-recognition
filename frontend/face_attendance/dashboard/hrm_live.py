@@ -15,6 +15,8 @@ from PyQt6.QtWebSockets import QWebSocket
 EVENTS_PATH = "/api/face-recognition/events"
 EMPLOYEE_CHANGED = "employee.changed"
 ANGLES_CHANGED = "angles.changed"
+PHOTO_CHANGED = "photo.changed"
+ANGLES_VERIFIED = "angles.verified"
 ATTENDANCE_ACK = "attendance.ack"
 MAX_EVENT_CHARS = 4096
 SETTLE_MS = 600                 # Several saves in a row become one refresh.
@@ -40,7 +42,7 @@ def parse_event(text):
         data = json.loads(text)
     except ValueError:
         return None
-    if not isinstance(data, dict) or data.get("type") not in (EMPLOYEE_CHANGED, ANGLES_CHANGED):
+    if not isinstance(data, dict) or data.get("type") not in (EMPLOYEE_CHANGED, ANGLES_CHANGED, PHOTO_CHANGED, ANGLES_VERIFIED):
         return None
     code = data.get("employeeCode")
     if not isinstance(code, str) or not code.strip():
@@ -68,6 +70,8 @@ class HrmLiveLink(QObject):
     employeesChanged = pyqtSignal()      # Refresh the directory. Also sent after each connect,
                                          # because changes made while disconnected aren't replayed.
     anglesChanged = pyqtSignal(str)      # This employee's angle images changed in HRM.
+    photoChanged = pyqtSignal(str)       # This employee's profile photo changed in HRM.
+    anglesVerified = pyqtSignal(str)     # New face check results for this employee; the images are the same.
     connectedChanged = pyqtSignal(bool)
     attendanceAck = pyqtSignal(str, str)  # Event ID, and HRM's answer: saved, duplicate, rejected or retry.
 
@@ -164,6 +168,10 @@ class HrmLiveLink(QObject):
             logging.debug("Ignored an unknown HRM live event")
         elif event[0] == EMPLOYEE_CHANGED:
             self._settle.start()
+        elif event[0] == PHOTO_CHANGED:
+            self.photoChanged.emit(event[1])
+        elif event[0] == ANGLES_VERIFIED:
+            self.anglesVerified.emit(event[1])
         else:
             self.anglesChanged.emit(event[1])
 

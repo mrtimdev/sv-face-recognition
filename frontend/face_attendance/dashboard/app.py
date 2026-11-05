@@ -426,6 +426,9 @@ class MainWindow(QMainWindow):
         self.hrm_live.employeesChanged.connect(self.screens[2].request_hrm_refresh)
         self.hrm_live.connectedChanged.connect(self.screens[2].set_hrm_live)
         self.hrm_live.anglesChanged.connect(self._on_hrm_angles_changed)
+        self.hrm_live.photoChanged.connect(self._on_hrm_photo_changed)
+        self.hrm_live.anglesVerified.connect(self.screens[6].on_hrm_angles_changed)
+        self.hrm_live.anglesVerified.connect(self.screens[2].on_hrm_angles_changed)
         self.hrm_angles = AngleTemplateWorker(lambda: self.settings, self)
         self.hrm_angles.updated.connect(self.screens[2].on_angle_templates_updated)
         self.hrm_angles.failed.connect(lambda message: self._note(f"Could not update face angles from HRM: {message}"))
@@ -850,6 +853,11 @@ class MainWindow(QMainWindow):
         self.screens[6].on_hrm_angles_changed(employee_code)
         self.screens[2].on_hrm_angles_changed(employee_code)
         self.hrm_angles.request()
+
+    def _on_hrm_photo_changed(self, employee_code):
+        self.engine.logMessage.emit(f"Profile photo changed in HRM for {employee_code}")
+        self.screens[6].on_hrm_photo_changed(employee_code)
+        self.screens[2].on_hrm_photo_changed(employee_code)
 
     def _check_catalog(self):
         if self._exit is not None or self._exit_done:

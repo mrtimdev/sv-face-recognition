@@ -16,11 +16,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import hrm_sync
+from . import angle_checks, hrm_sync
 from .template_store import TEMPLATE_MODEL
 
 STORE_NAME = "hrm_angle_templates.json"
 STORE_VERSION = 1
+ANGLE_ORDER = ("straight", "blink", "left", "right", "up", "down")  # When a tie needs breaking, front view first.
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,59 @@ def encode_angle(backend, content):
     return np.asarray(encode_faces(backend, image, boxes)[0], dtype=np.float64), ""
 
 
+def generated_image_checker(source_jpeg, backend=None):
+    """A function giving a generated image's check result, compared with the photo it was made from.
+
+    Builds the face models on first use, so call it on the worker thread.
+    """
+    state = {"backend": backend, "ready": False, "reference": None}
+
+    def check(content):
+        if not state["ready"]:
+            state["ready"] = True
+            if state["backend"] is None:
+                from .face_backend import OpenCVFaceBackend
+                state["backend"] = OpenCVFaceBackend()
+            state["reference"] = encode_angle(state["backend"], source_jpeg)[0]
+        vector, problem = encode_angle(state["backend"], content)
+        if vector is None:
+            return angle_checks.status_for_problem(problem)
+        if state["reference"] is None:
+            return angle_checks.NOT_COMPARED  # The source photo itself has no single clear face.
+        return angle_checks.MATCHED if angle_checks.same_face(state["reference"], vector) else angle_checks.MISMATCH
+    return check
+
+
+def checks_for(angles):
+    """{angle: check result} for one employee's store entries. Unusable images are their own result."""
+    vectors = {key: vector_of(entry) for key, entry in angles.items()}
+    results = angle_checks.compare_with_each_other(
+        {key: vector for key, vector in vectors.items() if vector is not None}, ANGLE_ORDER)
+    for key, entry in angles.items():
+        if vectors[key] is None:
+            results[key] = angle_checks.status_for_problem(entry.get("problem") if isinstance(entry, dict) else None)
+    return results
+
+
+def _report_checks(config, store, rows, opener=None):
+    """Send HRM only the results it doesn't have, so a report never causes another one."""
+    known = {(str(row.get("employeeCode") or "").strip(), str(row.get("angle") or "").strip()):
+             row.get("verificationStatus") for row in rows}
+    for code, angles in store.items():
+        results = checks_for(angles)
+        checks = [{"angle": key, "sha256": angles[key].get("sha256"), "status": status}
+                  for key, status in results.items()
+                  if angles[key].get("sha256") and known.get((code, key)) != status]
+        if not checks:
+            continue
+        try:
+            hrm_sync.report_angle_checks(config, code, checks, opener=opener)
+        except hrm_sync.HRMError as exc:
+            # Tried again at the next sync. Not worth failing the templates, which are already saved.
+            logging.warning("Could not report the face checks to HRM: %s", exc)
+            return
+
+
 def sync(config, path, backend=None, opener=None):
     """Bring the store in line with HRM. Raises ``hrm_sync.HRMError`` when the list can't be read.
 
@@ -155,5 +209,6 @@ def sync(config, path, backend=None, opener=None):
     changed = new != old
     if changed or not Path(path).exists():
         _save(path, new)
+    _report_checks(config, new, rows, opener=opener)
     return SyncResult(sum(1 for angles in new.values() if any(vector_of(e) is not None for e in angles.values())),
                       changed, tuple(problems))

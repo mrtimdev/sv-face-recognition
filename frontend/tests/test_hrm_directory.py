@@ -74,6 +74,9 @@ class FetchTests(unittest.TestCase):
             self.assertEqual(path, hd.cached_photo(settings, "EMP001"))
             self.assertEqual(path.read_bytes(), b"\xff\xd8\xff\xe0jpeg")
             self.assertNotIn("EMP001", path.name)  # Codes never become file names directly.
+            with patch.object(hd.hrm_sync, "employee_photo", return_value=None):
+                self.assertIsNone(hd.fetch_photo(CONFIG, settings, "EMP001"))  # Removed in HRM.
+            self.assertIsNone(hd.cached_photo(settings, "EMP001"))
 
 
 class CacheAndMergeTests(unittest.TestCase):

@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import cv2
 import numpy as np
 
 from face_attendance import hrm_auth, hrm_directory as hd
@@ -320,7 +321,6 @@ class AnglesDirectoryTests(unittest.TestCase):
         self.assertEqual(screen._employee_code(), "E1")
 
     def test_hrm_photo_is_downloaded_for_the_chosen_person(self):
-        import cv2
         ok, jpeg = cv2.imencode(".jpg", np.full((80, 80, 3), 120, np.uint8))
         self.assertTrue(ok)
         screen = self._screen()
@@ -333,6 +333,163 @@ class AnglesDirectoryTests(unittest.TestCase):
                 self.app.processEvents()
                 time.sleep(0.01)
         self.assertIsNotNone(screen.source)
+
+    def _choose_enrolled_hrm_person(self, screen, enrolled_image):
+        """Choose E1, who is in HRM and also has a local enrollment photo."""
+        path = Path(self._folder.name) / "enrolled.jpg"
+        self.assertTrue(cv2.imwrite(str(path), enrolled_image))
+        enrolled = patch.object(screen, "_enrolled_photo_path", return_value=path)
+        enrolled.start()
+        self.addCleanup(enrolled.stop)
+        screen.employee_combo.setCurrentIndex(1)
+
+    def _wait_for_photo(self, screen):
+        deadline = time.monotonic() + 5
+        while screen.source is None and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.01)
+        self.app.processEvents()
+
+    def test_profile_photo_from_hrm_replaces_the_enrolled_photo(self):
+        ok, jpeg = cv2.imencode(".jpg", np.full((80, 80, 3), 200, np.uint8))
+        self.assertTrue(ok)
+        screen = self._screen()
+        enrolled = np.full((80, 80, 3), 10, np.uint8)
+        with patch("face_attendance.hrm_directory.hrm_sync.employee_photo", return_value=jpeg.tobytes()) as fetch:
+            self._choose_enrolled_hrm_person(screen, enrolled)
+            self._wait_for_photo(screen)
+        fetch.assert_called()
+        self.assertGreater(int(screen.source.mean()), 150)  # The HRM image, not the dark enrolled one.
+
+    def test_person_without_an_hrm_photo_falls_back_to_the_enrolled_photo_and_says_so(self):
+        screen = self._screen()
+        enrolled = np.full((80, 80, 3), 10, np.uint8)
+        with patch("face_attendance.hrm_directory.hrm_sync.employee_photo", return_value=None), \
+                patch.object(screen.toast, "show_message") as toast:
+            self._choose_enrolled_hrm_person(screen, enrolled)
+            self._wait_for_photo(screen)
+        self.assertLess(int(screen.source.mean()), 50)
+        self.assertIn("Using the enrolled photo", " ".join(call.args[0] for call in toast.call_args_list))
+
+    def test_hrm_failure_uses_the_last_saved_profile_photo(self):
+        ok, jpeg = cv2.imencode(".jpg", np.full((80, 80, 3), 200, np.uint8))
+        self.assertTrue(ok)
+        screen = self._screen()
+        path = hd.photo_dir(self.settings) / hd._photo_name("E1")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(jpeg.tobytes())
+        with patch("face_attendance.hrm_directory.hrm_sync.employee_photo", side_effect=HRMError("HRM is down.")), \
+                patch.object(screen.toast, "show_message") as toast:
+            self._choose_enrolled_hrm_person(screen, np.full((80, 80, 3), 10, np.uint8))
+            self._wait_for_photo(screen)
+        self.assertGreater(int(screen.source.mean()), 150)
+        self.assertIn("HRM is down. Using the last saved profile photo", " ".join(call.args[0] for call in toast.call_args_list))
+
+    def test_use_profile_photo_replaces_an_uploaded_photo(self):
+        ok, jpeg = cv2.imencode(".jpg", np.full((80, 80, 3), 200, np.uint8))
+        self.assertTrue(ok)
+        screen = self._screen()
+        with patch("face_attendance.hrm_directory.hrm_sync.employee_photo", return_value=jpeg.tobytes()):
+            screen.employee_combo.setCurrentIndex(1)
+            self._wait_for_photo(screen)
+            screen.source = np.full((80, 80, 3), 10, np.uint8)  # As if the user uploaded their own.
+            screen.profile_button.click()
+            self.assertIsNone(screen.source)
+            self._wait_for_photo(screen)
+        self.assertGreater(int(screen.source.mean()), 150)
+
+    def test_a_late_photo_is_ignored_after_an_upload_or_switching_to_new_employee(self):
+        from face_attendance.dashboard.screens.ai_angles import NEW
+        ok, jpeg = cv2.imencode(".jpg", np.full((80, 80, 3), 200, np.uint8))
+        self.assertTrue(ok)
+        path = Path(self._folder.name) / "late.jpg"
+        path.write_bytes(jpeg.tobytes())
+        screen = self._screen()
+        with patch.object(screen, "_fetch_hrm_photo", return_value=True):
+            screen.employee_combo.setCurrentIndex(1)
+        uploaded = np.full((80, 80, 3), 10, np.uint8)
+        screen._set_source(uploaded, uploaded=True)
+        screen._on_hrm_photo("E1", path)
+        self.assertIs(screen.source, uploaded)
+        screen.mode_group.button(NEW).click()
+        screen._on_hrm_photo("E1", path)
+        self.assertEqual(screen.person_stack.currentIndex(), NEW)
+        self.assertIsNone(screen.source)
+
+    def _showing_dark_profile_photo(self, screen):
+        with patch.object(screen, "_fetch_hrm_photo", return_value=True):
+            screen.employee_combo.setCurrentIndex(1)
+        screen._set_source(np.full((80, 80, 3), 10, np.uint8))
+
+    def test_a_changed_hrm_photo_replaces_the_one_showing_and_keeps_generated_images(self):
+        ok, jpeg = cv2.imencode(".jpg", np.full((80, 80, 3), 200, np.uint8))
+        self.assertTrue(ok)
+        screen = self._screen()
+        self._showing_dark_profile_photo(screen)
+        tile = next(iter(screen.tiles.values()))
+        tile.path = Path("generated.jpg")
+        with patch("face_attendance.hrm_directory.hrm_sync.employee_photo", return_value=jpeg.tobytes()):
+            screen.on_hrm_photo_changed("e1")  # Codes are compared without case.
+            deadline = time.monotonic() + 5
+            while int(screen.source.mean()) < 150 and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(0.01)
+        self.assertGreater(int(screen.source.mean()), 150)
+        self.assertEqual(tile.path, Path("generated.jpg"))
+
+    def test_a_changed_hrm_photo_leaves_an_upload_and_other_people_alone(self):
+        screen = self._screen()
+        self._showing_dark_profile_photo(screen)
+        with patch.object(screen, "_fetch_hrm_photo") as fetch:
+            screen.on_hrm_photo_changed("E2")
+            fetch.assert_not_called()
+            screen._set_source(screen.source, uploaded=True)
+            screen.on_hrm_photo_changed("E1")
+            fetch.assert_not_called()
+
+    def test_a_changed_hrm_photo_waits_for_a_running_generation(self):
+        screen = self._screen()
+        self._showing_dark_profile_photo(screen)
+        screen._saving = True
+        with patch.object(screen, "_fetch_hrm_photo") as fetch:
+            screen.on_hrm_photo_changed("E1")
+            fetch.assert_not_called()
+            screen._saving = False
+            screen._update_buttons()
+            fetch.assert_called_once()
+
+    def test_a_failed_refresh_keeps_the_photo_and_a_removed_one_goes(self):
+        screen = self._screen()
+        self._showing_dark_profile_photo(screen)
+        showing = screen.source
+        screen._on_hrm_photo("E1", HRMError("HRM is down."))
+        self.assertIs(screen.source, showing)
+        screen._on_hrm_photo("E1", None)
+        self.assertIsNone(screen.source)
+
+    def test_a_saved_angle_shows_its_face_check_warning(self):
+        screen = self._screen()
+        with patch.object(screen, "_fetch_hrm_photo", return_value=True):
+            screen.employee_combo.setCurrentIndex(1)
+        path = Path(self._folder.name) / "left.jpg"
+        self.assertTrue(cv2.imwrite(str(path), np.full((80, 80, 3), 120, np.uint8)))
+        screen._on_saved_angles("E1", ([{"key": "left", "path": path, "version": 1, "check": "mismatch"}], []))
+        tile = screen.tiles["left"]
+        self.assertFalse(tile.warning.isHidden())
+        self.assertIn("different person", tile.warning.text())
+        screen._on_saved_angles("E1", ([{"key": "left", "path": path, "version": 1, "check": "matched"}], []))
+        self.assertTrue(tile.warning.isHidden())
+
+    def test_an_angle_deleted_in_hrm_leaves_its_tile(self):
+        screen = self._screen()
+        with patch.object(screen, "_fetch_hrm_photo", return_value=True):
+            screen.employee_combo.setCurrentIndex(1)
+        path = Path(self._folder.name) / "left.jpg"
+        self.assertTrue(cv2.imwrite(str(path), np.full((80, 80, 3), 120, np.uint8)))
+        screen._on_saved_angles("E1", ([{"key": "left", "path": path, "version": 1}], []))
+        self.assertTrue(screen.tiles["left"].from_hrm)
+        screen._on_saved_angles("E1", ([], []))
+        self.assertIsNone(screen.tiles["left"].path)
 
     def test_a_photo_for_someone_no_longer_chosen_is_ignored(self):
         screen = self._screen()

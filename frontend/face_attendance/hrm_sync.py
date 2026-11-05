@@ -202,6 +202,13 @@ def angle_summary(config, opener=None):
     return [row for row in rows if isinstance(row, dict)]
 
 
+def report_angle_checks(config, employee_code, checks, opener=None):
+    """Tell HRM how the face check went: checks is [{"angle", "sha256", "status"}, ...]."""
+    body = json.dumps({"checks": checks}).encode("utf-8")
+    _request(config, "PUT", f"{_employee_path(employee_code)}/face-angles/verification", body=body,
+             content_type="application/json", opener=opener)
+
+
 def angle_image(config, employee_code, angle_key, opener=None):
     """One stored angle image as JPEG bytes."""
     path = f"{_employee_path(employee_code)}/face-angles/{urllib.parse.quote(angle_key, safe='')}/image"

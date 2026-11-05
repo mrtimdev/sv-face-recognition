@@ -342,7 +342,8 @@ def fetch_saved_angles(config, settings, employee_id, opener=None):
                 problems.append(f"{key}: HRM sent a damaged image.")
                 continue
             _write_private(path, data)
-        items.append({"key": key, "path": path, "version": row.get("version")})
+        items.append({"key": key, "path": path, "version": row.get("version"),
+                      "check": row.get("verificationStatus")})
     for key in known - present:  # Deleted in HRM, so don't keep showing or storing it here.
         (folder / f"{key}.jpg").unlink(missing_ok=True)
     return items, problems
@@ -364,6 +365,9 @@ def fetch_photo(config, settings, employee_id, opener=None):
     """Download and cache one HRM photo. Returns the cached path, or None if HRM has none."""
     data = hrm_sync.employee_photo(config, employee_id, opener=opener)
     if not data:
+        cached = cached_photo(settings, employee_id)
+        if cached is not None:  # Removed in HRM, so don't keep showing or storing it here.
+            cached.unlink(missing_ok=True)
         return None
     if not (data.startswith(b"\xff\xd8") or data.startswith(b"\x89PNG") or data[8:12] == b"WEBP"):
         return None  # Not an image; never cache whatever came back.

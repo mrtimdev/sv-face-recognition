@@ -25,7 +25,7 @@ from ...enrollment import EnrollmentOutcome, EnrollmentService, FACE_BACKEND_LOC
 from ...storage import delete_capture, read_image
 from ...enrollment_photos import portrait_name, sample_photo_map
 from ...transfer import TransferError, export_employees, import_employees
-from ... import angle_templates
+from ... import angle_checks, angle_templates
 from ... import hrm_directory as hd
 from ...ai_providers import ANGLES
 from ...hrm_sync import HRMError, config_from_settings
@@ -1242,6 +1242,14 @@ class EmployeesScreen(QWidget):
             caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
             caption.setWordWrap(True)
             column.addWidget(caption)
+            check = saved.get("check") if saved else None
+            if angle_checks.is_warning(check):
+                warning = QLabel(f"⚠ {angle_checks.SHORT_WARNINGS[check]}")
+                warning.setStyleSheet(f"color: {angle_checks.WARNING_COLOR}; font-weight: 600;")
+                warning.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                warning.setWordWrap(True)
+                warning.setToolTip(angle_checks.WARNINGS[check])
+                column.addWidget(warning)
             self.angles_layout.addWidget(tile)
         self.angles_layout.addStretch()
 
@@ -1267,6 +1275,26 @@ class EmployeesScreen(QWidget):
             self._profile_angles_again = True
         else:
             self._load_profile_angles(row)
+
+    def on_hrm_photo_changed(self, code):
+        """HRM has a new photo for this employee; replace the saved copy behind the table's thumbnail."""
+        config = self._hrm_config()
+        if not config.configured:
+            return
+        settings = self.settings
+
+        def work():
+            try:
+                hd.fetch_photo(config, settings, code)
+            except (HRMError, OSError) as exc:
+                logging.info("Could not refresh the HRM photo for %s: %s", code, exc)
+                return
+            try:
+                self.hrmPhotoReady.emit(code)
+            except RuntimeError:
+                pass  # The screen was closed meanwhile.
+
+        threading.Thread(target=work, name="hrm-photo-changed", daemon=True).start()
 
     def _populate_gallery(self, captures):
         """Fill the scrollable gallery with clickable thumbnails."""
@@ -2239,6 +2267,10 @@ class EmployeesScreen(QWidget):
             threading.Thread(target=work, name=f"hrm-photo-{number}", daemon=True).start()
 
     def _on_hrm_photo(self, code):
+        # The saved file keeps its name when the photo changes, so its old thumbnail must go.
+        path = str(hd.photo_dir(self.settings) / hd._photo_name(code))
+        self._thumb_cache = {key: pixmap for key, pixmap in self._thumb_cache.items() if key[0] != path}
+        self._hrm_photo_missing.discard(code)
         for index, row in enumerate(self._page_rows):
             if row.get("employee_id") == code and index < self.employee_table.rowCount():
                 self._set_photo_cell(index, row)

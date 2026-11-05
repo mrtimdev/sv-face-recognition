@@ -96,6 +96,24 @@ class LinkTests(unittest.TestCase):
         wait_for(lambda: False, 0.1)
         self.assertEqual(self.refreshes, [1])
 
+    def test_photo_changes_name_the_employee_and_do_not_count_as_angles(self):
+        photos = []
+        self.link.photoChanged.connect(photos.append)
+        self._connect()
+        self.clients[0].sendTextMessage(json.dumps({"type": "photo.changed", "employeeCode": "E7"}))
+        self.assertTrue(wait_for(lambda: photos))
+        self.assertEqual(photos, ["E7"])
+        self.assertEqual(self.angles, [])
+
+    def test_new_face_checks_name_the_employee_and_do_not_count_as_changed_angles(self):
+        verified = []
+        self.link.anglesVerified.connect(verified.append)
+        self._connect()
+        self.clients[0].sendTextMessage(json.dumps({"type": "angles.verified", "employeeCode": "E7"}))
+        self.assertTrue(wait_for(lambda: verified))
+        self.assertEqual(verified, ["E7"])
+        self.assertEqual(self.angles, [])
+
     def test_angle_changes_name_the_employee(self):
         self._connect()
         self.clients[0].sendTextMessage(json.dumps({"type": "angles.changed", "employeeCode": "E7"}))
