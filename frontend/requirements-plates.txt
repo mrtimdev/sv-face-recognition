@@ -1,0 +1,7 @@
+# Install ONLY in a separate Python 3.11/3.12 venv (.venv-plates), never in the
+# desktop venv (see OPERATIONS.md). Set SV_PLATE_PYTHON to that venv's absolute
+# bin/python path. FastALPR requires headless OpenCV; the desktop/terminal uses
+# regular OpenCV, and this child process has no Qt dependency.
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+fast-alpr[onnx]==0.4.0

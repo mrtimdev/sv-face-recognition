@@ -1,3 +1,0 @@
-# Install in .venv-plates, never in the desktop venv (see OPERATIONS.md).
-# FastALPR requires headless OpenCV; the desktop/terminal uses regular OpenCV.
--r requirements-plates-isolated.txt

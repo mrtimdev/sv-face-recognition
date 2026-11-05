@@ -1,0 +1,1378 @@
+"""Dashboard palette and stylesheet.
+
+Two themes: **dark** (terminal-derived) and **light** (the modern face-ID
+dashboard design: blue primary, green success, orange warning on a cool gray
+canvas).  Every colour the screens need lives in ``PALETTES`` so a widget can
+look a token up at paint time instead of hard-coding a hex value.
+"""
+
+PALETTES = {
+    "dark": {
+        # surfaces
+        "bg": "#0B1220",
+        "bg_soft": "#111C33",
+        "panel": "#152238",
+        "panel_alt": "#1B2A44",
+        "card": "#152238",
+        "card_alt": "#1B2A44",
+        "border": "#26395C",
+        "border_soft": "#1E2E4C",
+        "hover": "#1E2E4C",
+        "selection": "#1D3A66",
+        "ring": "rgba(59,130,246,0.45)",
+        "shadow": "rgba(0,0,0,0.45)",
+        # text
+        "text": "#F1F5F9",
+        "text_secondary": "#B6C2D6",
+        "muted": "#7C8DA8",
+        # accents
+        "primary": "#3B82F6",
+        "primary_hover": "#2563EB",
+        "primary_fg": "#FFFFFF",
+        "primary_soft": "#16294A",
+        "primary_soft_fg": "#93C5FD",
+        "accent": "#3B82F6",
+        "success": "#22C55E",
+        "success_bg": "#0B2E1C",
+        "success_border": "#1B5E37",
+        "danger": "#F87171",
+        "danger_bg": "#3A1214",
+        "danger_border": "#7F2A2E",
+        "warn": "#FBBF24",
+        "warn_bg": "#3A2A08",
+        "warn_border": "#7A5A13",
+        "info": "#60A5FA",
+        "info_bg": "#152C4F",
+        "info_border": "#274F86",
+        "online": "#22C55E",
+        # video canvas
+        "video_bg": "#070C17",
+        "video_bg_2": "#101B2E",
+        "bracket": "#22C55E",
+        # chrome
+        "sidebar_bg": "#0F1B2E",
+        "sidebar_text": "#93A3BC",
+        "sidebar_active_bg": "#3B82F6",
+        "sidebar_active_text": "#FFFFFF",
+        "sidebar_active_soft": "#16294A",
+        "sidebar_hover_bg": "#1B2A44",
+        "header_bg": "#0F1B2E",
+        "header_border": "#26395C",
+        "chip_bg": "#1B2A44",
+        "chip_fg": "#B6C2D6",
+        "badge_bg": "#EF4444",
+        "badge_fg": "#FFFFFF",
+        "nav_icon": "#7C8DA8",
+        "nav_icon_active": "#FFFFFF",
+        "nav_section": "#5D708F",
+        "avatar_bg": "#1D4ED8",
+        "avatar_fg": "#FFFFFF",
+        # inputs & logs
+        "input_bg": "#111C33",
+        "input_border": "#26395C",
+        "log_bg": "#101A2C",
+        "log_border": "#1E2E4C",
+        "log_tag_info": "#3B82F6",
+        "log_tag_debug": "#8B5CF6",
+        "log_tag_warn": "#F59E0B",
+        "log_tag_error": "#EF4444",
+        "table_header_bg": "#1B2A44",
+        "row_hover": "#1B2A44",
+        # stat icon tiles
+        "stat_icon_blue": "#60A5FA",
+        "stat_icon_blue_bg": "#16294A",
+        "stat_icon_green": "#4ADE80",
+        "stat_icon_green_bg": "#0B2E1C",
+        "stat_icon_orange": "#FBBF24",
+        "stat_icon_orange_bg": "#3A2A08",
+        "stat_icon_purple": "#A78BFA",
+        "stat_icon_purple_bg": "#26184A",
+        "stat_icon_red": "#F87171",
+        "stat_icon_red_bg": "#3A1214",
+        "stat_icon_gray": "#7C8DA8",
+        "stat_icon_gray_bg": "#1B2A44",
+        # notifications
+        "unread_bg": "#15243F",
+        # focus halos (opaque: QSS paints translucent border corners twice)
+        "focus_ring": "#23457C",
+        "danger_ring": "#5A1F24",
+    },
+    "light": {
+        # surfaces
+        "bg": "#F4F6FB",
+        "bg_soft": "#EDF1F8",
+        "panel": "#FFFFFF",
+        "panel_alt": "#F8FAFC",
+        "card": "#FFFFFF",
+        "card_alt": "#FBFCFE",
+        "border": "#E5EAF2",
+        "border_soft": "#EFF3F8",
+        "hover": "#F3F6FC",
+        "selection": "#DBEAFE",
+        "ring": "rgba(37,99,235,0.35)",
+        "shadow": "rgba(15,23,42,0.06)",
+        # text
+        "text": "#0F172A",
+        "text_secondary": "#475569",
+        "muted": "#7A8AA3",
+        # accents
+        "primary": "#2563EB",
+        "primary_hover": "#1D4ED8",
+        "primary_fg": "#FFFFFF",
+        "primary_soft": "#EAF1FE",
+        "primary_soft_fg": "#1D4ED8",
+        "accent": "#2563EB",
+        "success": "#16A34A",
+        "success_bg": "#ECFDF3",
+        "success_border": "#BBEFC9",
+        "danger": "#DC2626",
+        "danger_bg": "#FEF2F2",
+        "danger_border": "#FDCFCF",
+        "warn": "#D97706",
+        "warn_bg": "#FFF8EB",
+        "warn_border": "#FBE0B0",
+        "info": "#2563EB",
+        "info_bg": "#EFF6FF",
+        "info_border": "#C7DBFE",
+        "online": "#16A34A",
+        # video canvas
+        "video_bg": "#0B1220",
+        "video_bg_2": "#17233A",
+        "bracket": "#22C55E",
+        # chrome
+        "sidebar_bg": "#FFFFFF",
+        "sidebar_text": "#64748B",
+        "sidebar_active_bg": "#2563EB",
+        "sidebar_active_text": "#FFFFFF",
+        "sidebar_active_soft": "#EAF1FE",
+        "sidebar_hover_bg": "#F4F7FD",
+        "header_bg": "#FFFFFF",
+        "header_border": "#E9EDF4",
+        "chip_bg": "#F1F5F9",
+        "chip_fg": "#475569",
+        "badge_bg": "#EF4444",
+        "badge_fg": "#FFFFFF",
+        "nav_icon": "#94A3B8",
+        "nav_icon_active": "#FFFFFF",
+        "nav_section": "#9AA7BC",
+        "avatar_bg": "#DBEAFE",
+        "avatar_fg": "#1D4ED8",
+        # inputs & logs
+        "input_bg": "#F8FAFC",
+        "input_border": "#E5EAF2",
+        "log_bg": "#F8FAFC",
+        "log_border": "#EFF3F8",
+        "log_tag_info": "#2563EB",
+        "log_tag_debug": "#7C3AED",
+        "log_tag_warn": "#D97706",
+        "log_tag_error": "#DC2626",
+        "table_header_bg": "#F8FAFC",
+        "row_hover": "#F7FAFF",
+        # stat icon tiles
+        "stat_icon_blue": "#2563EB",
+        "stat_icon_blue_bg": "#E6EEFE",
+        "stat_icon_green": "#16A34A",
+        "stat_icon_green_bg": "#E4F8EC",
+        "stat_icon_orange": "#D97706",
+        "stat_icon_orange_bg": "#FEF3E2",
+        "stat_icon_purple": "#7C3AED",
+        "stat_icon_purple_bg": "#F0EAFE",
+        "stat_icon_red": "#DC2626",
+        "stat_icon_red_bg": "#FDECEC",
+        "stat_icon_gray": "#94A3B8",
+        "stat_icon_gray_bg": "#F1F5F9",
+        # notifications
+        "unread_bg": "#F3F7FF",
+        # focus halos (opaque: QSS paints translucent border corners twice)
+        "focus_ring": "#D3E1FC",
+        "danger_ring": "#FBD9D9",
+    },
+}
+
+TONE_COLORS = {"ok": "success", "warn": "warn", "bad": "danger", "idle": "muted", "info": "info"}
+
+STAT_TONES = ("blue", "green", "orange", "purple", "red", "gray")
+
+
+def _indicator_images():
+    """Checkbox glyphs as files, because QSS ``image:`` cannot take painted icons.
+
+    Rendered once per process into the temp directory (with ``@2x`` variants
+    for Retina); an empty dict simply leaves the indicators without a glyph.
+    """
+    global _INDICATORS
+    if _INDICATORS is not None:
+        return _INDICATORS
+    try:
+        import os
+        import tempfile
+        from pathlib import Path
+        from .icons import make_pixmap
+        directory = Path(tempfile.gettempdir()) / "face-attendance-qss"
+        directory.mkdir(parents=True, exist_ok=True)
+        images = {}
+        for key, glyph, color, weight in (("checked", "check", "#FFFFFF", 2.8),
+                                          ("indeterminate", "minus", "#FFFFFF", 2.8),
+                                          ("combo-arrow", "chevron-down", "#8493A8", 2.2)):
+            path = directory / f"indicator-{key}-v1.png"
+            for scale, target in ((1, path), (2, path.with_name(f"{path.stem}@2x.png"))):
+                if not target.exists():
+                    # Write then rename, so a second instance never reads half a file.
+                    partial = target.with_name(f"{target.name}.{os.getpid()}.part")
+                    if make_pixmap(glyph, 16, color, weight, ratio=scale).save(str(partial), "PNG"):
+                        os.replace(partial, target)
+            images[key] = path.as_posix()
+        _INDICATORS = images
+    except Exception:
+        _INDICATORS = {}
+    return _INDICATORS
+
+
+_INDICATORS = None
+
+
+def stylesheet(theme="light"):
+    from PyQt6.QtGui import QFontDatabase
+    c = palette(theme)
+    indicator = _indicator_images()
+    checked_image = f'image: url("{indicator["checked"]}");' if "checked" in indicator else ""
+    partial_image = f'image: url("{indicator["indeterminate"]}");' if "indeterminate" in indicator else ""
+    combo_arrow = f'image: url("{indicator["combo-arrow"]}");' if "combo-arrow" in indicator else "image: none;"
+    font_family = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
+    available = set(QFontDatabase.families())
+    if font_family not in available:
+        font_family = next((name for name in ("Helvetica Neue", "Segoe UI", "DejaVu Sans", "Arial")
+                            if name in available), sorted(available)[0] if available else font_family)
+    mono_family = next((name for name in ("SF Mono", "JetBrains Mono", "Cascadia Mono",
+                                          "Consolas", "DejaVu Sans Mono", "Courier New")
+                        if name in available), "monospace")
+    return f"""
+/* === Base =============================================================== */
+QWidget {{
+    background-color: {c['bg']};
+    color: {c['text']};
+    font-family: "{font_family}";
+    font-size: 13px;
+}}
+QDialog, QMainWindow, QScrollArea, QStackedWidget, QSplitter {{
+    background-color: {c['bg']};
+}}
+QLabel {{ background: transparent; }}
+QToolTip {{
+    background-color: {c['text']};
+    color: {c['card']};
+    border: none;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+}}
+
+/* === Typography ========================================================= */
+QLabel#appTitle {{ font-size: 16px; font-weight: 700; color: {c['text']}; }}
+QLabel#appSubtitle {{ font-size: 12px; color: {c['text_secondary']}; }}
+QLabel#brandMark {{ font-size: 11px; color: {c['muted']}; letter-spacing: 1px; }}
+QLabel#onlineStatus {{ font-size: 12px; font-weight: 600; color: {c['online']}; }}
+QLabel#onlineStatus[offline="true"] {{ color: {c['danger']}; }}
+QLabel#pageTitle, QLabel#screenTitle {{
+    font-size: 22px; font-weight: 700; color: {c['text']};
+}}
+QLabel#pageSubtitle, QLabel#screenSubtitle, QLabel#muted, QLabel#statHint,
+QLabel#emptyBody, QLabel#fieldNote, QLabel#cardSubtitle {{
+    color: {c['muted']}; font-size: 12px;
+}}
+QLabel#sectionTitle, QLabel#cardTitle {{
+    font-size: 14px; font-weight: 600; color: {c['text']};
+}}
+QLabel#cardEyebrow {{
+    font-size: 11px; font-weight: 700; color: {c['muted']}; letter-spacing: 1px;
+}}
+QLabel#emptyTitle {{ font-size: 15px; font-weight: 600; color: {c['text']}; }}
+QLabel#welcomeText {{ font-size: 17px; font-weight: 700; color: {c['text']}; }}
+QLabel#welcomeSub {{ font-size: 12px; color: {c['muted']}; }}
+QLabel#headerClock {{
+    font-size: 20px; font-weight: 700; color: {c['text']};
+    font-family: "{mono_family}", monospace;
+}}
+QLabel#headerDate {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#versionLabel {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#legalLabel {{ font-size: 10px; color: {c['muted']}; }}
+
+/* === Cards ============================================================== */
+QFrame#card, QFrame#statCard, QFrame#panel, QFrame#formCard, QFrame#tableCard {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 14px;
+}}
+QFrame#card[tone="ok"], QFrame#panel[tone="ok"] {{ border-color: {c['success_border']}; }}
+QFrame#card[tone="bad"], QFrame#panel[tone="bad"] {{ border-color: {c['danger_border']}; }}
+QFrame#card[tone="warn"], QFrame#panel[tone="warn"] {{ border-color: {c['warn_border']}; }}
+QFrame#cardDivider, QFrame#hLine {{
+    background-color: {c['border_soft']};
+    border: none;
+    max-height: 1px;
+}}
+QWidget#cardHeader {{ background: transparent; }}
+QFrame#subtlePanel {{
+    background-color: {c['panel_alt']};
+    border: 1px solid {c['border_soft']};
+    border-radius: 12px;
+}}
+
+/* === Stat cards ========================================================= */
+QLabel#statTitle {{ color: {c['muted']}; font-size: 12px; font-weight: 500; }}
+QLabel#statValue {{ font-size: 24px; font-weight: 700; color: {c['text']}; }}
+QLabel#statValue[tone="ok"] {{ color: {c['success']}; }}
+QLabel#statValue[tone="warn"] {{ color: {c['warn']}; }}
+QLabel#statValue[tone="bad"] {{ color: {c['danger']}; }}
+QLabel#statValue[tone="idle"] {{ color: {c['text']}; }}
+QLabel#statSubtext {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#statIcon {{ border-radius: 12px; font-size: 18px; }}
+QLabel#statDelta {{ font-size: 11px; font-weight: 600; }}
+QLabel#statDelta[tone="ok"] {{ color: {c['success']}; }}
+QLabel#statDelta[tone="bad"] {{ color: {c['danger']}; }}
+QLabel#statDelta[tone="idle"] {{ color: {c['muted']}; }}
+
+/* === Buttons ============================================================ */
+QPushButton {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 10px;
+    padding: 8px 16px;
+    font-weight: 500;
+    color: {c['text_secondary']};
+    min-height: 20px;
+}}
+QPushButton:hover {{
+    border-color: {c['primary']};
+    color: {c['primary']};
+    background-color: {c['card']};
+}}
+QPushButton:pressed {{ background-color: {c['primary_soft']}; }}
+QPushButton:disabled {{ color: {c['muted']}; border-color: {c['border_soft']}; background-color: {c['panel_alt']}; }}
+QPushButton#primary {{
+    background-color: {c['primary']};
+    color: {c['primary_fg']};
+    border: 1px solid {c['primary']};
+    font-weight: 600;
+    padding: 9px 20px;
+}}
+QPushButton#primary:hover {{
+    background-color: {c['primary_hover']};
+    border-color: {c['primary_hover']};
+    color: {c['primary_fg']};
+}}
+QPushButton#success {{
+    background-color: {c['success']};
+    color: #FFFFFF;
+    border: 1px solid {c['success']};
+    font-weight: 600;
+    padding: 9px 20px;
+}}
+QPushButton#success:hover {{ background-color: {c['success']}; color: #FFFFFF; border-color: {c['success']}; }}
+QPushButton#danger {{
+    background-color: {c['danger_bg']};
+    border: 1px solid {c['danger_border']};
+    color: {c['danger']};
+    font-weight: 600;
+    padding: 9px 18px;
+}}
+QPushButton#danger:hover {{ background-color: {c['danger']}; color: #FFFFFF; border-color: {c['danger']}; }}
+QPushButton#softButton {{
+    background-color: {c['primary_soft']};
+    border: 1px solid transparent;
+    color: {c['primary_soft_fg']};
+    font-weight: 600;
+}}
+QPushButton#softButton:hover {{ background-color: {c['primary']}; color: {c['primary_fg']}; }}
+QPushButton#controlButton {{
+    padding: 7px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    min-width: 0px;
+    min-height: 18px;
+}}
+/* The overflow button already has an ellipsis; hide the native corner arrow. */
+QPushButton[overflowMenu="true"]::menu-indicator {{
+    image: none;
+    width: 0px;
+    height: 0px;
+}}
+QPushButton#controlButtonSuccess {{
+    background-color: {c['success']};
+    color: #FFFFFF;
+    border: 1px solid {c['success']};
+    font-weight: 600;
+    padding: 7px 14px;
+    font-size: 12px;
+    min-width: 0px;
+    min-height: 18px;
+}}
+QPushButton#controlButtonSuccess:hover {{
+    background-color: {c['success']};
+    border-color: {c['success']};
+    color: #FFFFFF;
+}}
+QPushButton#controlButtonDanger {{
+    background-color: {c['danger_bg']};
+    border: 1px solid {c['danger_border']};
+    color: {c['danger']};
+    font-weight: 600;
+    padding: 7px 14px;
+    font-size: 12px;
+    min-width: 0px;
+    min-height: 18px;
+}}
+QPushButton#controlButtonDanger:hover {{
+    background-color: {c['danger']};
+    border-color: {c['danger']};
+    color: #FFFFFF;
+}}
+QPushButton#ghostButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    color: {c['text_secondary']};
+    padding: 6px 10px;
+}}
+QPushButton#ghostButton:hover {{ background-color: {c['hover']}; color: {c['primary']}; }}
+QPushButton#linkButton {{
+    background: transparent;
+    border: none;
+    color: {c['primary']};
+    font-weight: 600;
+    padding: 2px 4px;
+}}
+QPushButton#linkButton:hover {{ color: {c['primary_hover']}; }}
+QPushButton#iconButton {{
+    background: transparent;
+    border: 1px solid {c['border']};
+    border-radius: 9px;
+    padding: 6px;
+    min-width: 20px;
+}}
+QPushButton#iconButton:hover {{ background-color: {c['hover']}; border-color: {c['primary']}; }}
+QPushButton#iconButtonFlat {{
+    background: transparent;
+    border: none;
+    border-radius: 9px;
+    padding: 6px;
+    min-width: 20px;
+}}
+QPushButton#iconButtonFlat:hover {{ background-color: {c['hover']}; }}
+
+/* === Inputs ============================================================= */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QTimeEdit, QPlainTextEdit {{
+    background-color: {c['input_bg']};
+    border: 1px solid {c['input_border']};
+    border-radius: 10px;
+    padding: 8px 12px;
+    selection-background-color: {c['primary']};
+    selection-color: {c['primary_fg']};
+    color: {c['text']};
+    min-height: 18px;
+}}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,
+QDateEdit:focus, QTimeEdit:focus, QPlainTextEdit:focus {{
+    border: 1px solid {c['primary']};
+    background-color: {c['card']};
+}}
+QLineEdit::placeholder {{ color: {c['muted']}; }}
+QComboBox::drop-down {{ border: none; width: 26px; }}
+QComboBox::down-arrow {{ {combo_arrow} width: 14px; height: 14px; margin-right: 8px; }}
+QComboBox QAbstractItemView {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 10px;
+    padding: 4px;
+    outline: none;
+    selection-background-color: {c['primary_soft']};
+    selection-color: {c['primary_soft_fg']};
+}}
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+    background: transparent; border: none; width: 16px;
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow,
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{ width: 0px; height: 0px; }}
+
+/* === Calendar popup ====================================================== */
+QCalendarWidget {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 10px;
+}}
+QCalendarWidget QToolButton {{
+    background: transparent;
+    color: {c['text']};
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 10px;
+    border: none;
+    border-radius: 6px;
+}}
+QCalendarWidget QToolButton:hover {{ background-color: {c['hover']}; }}
+QCalendarWidget QToolButton::menu-indicator {{ image: none; width: 0; }}
+QCalendarWidget QMenu {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 8px;
+}}
+QCalendarWidget QSpinBox {{
+    background-color: {c['input_bg']};
+    border: 1px solid {c['input_border']};
+    border-radius: 6px;
+    padding: 2px 6px;
+    min-height: 14px;
+}}
+QCalendarWidget QAbstractItemView {{
+    background-color: {c['card']};
+    alternate-background-color: {c['card']};
+    border: none;
+    border-radius: 0px;
+    selection-background-color: {c['primary']};
+    selection-color: {c['primary_fg']};
+    font-size: 13px;
+    outline: none;
+    gridline-color: transparent;
+}}
+QCalendarWidget QAbstractItemView::item {{
+    padding: 0px;
+    min-width: 32px;
+    min-height: 28px;
+}}
+QCalendarWidget QWidget#qt_calendar_navigationbar {{
+    background-color: {c['card']};
+    border-bottom: 1px solid {c['border']};
+    padding: 4px;
+}}
+
+/* === Checkboxes ========================================================= */
+QCheckBox, QRadioButton {{ background: transparent; spacing: 7px; }}
+QCheckBox::indicator, QRadioButton::indicator {{ width: 16px; height: 16px; }}
+QCheckBox::indicator {{
+    border: 1px solid {c['input_border']};
+    border-radius: 5px;
+    background-color: {c['card']};
+}}
+QCheckBox::indicator:hover {{ border-color: {c['primary']}; }}
+QCheckBox::indicator:checked {{
+    background-color: {c['primary']};
+    border-color: {c['primary']};
+    {checked_image}
+}}
+QCheckBox::indicator:indeterminate {{
+    background-color: {c['primary']};
+    border-color: {c['primary']};
+    {partial_image}
+}}
+QCheckBox::indicator:checked:disabled, QCheckBox::indicator:indeterminate:disabled {{
+    background-color: {c['muted']};
+    border-color: {c['muted']};
+}}
+QRadioButton::indicator {{
+    border: 1px solid {c['input_border']};
+    border-radius: 8px;
+    background-color: {c['card']};
+}}
+QRadioButton::indicator:checked {{ border: 5px solid {c['primary']}; }}
+
+/* === Chips & pills ====================================================== */
+QFrame#pill {{
+    border-radius: 11px;
+    border: 1px solid {c['border']};
+    background-color: {c['chip_bg']};
+    padding: 2px 10px;
+}}
+QLabel#pillText {{ font-size: 11px; font-weight: 600; color: {c['chip_fg']}; }}
+QFrame#pill[tone="ok"] {{ border-color: {c['success_border']}; background-color: {c['success_bg']}; }}
+QFrame#pill[tone="ok"] QLabel#pillText {{ color: {c['success']}; }}
+QFrame#pill[tone="warn"] {{ border-color: {c['warn_border']}; background-color: {c['warn_bg']}; }}
+QFrame#pill[tone="warn"] QLabel#pillText {{ color: {c['warn']}; }}
+QFrame#pill[tone="bad"] {{ border-color: {c['danger_border']}; background-color: {c['danger_bg']}; }}
+QFrame#pill[tone="bad"] QLabel#pillText {{ color: {c['danger']}; }}
+QFrame#pill[tone="info"] {{ border-color: {c['info_border']}; background-color: {c['info_bg']}; }}
+QFrame#pill[tone="info"] QLabel#pillText {{ color: {c['info']}; }}
+QFrame#pill[tone="idle"] QLabel#pillText {{ color: {c['muted']}; }}
+QLabel#chip {{
+    background-color: {c['chip_bg']};
+    color: {c['chip_fg']};
+    border-radius: 9px;
+    padding: 3px 9px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+QLabel#chip[tone="ok"] {{ background-color: {c['success_bg']}; color: {c['success']}; }}
+QLabel#chip[tone="warn"] {{ background-color: {c['warn_bg']}; color: {c['warn']}; }}
+QLabel#chip[tone="bad"] {{ background-color: {c['danger_bg']}; color: {c['danger']}; }}
+QLabel#chip[tone="info"] {{ background-color: {c['info_bg']}; color: {c['info']}; }}
+QFrame#verifiedBadge {{ background-color: {c['success_bg']}; border-radius: 8px; }}
+QLabel#verifiedText {{ color: {c['success']}; font-size: 10px; font-weight: 700; }}
+QFrame#unknownBadge {{ background-color: {c['warn_bg']}; border-radius: 8px; }}
+QLabel#unknownText {{ color: {c['warn']}; font-size: 10px; font-weight: 700; }}
+QLabel#badge {{
+    background-color: {c['badge_bg']};
+    color: {c['badge_fg']};
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 5px;
+}}
+
+/* === Banners ============================================================ */
+QFrame#banner {{
+    background-color: {c['info_bg']};
+    border: 1px solid {c['info_border']};
+    border-radius: 12px;
+}}
+QFrame#banner[tone="ok"] {{ background-color: {c['success_bg']}; border-color: {c['success_border']}; }}
+QFrame#banner[tone="warn"] {{ background-color: {c['warn_bg']}; border-color: {c['warn_border']}; }}
+QFrame#banner[tone="bad"] {{ background-color: {c['danger_bg']}; border-color: {c['danger_border']}; }}
+QFrame#banner[tone="idle"] {{ background-color: {c['panel_alt']}; border-color: {c['border']}; }}
+QLabel#bannerTitle {{ font-size: 14px; font-weight: 700; color: {c['info']}; }}
+QFrame#banner[tone="ok"] QLabel#bannerTitle {{ color: {c['success']}; }}
+QFrame#banner[tone="warn"] QLabel#bannerTitle {{ color: {c['warn']}; }}
+QFrame#banner[tone="bad"] QLabel#bannerTitle {{ color: {c['danger']}; }}
+QFrame#banner[tone="idle"] QLabel#bannerTitle {{ color: {c['text']}; }}
+QLabel#bannerBody {{ font-size: 12px; color: {c['text_secondary']}; }}
+
+/* === Tables & lists ===================================================== */
+QTableView, QTableWidget, QTreeWidget {{
+    background-color: {c['card']};
+    alternate-background-color: {c['card_alt']};
+    border: none;
+    border-radius: 12px;
+    gridline-color: transparent;
+    selection-background-color: {c['primary_soft']};
+    selection-color: {c['text']};
+    outline: none;
+}}
+QListWidget {{
+    background-color: transparent;
+    border: none;
+    outline: none;
+}}
+QTableView::item, QTableWidget::item {{ padding: 4px 8px; }}
+QHeaderView::section {{
+    background-color: {c['table_header_bg']};
+    border: none;
+    border-bottom: 1px solid {c['border']};
+    padding: 9px 10px;
+    font-weight: 600;
+    font-size: 11px;
+    color: {c['muted']};
+    letter-spacing: .4px;
+}}
+QHeaderView::section:first {{ border-top-left-radius: 12px; }}
+QHeaderView::section:last {{ border-top-right-radius: 12px; }}
+QTableCornerButton::section {{ background-color: {c['table_header_bg']}; border: none; }}
+
+/* === Activity feed ====================================================== */
+QFrame#activityRow {{ background: transparent; border-radius: 10px; }}
+QFrame#activityRow:hover {{ background-color: {c['hover']}; }}
+QLabel#activityName {{ font-size: 13px; font-weight: 600; color: {c['text']}; }}
+QLabel#activityDetail {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#activityTime {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#activitySection {{ font-size: 10px; font-weight: 600; color: {c['muted']}; padding: 2px 0; }}
+QFrame#activityAvatar {{ background-color: {c['avatar_bg']}; border-radius: 18px; }}
+QLabel#activityAvatarText {{ color: {c['avatar_fg']}; font-size: 12px; font-weight: 700; }}
+
+/* === Status panel ======================================================= */
+QFrame#statusPanel {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 14px;
+}}
+QFrame#statusRow {{ background: transparent; border-radius: 8px; }}
+QFrame#statusRow:hover {{ background-color: {c['hover']}; }}
+QLabel#statusRunning {{ font-size: 15px; font-weight: 700; color: {c['success']}; }}
+QLabel#statusStopped {{ font-size: 15px; font-weight: 700; color: {c['danger']}; }}
+QLabel#statusItem {{ font-size: 12px; color: {c['text_secondary']}; }}
+QLabel#statusDot {{ font-size: 9px; }}
+QLabel#statusValue {{ font-size: 12px; font-weight: 600; color: {c['text']}; }}
+
+/* === System logs ======================================================== */
+QFrame#logPanel {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 14px;
+}}
+QListWidget#logList {{
+    background-color: {c['log_bg']};
+    border: 1px solid {c['log_border']};
+    border-radius: 10px;
+    padding: 4px;
+}}
+QListWidget#logList::item {{ padding: 2px 4px; border-radius: 6px; }}
+QListWidget#logList::item:selected {{ background-color: {c['primary_soft']}; }}
+QLabel#logTag {{
+    font-size: 10px; font-weight: 700; border-radius: 5px; padding: 1px 7px;
+    background-color: {c['chip_bg']}; color: {c['chip_fg']};
+}}
+QLabel#logTag[level="INFO"] {{ background-color: {c['info_bg']}; color: {c['log_tag_info']}; }}
+QLabel#logTag[level="DEBUG"] {{ background-color: {c['chip_bg']}; color: {c['log_tag_debug']}; }}
+QLabel#logTag[level="WARN"] {{ background-color: {c['warn_bg']}; color: {c['log_tag_warn']}; }}
+QLabel#logTag[level="ERROR"] {{ background-color: {c['danger_bg']}; color: {c['log_tag_error']}; }}
+QLabel#logTimestamp {{
+    font-size: 11px; color: {c['muted']};
+    font-family: "{mono_family}", monospace;
+}}
+QLabel#logMessage {{
+    font-size: 12px; color: {c['text_secondary']};
+    font-family: "{mono_family}", monospace;
+}}
+
+/* === Camera preview ===================================================== */
+QFrame#cameraFrame {{
+    background-color: {c['video_bg']};
+    border: 1px solid {c['border']};
+    border-radius: 12px;
+}}
+QLabel#liveBadge {{
+    background-color: {c['success']};
+    color: #FFFFFF;
+    font-size: 10px;
+    font-weight: 700;
+    border-radius: 9px;
+    padding: 2px 9px;
+}}
+QLabel#cameraInfo {{ font-size: 12px; color: {c['muted']}; }}
+QLabel#cameraValue {{ font-size: 12px; font-weight: 600; color: {c['text_secondary']}; }}
+QLabel#faceBadge {{
+    background-color: rgba(2, 6, 23, 0.72);
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 10px;
+    padding: 4px 12px;
+}}
+QLabel#fpsOverlay {{
+    font-size: 11px;
+    color: rgba(255,255,255,0.85);
+    background-color: rgba(2, 6, 23, 0.72);
+    border-radius: 8px;
+    padding: 3px 9px;
+}}
+
+/* === Avatars ============================================================ */
+QLabel#avatar {{
+    background-color: {c['avatar_bg']};
+    color: {c['avatar_fg']};
+    border-radius: 18px;
+    font-weight: 700;
+    font-size: 14px;
+}}
+
+/* === Tabs / groups / progress =========================================== */
+QTabWidget::pane {{
+    border: 1px solid {c['border']};
+    border-radius: 12px;
+    background-color: {c['card']};
+    top: -1px;
+}}
+QTabBar::tab {{
+    background: transparent;
+    padding: 8px 16px;
+    margin-right: 4px;
+    border-radius: 9px;
+    color: {c['muted']};
+    font-weight: 600;
+}}
+QTabBar::tab:selected {{
+    background-color: {c['primary_soft']};
+    color: {c['primary_soft_fg']};
+}}
+QTabBar::tab:hover:!selected {{ color: {c['text']}; background-color: {c['hover']}; }}
+
+/* === Settings tab strip ================================================= */
+QFrame#settingsStrip {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 14px;
+}}
+QPushButton#settingsTab {{
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 500;
+    color: {c['text_secondary']};
+    min-height: 22px;
+}}
+QPushButton#settingsTab:hover {{
+    background-color: {c['hover']};
+    color: {c['text']};
+}}
+QPushButton#settingsTab:checked {{
+    background-color: {c['primary_soft']};
+    color: {c['primary_soft_fg']};
+    font-weight: 600;
+}}
+
+QGroupBox {{
+    border: 1px solid {c['border']};
+    border-radius: 12px;
+    margin-top: 14px;
+    padding: 16px 14px 14px 14px;
+    background-color: {c['card']};
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 14px;
+    padding: 0 8px;
+    color: {c['text']};
+    font-weight: 600;
+}}
+QProgressBar {{
+    border: none;
+    border-radius: 5px;
+    background-color: {c['chip_bg']};
+    text-align: center;
+    font-size: 10px;
+    color: {c['text_secondary']};
+    min-height: 8px;
+}}
+QProgressBar::chunk {{ background-color: {c['primary']}; border-radius: 5px; }}
+
+/* === Navigation ========================================================= */
+QFrame#sidebar {{
+    background-color: {c['sidebar_bg']};
+    border-right: 1px solid {c['border_soft']};
+}}
+QFrame#sidebarFooter {{
+    background-color: {c['sidebar_bg']};
+    border-top: 1px solid {c['border_soft']};
+}}
+QFrame#brandTile {{
+    background-color: {c['primary']};
+    border-radius: 12px;
+}}
+QListWidget#nav {{
+    border: none;
+    border-radius: 0px;
+    background-color: {c['sidebar_bg']};
+    padding: 4px 10px;
+    outline: none;
+}}
+QListWidget#nav::item {{
+    padding: 10px 12px;
+    border-radius: 10px;
+    margin: 2px 0px;
+    color: {c['sidebar_text']};
+    font-weight: 500;
+    font-size: 13px;
+}}
+QListWidget#nav::item:selected {{
+    background-color: {c['sidebar_active_bg']};
+    color: {c['sidebar_active_text']};
+    font-weight: 600;
+}}
+QListWidget#nav::item:hover:!selected {{
+    background-color: {c['sidebar_hover_bg']};
+    color: {c['text']};
+}}
+QListWidget#nav::item:disabled {{
+    color: {c['nav_section']};
+    background: transparent;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 10px 12px 4px 12px;
+}}
+
+/* === Header ============================================================= */
+QFrame#headerBar {{
+    background-color: {c['header_bg']};
+    border-bottom: 1px solid {c['header_border']};
+}}
+QPushButton#detachedReturnButton {{
+    background-color: transparent;
+    color: {c['text_secondary']};
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0px;
+    min-width: 0px;
+    min-height: 0px;
+}}
+QPushButton#detachedReturnButton:hover, QPushButton#detachedReturnButton:focus {{
+    background-color: {c['hover']};
+    color: {c['primary']};
+    border-color: {c['primary']};
+}}
+QPushButton#detachedReturnButton:pressed {{ background-color: {c['primary_soft']}; }}
+QLabel#detachedWindowTitle {{
+    color: {c['text']};
+    font-size: 13px;
+    font-weight: 600;
+}}
+QFrame#headerBrand {{
+    background: transparent;
+    border-right: 1px solid {c['header_border']};
+}}
+QLabel#headerDetails {{ font-size: 12px; color: {c['muted']}; }}
+QFrame#headerChip {{
+    background-color: {c['panel_alt']};
+    border: 1px solid {c['border_soft']};
+    border-radius: 12px;
+}}
+QFrame#headerDivider {{ background-color: {c['border_soft']}; border: none; }}
+QLabel#headerChipPrimary {{ font-size: 13px; font-weight: 700; color: {c['text']}; }}
+QLabel#headerChipSecondary {{ font-size: 11px; color: {c['muted']}; }}
+QPushButton#headerIconButton {{
+    background-color: {c['panel_alt']};
+    border: 1px solid {c['border_soft']};
+    border-radius: 12px;
+    padding: 6px;
+    min-width: 20px;
+}}
+QPushButton#headerIconButton:hover {{ background-color: {c['hover']}; border-color: {c['primary']}; }}
+
+/* === Login ============================================================== */
+QFrame#loginCard {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 16px;
+}}
+QLabel#loginTitle {{ font-size: 18px; font-weight: 700; color: {c['text']}; }}
+
+/* === Scrollbars & status bar ============================================ */
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+QScrollBar::handle:vertical {{
+    background: {c['border']}; border-radius: 5px; min-height: 32px;
+}}
+QScrollBar::handle:vertical:hover {{ background: {c['muted']}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0px; width: 0px; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
+QScrollBar::handle:horizontal {{
+    background: {c['border']}; border-radius: 5px; min-width: 32px;
+}}
+QScrollBar::handle:horizontal:hover {{ background: {c['muted']}; }}
+QStatusBar {{
+    background-color: {c['header_bg']};
+    border-top: 1px solid {c['header_border']};
+    color: {c['muted']};
+    font-size: 12px;
+    padding: 2px 14px;
+}}
+QStatusBar::item {{ border: none; }}
+QSplitter::handle {{ background-color: {c['border_soft']}; }}
+
+/* === Toast ============================================================== */
+QFrame#toast {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-left: 4px solid {c['info']};
+    border-radius: 10px;
+}}
+QFrame#toast[tone="ok"] {{ border-left-color: {c['success']}; }}
+QFrame#toast[tone="bad"] {{ border-left-color: {c['danger']}; }}
+QFrame#toast[tone="warn"] {{ border-left-color: {c['warn']}; }}
+QLabel#toastText {{ font-size: 12px; color: {c['text_secondary']}; }}
+
+/* === Filter chips ======================================================== */
+QPushButton#filterChip {{
+    background-color: {c['chip_bg']};
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 4px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    color: {c['chip_fg']};
+    min-width: 0px;
+}}
+QPushButton#filterChip:hover {{
+    background-color: {c['hover']};
+    color: {c['text']};
+    border-color: {c['border']};
+}}
+QPushButton#filterChip:checked {{
+    background-color: {c['primary_soft']};
+    color: {c['primary']};
+    border-color: {c['primary']};
+}}
+
+/* === Page buttons ======================================================= */
+QPushButton#pageButton {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 8px;
+    padding: 0px;
+    font-size: 12px;
+    font-weight: 600;
+    color: {c['text_secondary']};
+    min-width: 32px;
+    min-height: 28px;
+}}
+QPushButton#pageButton:hover {{
+    border-color: {c['primary']};
+    color: {c['primary']};
+    background-color: {c['primary_soft']};
+}}
+QPushButton#pageActive {{
+    background-color: {c['primary']};
+    border: 1px solid {c['primary']};
+    border-radius: 8px;
+    padding: 0px;
+    font-size: 12px;
+    font-weight: 700;
+    color: {c['primary_fg']};
+    min-width: 32px;
+    min-height: 28px;
+}}
+/* === Selection toolbar =================================================== */
+QFrame#selectionBar {{
+    background-color: {c['primary_soft']};
+    border: 1px solid {c['primary']};
+    border-radius: 10px;
+}}
+QLabel#selectionCount {{
+    font-size: 12px;
+    font-weight: 700;
+    color: {c['primary']};
+}}
+/* === Detail modal ======================================================== */
+QDialog#recordDetail {{
+    background-color: {c['bg']};
+}}
+QFrame#detailImageFrame {{
+    background-color: {c['video_bg']};
+    border: 1px solid {c['border']};
+    border-radius: 14px;
+}}
+QLabel#detailLabel {{
+    font-size: 12px;
+    color: {c['muted']};
+}}
+QLabel#detailValue {{
+    font-size: 13px;
+    font-weight: 600;
+    color: {c['text']};
+}}
+QLabel#detailTitle {{
+    font-size: 18px;
+    font-weight: 700;
+    color: {c['text']};
+}}
+
+/* === Context menus ====================================================== */
+QMenu {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 10px;
+    padding: 6px;
+    color: {c['text']};
+    font-size: 13px;
+}}
+QMenu::item {{
+    padding: 8px 24px 8px 12px;
+    border-radius: 6px;
+    margin: 1px 2px;
+}}
+QMenu::item:selected {{
+    background-color: {c['primary_soft']};
+    color: {c['primary_soft_fg']};
+}}
+QMenu::separator {{
+    height: 1px;
+    background-color: {c['border_soft']};
+    margin: 4px 8px;
+}}
+QMenu::icon {{
+    padding-left: 8px;
+}}
+QMenu::item:disabled {{
+    color: {c['muted']};
+}}
+QMenu::item#dangerItem {{
+    color: {c['danger']};
+}}
+
+/* === Frameless feed scrolling =========================================== */
+QScrollArea#scrollFeed, QScrollArea#scrollFeed > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
+QScrollArea#scrollFeed {{ border-radius: 10px; }}
+
+/* Layout-only containers inside cards must not paint the window colour. */
+QWidget#plain, QFrame#plain, QScrollArea#plain,
+QScrollArea#plain > QWidget > QWidget {{
+    background: transparent;
+    border: none;
+}}
+
+/* === Form fields ======================================================== */
+QLabel#fieldLabel {{ font-size: 12px; font-weight: 600; color: {c['text_secondary']}; }}
+QLabel#fieldHelp {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#fieldHelp[tone="bad"] {{ color: {c['danger']}; }}
+QLabel#fieldHelp[tone="ok"] {{ color: {c['success']}; }}
+QLabel#fieldHelp[tone="warn"] {{ color: {c['warn']}; }}
+QFrame#fieldRing {{
+    background: transparent;
+    border: 3px solid transparent;
+    border-radius: 13px;
+}}
+QFrame#fieldRing[focused="true"] {{ border-color: {c['focus_ring']}; }}
+QFrame#fieldRing[invalid="true"] {{ border-color: transparent; }}
+QFrame#fieldRing[invalid="true"][focused="true"] {{ border-color: {c['danger_ring']}; }}
+QFrame#fieldRing QLineEdit {{ min-height: 20px; padding: 8px 10px; }}
+QLineEdit[invalid="true"] {{
+    border: 1px solid {c['danger']};
+    background-color: {c['danger_bg']};
+}}
+QLineEdit[invalid="true"]:focus {{ background-color: {c['card']}; }}
+QFrame#formSection {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 14px;
+}}
+QLabel#formSectionTitle {{ font-size: 14px; font-weight: 700; color: {c['text']}; }}
+QLabel#formSectionHint {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#eyebrow {{
+    font-size: 10px; font-weight: 700; color: {c['primary']}; letter-spacing: 1.4px;
+}}
+QFrame#choiceCard {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 12px;
+}}
+QFrame#choiceCard:hover {{ border-color: {c['primary']}; }}
+QFrame#choiceCard[checked="true"] {{
+    background-color: {c['primary_soft']};
+    border: 2px solid {c['primary']};
+}}
+QFrame#choiceCard:disabled {{ border-color: {c['border_soft']}; }}
+QLabel#choiceTitle {{ font-size: 13px; font-weight: 600; color: {c['text']}; }}
+QLabel#choiceBody {{ font-size: 11px; color: {c['muted']}; }}
+/* Qt only honours a pseudo-state on the last element of a selector, so the
+   disabled look is keyed on the labels (they inherit their card's state). */
+QLabel#choiceTitle:disabled {{ color: {c['muted']}; }}
+QLabel#choiceBody:disabled {{ color: {c['border']}; }}
+
+/* === Dialog chrome ====================================================== */
+QFrame#dialogHeader {{
+    background-color: {c['card']};
+    border: none;
+    border-bottom: 1px solid {c['border_soft']};
+}}
+QFrame#dialogFooter {{
+    background-color: {c['card']};
+    border: none;
+    border-top: 1px solid {c['border_soft']};
+}}
+QLabel#dialogTitle {{ font-size: 18px; font-weight: 700; color: {c['text']}; }}
+QLabel#dialogSubtitle {{ font-size: 12px; color: {c['muted']}; }}
+QFrame#identityPanel {{
+    background-color: {c['panel_alt']};
+    border: none;
+    border-right: 1px solid {c['border_soft']};
+}}
+QLabel#identityName {{ font-size: 16px; font-weight: 700; color: {c['text']}; }}
+QLabel#identityHandle {{ font-size: 12px; color: {c['muted']}; }}
+QFrame#tipBox {{
+    background-color: {c['card']};
+    border: 1px solid {c['border_soft']};
+    border-radius: 12px;
+}}
+QLabel#tipText {{ font-size: 11px; color: {c['text_secondary']}; }}
+QWidget#dialogBody, QScrollArea#dialogBody,
+QScrollArea#dialogBody > QWidget > QWidget {{
+    background-color: {c['card']};
+    border: none;
+}}
+QLabel#cellTitle {{ font-size: 13px; font-weight: 600; color: {c['text']}; }}
+QLabel#cellMeta {{ font-size: 12px; color: {c['muted']}; }}
+QLabel#cellMeta[empty="true"] {{ color: {c['border']}; }}
+QFrame#infoTile {{
+    background-color: {c['panel_alt']};
+    border: 1px solid {c['border_soft']};
+    border-radius: 12px;
+}}
+QLabel#infoLabel {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#infoValue {{ font-size: 13px; font-weight: 600; color: {c['text']}; }}
+QFrame#permChip {{
+    background-color: {c['success_bg']};
+    border: 1px solid {c['success_border']};
+    border-radius: 10px;
+}}
+QFrame#permChip[granted="false"] {{
+    background-color: {c['panel_alt']};
+    border-color: {c['border_soft']};
+}}
+QLabel#permChipText {{ font-size: 12px; font-weight: 600; color: {c['success']}; }}
+QFrame#permChip[granted="false"] QLabel#permChipText {{ color: {c['muted']}; font-weight: 500; }}
+
+/* === Roles & tags ======================================================= */
+QLabel#rolePill {{
+    border-radius: 10px;
+    padding: 0px 9px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .6px;
+    background-color: {c['chip_bg']};
+    color: {c['chip_fg']};
+}}
+QLabel#rolePill[role="admin"] {{ background-color: {c['primary_soft']}; color: {c['primary_soft_fg']}; }}
+QLabel#rolePill[role="you"] {{ background-color: {c['success_bg']}; color: {c['success']}; }}
+QLabel#statusPill {{
+    border-radius: 10px;
+    padding: 0px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background-color: {c['success_bg']};
+    color: {c['success']};
+}}
+QLabel#statusPill[state="disabled"] {{ background-color: {c['chip_bg']}; color: {c['muted']}; }}
+QLabel#cellTitle[dim="true"] {{ color: {c['muted']}; }}
+
+/* === Access denied ====================================================== */
+QFrame#alertCard {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 20px;
+}}
+QFrame#requirementPill {{
+    background-color: {c['danger_bg']};
+    border: 1px solid {c['danger_border']};
+    border-radius: 15px;
+}}
+QLabel#requirementText {{ font-size: 12px; font-weight: 600; color: {c['danger']}; }}
+
+/* === Quit / restart progress =========================================== */
+QLabel#exitStep {{ font-size: 13px; color: {c['muted']}; }}
+QLabel#exitStep[state="active"] {{ color: {c['text']}; font-weight: 600; }}
+QLabel#exitStep[state="done"] {{ color: {c['text_secondary']}; }}
+QLabel#exitNote {{ font-size: 11px; color: {c['muted']}; }}
+QTextBrowser#releaseNotes {{
+    background-color: {c['panel_alt']};
+    border: 1px solid {c['border_soft']};
+    border-radius: 10px;
+    padding: 6px 10px;
+    color: {c['text_secondary']};
+    font-size: 12px;
+}}
+
+/* === Sign-in ============================================================ */
+QFrame#authForm {{ background-color: {c['card']}; border: none; }}
+QLabel#authTitle {{ font-size: 24px; font-weight: 700; color: {c['text']}; }}
+QLabel#authSubtitle {{ font-size: 13px; color: {c['muted']}; }}
+QLabel#authStatus {{ font-size: 12px; font-weight: 500; color: {c['muted']}; }}
+QLabel#authStatus[tone="ok"] {{ color: {c['success']}; }}
+QLabel#authStatus[tone="bad"] {{ color: {c['danger']}; }}
+QFrame#authAlert {{
+    background-color: {c['danger_bg']};
+    border: 1px solid {c['danger_border']};
+    border-radius: 10px;
+}}
+QLabel#authAlertText {{ font-size: 12px; font-weight: 500; color: {c['danger']}; }}
+QLabel#authFooter {{ font-size: 11px; color: {c['muted']}; }}
+QPushButton#primary[loading="true"], QPushButton#primary[loading="true"]:disabled {{
+    background-color: {c['primary_hover']};
+    border-color: {c['primary_hover']};
+    color: {c['primary_fg']};
+}}
+QPushButton#primary[state="ok"], QPushButton#primary[state="ok"]:disabled {{
+    background-color: {c['success']};
+    border-color: {c['success']};
+    color: #FFFFFF;
+}}
+QPushButton#primary:disabled {{
+    background-color: {c['border']};
+    border-color: {c['border']};
+    color: {c['muted']};
+}}
+
+/* === Header user chip =================================================== */
+QPushButton#userChip {{
+    background-color: {c['panel_alt']};
+    border: 1px solid {c['border_soft']};
+    border-radius: 14px;
+    padding: 0px;
+}}
+QPushButton#userChip:hover {{ background-color: {c['hover']}; border-color: {c['primary']}; }}
+QPushButton#userChip[open="true"], QPushButton#headerIconButton[open="true"] {{
+    background-color: {c['primary_soft']};
+    border-color: {c['primary']};
+}}
+QLabel#userChipName {{ font-size: 13px; font-weight: 600; color: {c['text']}; }}
+QLabel#userChipRole {{ font-size: 11px; color: {c['muted']}; }}
+
+/* === Popup panels (user menu, notifications) ============================ */
+QFrame#popupCard {{
+    background-color: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 16px;
+}}
+QLabel#popupTitle {{ font-size: 15px; font-weight: 700; color: {c['text']}; }}
+QLabel#popupName {{ font-size: 14px; font-weight: 700; color: {c['text']}; }}
+QLabel#popupMeta {{ font-size: 12px; color: {c['muted']}; }}
+QPushButton#popupItem, QPushButton#popupItemDanger {{
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+    padding: 9px 10px;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 500;
+    color: {c['text']};
+}}
+QPushButton#popupItem:hover, QPushButton#popupItem:focus {{
+    background-color: {c['hover']};
+    color: {c['primary']};
+}}
+QPushButton#popupItemDanger {{ color: {c['danger']}; }}
+QPushButton#popupItemDanger:hover, QPushButton#popupItemDanger:focus {{
+    background-color: {c['danger_bg']};
+    color: {c['danger']};
+}}
+QFrame#segmentBar {{ background-color: {c['chip_bg']}; border: none; border-radius: 10px; }}
+QPushButton#segment {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: {c['muted']};
+    min-height: 16px;
+}}
+QPushButton#segment:hover {{ color: {c['text']}; background: transparent; border-color: transparent; }}
+QPushButton#segment:checked {{
+    background-color: {c['card']};
+    border-color: {c['border']};
+    color: {c['text']};
+}}
+QLabel#countPill {{
+    background-color: {c['primary']};
+    color: {c['primary_fg']};
+    border-radius: 10px;
+    padding: 0px 8px;
+    font-size: 11px;
+    font-weight: 700;
+}}
+QFrame#notifRow {{ background: transparent; border: none; border-radius: 12px; }}
+QFrame#notifRow[unread="true"] {{ background-color: {c['unread_bg']}; }}
+QFrame#notifRow:hover {{ background-color: {c['hover']}; }}
+QFrame#notifRow:focus {{ background-color: {c['hover']}; }}
+QLabel#notifTitle {{ font-size: 13px; font-weight: 600; color: {c['text']}; }}
+QLabel#notifBody {{ font-size: 12px; color: {c['text_secondary']}; }}
+QLabel#notifTime {{ font-size: 11px; color: {c['muted']}; }}
+QLabel#notifSection {{
+    font-size: 10px; font-weight: 700; color: {c['muted']}; letter-spacing: 1.2px;
+}}
+"""
+
+
+def palette(theme="light"):
+    return PALETTES.get(theme, PALETTES["light"])
+
+
+def tone_color(theme, tone):
+    """Resolve a tone name (ok/warn/bad/idle/info) to a hex colour."""
+    return palette(theme)[TONE_COLORS.get(tone, "muted")]
+
+
+def stat_tile_colors(theme, key):
+    """Foreground/background pair for a stat card icon tile."""
+    c = palette(theme)
+    return c.get(f"stat_icon_{key}", c["primary"]), c.get(f"stat_icon_{key}_bg", c["primary_soft"])

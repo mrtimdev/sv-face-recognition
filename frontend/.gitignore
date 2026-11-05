@@ -1,0 +1,86 @@
+# Virtual environment
+venv/
+.venv/
+.venv-plates/
+env/
+.env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Eggs / distributions
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+wheels/
+
+# Generated project data
+encodings.pickle
+*_sface.pickle
+*_sface_migration.json
+attendance_log.csv
+alert.wav
+attendance.db
+attendance.db-wal
+attendance.db-shm
+employees.json
+hrm_employees.json
+hrm_angle_templates.json
+hrm_photos/
+captures/
+
+# Unknown face snapshots (if added later)
+snapshots/
+unknown_faces/
+
+# Uploaded / enrolled photos (keep out of repo)
+photos/
+images/
+faces/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tiff
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Dashboard local state (machine-specific settings and the engine lock)
+settings.json
+attendance.lock
+logs/
+plate_captures/
+ai_angles/
+# Remembered sign-in token and account profile photos
+.session
+avatars/
+
+# IDE / editor
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Archives
+*.zip
+
+# Mobile enrollment sessions and encrypted pending templates
+mobile_enrollment.db
+mobile_enrollment.db-wal
+mobile_enrollment.db-shm
+.mobile_api.key
+.cache/uniface/
+*.ses
