@@ -157,7 +157,8 @@ class ScreenTests(unittest.TestCase):
                 write_employee(screen.settings.employees_path, "Person001 Test", "EMP001")
                 from face_attendance import angle_templates as at
                 at._save(at.store_path(screen.settings), {"EMP001": {"left": {
-                    "sha256": "x", "version": 1, "problem": "", "vector": at._vector_text(np.ones(128))}}})
+                    "sha256": "x", "version": 1, "problem": "", "check": "matched",
+                    "vector": at._vector_text(np.ones(128))}}})
                 screen._hrm_directory = hd.load(hd.cache_path(screen.settings))
                 screen.reload()
                 self.assertEqual(len(screen.directory_rows), 60)

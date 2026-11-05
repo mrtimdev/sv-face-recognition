@@ -267,6 +267,20 @@ class SettingsTabTests(Base):
         self.assertEqual(self.screen.ai_chat_model.count(), 0)
 
 
+class FakeChecker:
+    """Stands in for the real face check, whose models can't make sense of the blank test images."""
+
+    def __init__(self, result, source_problem=""):
+        self._result = result
+        self._source_problem = source_problem
+
+    def source_problem(self):
+        return self._source_problem
+
+    def __call__(self, _content):
+        return self._result()
+
+
 class AnglesScreenTests(Base):
     def setUp(self):
         super().setUp()
@@ -279,8 +293,9 @@ class AnglesScreenTests(Base):
         self.photo = np.full((80, 80, 3), 100, np.uint8)
         # The fake images are blank, so by default leave the real face check out of these tests.
         self.checks = {}
+        self.source_problem = ""
         checker = patch.object(ai_angles.angle_templates, "generated_image_checker",
-                               return_value=lambda _content: self._next_check())
+                               side_effect=lambda _jpeg: FakeChecker(self._next_check, self.source_problem))
         checker.start()
         self.addCleanup(checker.stop)
 
@@ -314,9 +329,193 @@ class AnglesScreenTests(Base):
         first, *others = self.screen.tiles.values()
         self.assertFalse(first.warning.isHidden())
         self.assertIn("different person", first.warning.text())
-        self.assertFalse(first.include.isChecked())  # Not added to enrollment unless someone chooses to.
+        self.assertFalse(first.include.isChecked())
+        self.assertFalse(first.include.isEnabled())  # A mismatch can't be enrolled at all.
         self.assertTrue(all(tile.warning.isHidden() and tile.include.isChecked() for tile in others))
-        self.assertIn("1 of the angles may not show this person", self.screen.toast.label.text())
+        self.assertIn("1 of the angles don't match the profile photo", self.screen.toast.label.text())
+        self.assertIn("Verified 83% · Warning 17%", self.screen.match_label.text())
+        self.assertIn("only the 5 verified", self.screen.match_label.text())
+        self.assertNotIn(first.path, self.screen._included_paths())
+
+    def test_a_photo_with_no_clear_face_costs_no_ai_request(self):
+        self._new_person()
+        self.source_problem = "no_face"
+        with self._fake_generate() as generate:
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        generate.assert_not_called()
+        self.assertIn("Nothing was generated. No face found", self.screen.toast.label.text())
+
+    def test_an_angle_that_does_not_match_is_never_sent_to_hrm(self):
+        self._with_hrm()
+        self._new_person()
+        self.screen.id_edit.setText("EMP002")
+        self.checks["next"] = "profile_mismatch"
+        with self._fake_generate(), patch.object(ai_angles, "upload_angle", return_value={}) as upload:
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        first = next(iter(self.screen.tiles))
+        self.assertEqual(upload.call_count, 5)
+        self.assertNotIn(first, [call.args[2] for call in upload.call_args_list])
+        tile = self.screen.tiles[first]
+        self.assertFalse(tile.hrm_sent)
+        self.assertEqual(tile.status.text(), "Ready · not sent to HRM")
+        self.assertIn("profile photo", tile.warning.text())
+
+    def test_send_to_hrm_leaves_out_angles_that_do_not_match(self):
+        self._with_hrm(auto=False)
+        self._new_person()
+        self.screen.id_edit.setText("EMP002")
+        self.checks["next"] = "profile_mismatch"
+        with self._fake_generate():
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        with patch.object(ai_angles, "upload_angle", return_value={}) as upload:
+            self.screen.hrm_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        self.assertEqual(upload.call_count, 5)
+        for tile in self.screen.tiles.values():
+            tile.set_check("mismatch")
+            tile.hrm_sent = False
+        with patch.object(ai_angles, "upload_angle") as upload:
+            self.screen.hrm_button.click()
+        upload.assert_not_called()
+        self.assertIn("None of these angles match", self.screen.toast.label.text())
+
+    def test_the_summary_says_when_all_six_match(self):
+        self._new_person()
+        self.assertIn("Verified 0% · Warning 0%", self.screen.match_label.text())
+        with self._fake_generate():
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        self.assertIn("Verified 100%", self.screen.match_label.text())
+        self.assertIn("matches all 6", self.screen.match_label.text())
+
+    def test_the_summary_says_when_the_monitor_will_not_recognize_someone(self):
+        self._new_person()
+        with self._fake_generate():
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        for key in list(self.screen.tiles)[:3]:
+            self.screen.tiles[key].set_check("profile_mismatch")
+        self.screen._update_buttons()
+        self.assertIn("Verified 50% · Warning 50%", self.screen.match_label.text())
+        self.assertIn("won't recognize", self.screen.match_label.text())
+
+    def _existing_employee(self, in_hrm=True):
+        self._with_hrm()
+        row = {"employee_id": "EMP001", "employee_name": "Jane Smith", "name": "", "in_hrm": in_hrm}
+        self.screen.employee_combo.blockSignals(True)
+        self.screen.employee_combo.addItem("Jane Smith (EMP001)", row)
+        self.screen.employee_combo.setCurrentIndex(self.screen.employee_combo.count() - 1)
+        self.screen.employee_combo.blockSignals(False)
+        patcher = patch.object(self.screen, "_load_saved_angles")
+        self.load_angles = patcher.start()
+        self.addCleanup(patcher.stop)
+        fetch = patch.object(ai_angles.hd, "fetch_photo", return_value=None)
+        fetch.start()
+        self.addCleanup(fetch.stop)
+        path = self.root / "new.jpg"
+        write_jpeg(path, self.photo)
+        return str(path)
+
+    def _drop(self, path, check="matched", upload=None):
+        with patch.object(ai_angles.angle_templates, "check_new_profile_photo", return_value=check), \
+                patch.object(ai_angles, "upload_profile_photo", **(upload or {})) as saved:
+            self.screen.preview.dropped.emit(path)
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        return saved
+
+    def test_a_dropped_photo_is_saved_to_the_profile_straight_away(self):
+        saved = self._drop(self._existing_employee())
+        saved.assert_called_once()
+        self.assertEqual(saved.call_args.args[1], "EMP001")
+        self.assertTrue(saved.call_args.args[2].startswith(b"\xff\xd8"))
+        self.assertIn("Saved to the employee's profile", self.screen.photo_status.text())
+        self.assertFalse(self.screen._uploaded)  # HRM's updates apply again.
+        self.load_angles.assert_called()  # The saved angles are checked against the new photo.
+
+    def test_a_photo_with_no_face_is_not_saved(self):
+        saved = self._drop(self._existing_employee(), check="no_face")
+        saved.assert_not_called()
+        self.assertIn("Not saved to the profile. No face found", self.screen.photo_status.text())
+        self.assertTrue(self.screen._uploaded)
+
+    def test_another_persons_photo_asks_first(self):
+        path = self._existing_employee()
+        with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Yes) as ask:
+            saved = self._drop(path, check="mismatch")
+        ask.assert_called_once()
+        saved.assert_called_once()
+        self.assertIn("Saved", self.screen.photo_status.text())
+
+    def test_declining_another_persons_photo_goes_back_to_the_profile_photo(self):
+        path = self._existing_employee()
+        with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.No), \
+                patch.object(self.screen, "_use_profile_photo") as back:
+            saved = self._drop(path, check="mismatch")
+        saved.assert_not_called()
+        back.assert_called_once()
+        self.assertFalse(self.screen._uploaded)
+
+    def test_a_failed_save_says_why_and_keeps_the_photo(self):
+        saved = self._drop(self._existing_employee(), upload={"side_effect": HRMError("HRM is down")})
+        saved.assert_called_once()
+        self.assertIn("Not saved to the profile. HRM is down", self.screen.photo_status.text())
+        self.assertIsNotNone(self.screen.source)
+        self.assertTrue(self.screen._uploaded)
+
+    def test_someone_not_in_hrm_has_no_profile_to_save_to(self):
+        saved = self._drop(self._existing_employee(in_hrm=False))
+        saved.assert_not_called()
+        self.assertIn("isn't in SV HRM", self.screen.photo_status.text())
+
+    def test_a_new_employee_photo_is_not_saved_anywhere(self):
+        self._with_hrm()
+        self._new_person()
+        path = self.root / "new.jpg"
+        write_jpeg(path, self.photo)
+        saved = self._drop(str(path))
+        saved.assert_not_called()
+        self.assertTrue(self.screen.photo_status.isHidden())
+
+    def _fitted(self, width, height):
+        self.screen.resize(width, height)
+        self.screen.show()
+        pump(lambda: False, 0.1)
+        self.screen._fit_tiles()
+        pump(lambda: False, 0.1)
+        return next(iter(self.screen.tiles.values()))
+
+    def test_the_cards_grow_and_shrink_with_the_window(self):
+        small = self._fitted(1000, 620).image.width()
+        large = self._fitted(1700, 1300).image.width()
+        self.assertEqual(small, ai_angles.MIN_TILE_IMAGE)
+        self.assertGreater(large, 250)
+        self.assertLessEqual(large, ai_angles.MAX_TILE_IMAGE)
+        self.assertEqual(self._fitted(1000, 620).image.width(), small)
+
+    def test_three_cards_fill_the_container_width(self):
+        tile = self._fitted(1700, 900)
+        tiles = list(self.screen.tiles.values())
+        widths = [t.width() for t in tiles[:3]]
+        self.assertLessEqual(max(widths) - min(widths), 1)  # Equal, give or take a rounded pixel.
+        left_gap = tiles[0].x()
+        right_gap = self.screen.angles_card.width() - (tiles[2].x() + tiles[2].width())
+        self.assertLessEqual(abs(left_gap - right_gap), 1)  # Nothing is left empty at the right.
+        self.assertEqual(tile.image.width(), tile.image.height())
+
+    def test_both_rows_fit_without_scrolling_when_the_window_has_room(self):
+        self._fitted(1280, 960)
+        bar = self.screen.angles_scroll.verticalScrollBar()
+        self.assertEqual(bar.maximum(), 0)
+
+    def test_the_size_settles_instead_of_changing_each_time(self):
+        first = self._fitted(1280, 860).image.width()
+        for _ in range(3):
+            self.screen._fit_tiles()
+            pump(lambda: False, 0.03)
+        self.assertEqual(next(iter(self.screen.tiles.values())).image.width(), first)
 
     def test_redo_clears_the_old_warning(self):
         self._new_person()

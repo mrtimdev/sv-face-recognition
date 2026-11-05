@@ -72,16 +72,16 @@ class ProfileAngleTests(unittest.TestCase):
         self.assertTrue(self._settled())
         self.assertEqual(len(self._tiles()), 6)
         self.assertEqual(self._photos(), 2)
-        self.assertEqual(self.screen.angles_count_label.text(), "2 of 6 in SV HRM")
+        self.assertEqual(self.screen.angles_count_label.text(), "2 of 6 in SV HRM · 0% verified")
 
     def test_switching_employee_never_shows_the_previous_persons_angles(self):
         self.screen._populate_profile(self._row("E1"))
         self.screen._populate_profile(self._row("E2"))
         deadline = time.monotonic() + 5
-        while self.screen.angles_count_label.text() != "1 of 6 in SV HRM" and time.monotonic() < deadline:
+        while self.screen.angles_count_label.text() != "1 of 6 in SV HRM · 0% verified" and time.monotonic() < deadline:
             self.application.processEvents()
             time.sleep(0.005)
-        self.assertEqual(self.screen.angles_count_label.text(), "1 of 6 in SV HRM")
+        self.assertEqual(self.screen.angles_count_label.text(), "1 of 6 in SV HRM · 0% verified")
         self.assertEqual(self._photos(), 1)
 
     def test_someone_not_in_hrm_is_explained_without_a_request(self):

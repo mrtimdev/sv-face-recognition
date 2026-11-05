@@ -163,7 +163,7 @@ class InPlaceReloadTests(unittest.TestCase):
 
     def _write_angles(self, angles, code="E1"):
         at._save(at.store_path(self.engine.config), {code: {
-            angle: {"sha256": angle, "version": 1, "problem": "", "vector": at._vector_text(vector)}
+            angle: {"sha256": angle, "version": 1, "problem": "", "check": "matched", "vector": at._vector_text(vector)}
             for angle, vector in angles.items()}})
 
     def _matched(self):

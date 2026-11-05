@@ -7,7 +7,7 @@ from uuid import NAMESPACE_URL, uuid5
 import numpy as np
 
 from .models import Employee
-from .angle_templates import vector_of
+from .angle_templates import recognition_vectors
 from .template_store import read_templates
 
 
@@ -53,8 +53,8 @@ class FaceCatalog:
     def __init__(self, encodings_path, employees_path, allow_empty=False, resolve=None, angle_store=None):
         """*resolve* maps each ``Employee`` to its current details (see hrm_directory.resolver).
 
-        With *angle_store* (see angle_templates) faces are matched only against the HRM angles,
-        and the local samples in *encodings_path* aren't used at all.
+        With *angle_store* (see angle_templates) faces are matched only against the verified HRM
+        angles, and the local samples in *encodings_path* aren't used at all.
         """
         resolve = resolve or (lambda employee: employee)
         self.employee_map = {label: resolve(employee) for label, employee in load_employee_map(employees_path).items()}
@@ -98,7 +98,7 @@ class FaceCatalog:
         known = {employee.employee_id.strip().casefold(): employee for employee in self.employee_map.values()}
         employees, encodings = [], []
         for code, angles in store.items():
-            vectors = [vector for vector in map(vector_of, angles.values()) if vector is not None]
+            vectors = recognition_vectors(angles)
             if not vectors:
                 continue
             employee = known.get(str(code).strip().casefold())

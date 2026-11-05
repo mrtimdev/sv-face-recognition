@@ -250,6 +250,17 @@ def fetch_all_employees(config, status="ACTIVE", opener=None, progress=None):
     return rows
 
 
+def upload_profile_photo(config, employee_code, image, opener=None):
+    """Replace the employee's HRM profile photo with these JPEG bytes."""
+    content = bytes(image)
+    if not content:
+        raise HRMError("The image is empty.")
+    if len(content) > MAX_PHOTO_BYTES:
+        raise HRMError("The image is larger than 10 MB.")
+    body, content_type = _multipart({}, "photo.jpg", content, "image/jpeg")
+    _request(config, "PUT", f"{_employee_path(employee_code)}/photo", body, content_type, opener=opener)
+
+
 def employee_photo(config, employee_code, opener=None):
     """The employee's HRM profile photo as bytes, or None when HRM has none."""
     try:

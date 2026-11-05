@@ -85,22 +85,28 @@ def _save(path, employees):
 
 
 def counts(store):
-    """{casefolded employee code: usable angles}, for showing who the Live Monitor can recognize."""
+    """{casefolded employee code: angles the Live Monitor matches}, for showing who it can recognize."""
     result = {}
     for code, angles in store.items():
-        usable = sum(1 for entry in angles.values() if vector_of(entry) is not None)
+        usable = len(recognition_vectors(angles))
         if usable:
             result[str(code).strip().casefold()] = usable
     return result
 
 
 def problems_for(store, employee_code):
-    """{angle: why it can't be matched} for one employee."""
+    """{angle: why the Live Monitor doesn't match it} for one employee."""
     wanted = str(employee_code or "").strip().casefold()
     for code, angles in store.items():
         if str(code).strip().casefold() == wanted:
-            return {angle: entry.get("problem") or "It couldn't be read"
-                    for angle, entry in angles.items() if vector_of(entry) is None}
+            checks = final_checks(angles)
+            result = {}
+            for angle, entry in angles.items():
+                if vector_of(entry) is None:
+                    result[angle] = entry.get("problem") or "It couldn't be read"
+                elif checks[angle] != angle_checks.MATCHED:
+                    result[angle] = angle_checks.WARNINGS.get(checks[angle], "It isn't verified yet")
+            return result
     return {}
 
 
@@ -118,27 +124,93 @@ def encode_angle(backend, content):
     return np.asarray(encode_faces(backend, image, boxes)[0], dtype=np.float64), ""
 
 
-def generated_image_checker(source_jpeg, backend=None):
-    """A function giving a generated image's check result, compared with the photo it was made from.
+def _new_backend():
+    from .face_backend import OpenCVFaceBackend
+    return OpenCVFaceBackend()
 
-    Builds the face models on first use, so call it on the worker thread.
+
+class GeneratedImageChecker:
+    """Gives a generated image's check result, compared with the photo it was made from.
+
+    Builds the face models on first use, so use it on the worker thread.
     """
-    state = {"backend": backend, "ready": False, "reference": None}
 
-    def check(content):
-        if not state["ready"]:
-            state["ready"] = True
-            if state["backend"] is None:
-                from .face_backend import OpenCVFaceBackend
-                state["backend"] = OpenCVFaceBackend()
-            state["reference"] = encode_angle(state["backend"], source_jpeg)[0]
-        vector, problem = encode_angle(state["backend"], content)
+    def __init__(self, source_jpeg, backend=None):
+        self._source = source_jpeg
+        self._backend = backend
+        self._ready = False
+        self._reference = None
+        self._source_problem = ""
+
+    def _prepare(self):
+        if not self._ready:
+            self._ready = True
+            self._backend = self._backend or _new_backend()
+            self._reference, self._source_problem = encode_angle(self._backend, self._source)
+
+    def source_problem(self):
+        """Why the source photo can't be the reference, as a check result; "" when it can."""
+        self._prepare()
+        return angle_checks.status_for_problem(self._source_problem) if self._source_problem else ""
+
+    def __call__(self, content):
+        self._prepare()
+        vector, problem = encode_angle(self._backend, content)
         if vector is None:
             return angle_checks.status_for_problem(problem)
-        if state["reference"] is None:
-            return angle_checks.NOT_COMPARED  # The source photo itself has no single clear face.
-        return angle_checks.MATCHED if angle_checks.same_face(state["reference"], vector) else angle_checks.MISMATCH
-    return check
+        if self._reference is None:
+            return angle_checks.NOT_COMPARED
+        return (angle_checks.MATCHED if angle_checks.same_face(self._reference, vector)
+                else angle_checks.PROFILE_MISMATCH)
+
+
+def generated_image_checker(source_jpeg, backend=None):
+    return GeneratedImageChecker(source_jpeg, backend)
+
+
+def check_new_profile_photo(new_photo, current_photo, backend=None):
+    """Can this photo be the profile photo? A warning status, MATCHED, or NOT_COMPARED when no current face."""
+    backend = backend or _new_backend()
+    vector, problem = encode_angle(backend, new_photo)
+    if vector is None:
+        return angle_checks.status_for_problem(problem)
+    current = encode_angle(backend, current_photo)[0] if current_photo else None
+    if current is None:
+        return angle_checks.NOT_COMPARED
+    return angle_checks.MATCHED if angle_checks.same_face(current, vector) else angle_checks.MISMATCH
+
+
+def verify_saved_angles(config, employee_code, items, profile_photo, backend=None, opener=None):
+    """Compare this employee's stored angles with their profile photo, updating each item's "check".
+
+    Without a usable profile photo they are compared with each other. HRM is told only what it
+    doesn't already have, so a report never causes another one.
+    """
+    if not items:
+        return items
+    backend = backend or _new_backend()
+    vectors, statuses = {}, {}
+    for item in items:
+        vector, problem = encode_angle(backend, Path(item["path"]).read_bytes())
+        if vector is None:
+            statuses[item["key"]] = angle_checks.status_for_problem(problem)
+        else:
+            vectors[item["key"]] = vector
+    profile = encode_angle(backend, profile_photo)[0] if profile_photo else None
+    statuses.update(angle_checks.compare_with_each_other(vectors, ANGLE_ORDER) if profile is None
+                    else angle_checks.compare_with_profile(vectors, profile))
+    changes = []
+    for item in items:
+        status = statuses[item["key"]]
+        if item.get("sha256") and item.get("check") != status:
+            changes.append({"angle": item["key"], "sha256": item["sha256"], "status": status})
+        item["check"] = status
+    if changes:
+        try:
+            hrm_sync.report_angle_checks(config, employee_code, changes, opener=opener)
+        except hrm_sync.HRMError as exc:
+            logging.warning("Could not report the face checks to HRM: %s", exc)
+    return items
 
 
 def checks_for(angles):
@@ -152,15 +224,49 @@ def checks_for(angles):
     return results
 
 
+def final_checks(angles):
+    """{angle: result} joining this computer's comparison with HRM's stored result, which knows the
+    profile photo. A warning from either one stands."""
+    local = checks_for(angles)
+    results = {}
+    for key, entry in angles.items():
+        stored = entry.get("check") if isinstance(entry, dict) else None
+        if angle_checks.is_warning(local[key]):
+            results[key] = local[key]
+        elif angle_checks.is_warning(stored):
+            results[key] = stored
+        elif angle_checks.MATCHED in (local[key], stored):
+            results[key] = angle_checks.MATCHED
+        else:
+            results[key] = angle_checks.NOT_COMPARED
+    return results
+
+
+def recognition_vectors(angles):
+    """The templates the Live Monitor may match for one employee: verified angles only, and none at
+    all unless verified angles outnumber flagged ones. So a flagged photo, often somebody else's
+    face, can never make its true owner look like this employee."""
+    checks = final_checks(angles)
+    if not angle_checks.score(checks.values()).recognizable:
+        return []
+    vectors = (vector_of(angles[key]) for key, status in checks.items() if status == angle_checks.MATCHED)
+    return [vector for vector in vectors if vector is not None]
+
+
 def _report_checks(config, store, rows, opener=None):
     """Send HRM only the results it doesn't have, so a report never causes another one."""
     known = {(str(row.get("employeeCode") or "").strip(), str(row.get("angle") or "").strip()):
              row.get("verificationStatus") for row in rows}
     for code, angles in store.items():
         results = checks_for(angles)
+        # This comparison can't see the profile photo, so it can't overturn a finding about it, except
+        # that an image with no usable face is wrong whatever the photo.
         checks = [{"angle": key, "sha256": angles[key].get("sha256"), "status": status}
                   for key, status in results.items()
-                  if angles[key].get("sha256") and known.get((code, key)) != status]
+                  if angles[key].get("sha256") and known.get((code, key)) != status
+                  and (known.get((code, key)) != angle_checks.PROFILE_MISMATCH
+                       or status not in (angle_checks.MATCHED, angle_checks.MISMATCH, angle_checks.NOT_COMPARED))
+                  and not (status == angle_checks.NOT_COMPARED and known.get((code, key)))]
         if not checks:
             continue
         try:
@@ -184,9 +290,10 @@ def sync(config, path, backend=None, opener=None):
         code, angle, sha = (str(row.get(key) or "").strip() for key in ("employeeCode", "angle", "sha256"))
         if not code or not angle:
             continue
+        check = row.get("verificationStatus")
         prior = old.get(code, {}).get(angle)
         if isinstance(prior, dict) and sha and prior.get("sha256") == sha:
-            new.setdefault(code, {})[angle] = prior
+            new.setdefault(code, {})[angle] = {**prior, "check": check}
             continue
         label = f"{code} {angle}"
         try:
@@ -205,7 +312,7 @@ def sync(config, path, backend=None, opener=None):
         if problem:
             problems.append(f"{label}: {problem}")
         new.setdefault(code, {})[angle] = {"sha256": sha, "version": row.get("version"), "problem": problem,
-                                           "vector": None if vector is None else _vector_text(vector)}
+                                           "check": check, "vector": None if vector is None else _vector_text(vector)}
     changed = new != old
     if changed or not Path(path).exists():
         _save(path, new)

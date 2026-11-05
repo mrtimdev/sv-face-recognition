@@ -56,6 +56,7 @@ APP_VERSION = f"v{__version__}"
 UPDATE_CHECK_DELAY_MS = 4000
 CATALOG_POLL_MS = 2000  # Mobile API enrollments appear within ~2-4 s.
 SIDEBAR_WIDTH = 244
+DEFAULT_WINDOW_SIZE = (1280, 1000)
 
 NAV = (
     ("monitor", "Live Monitor"),
@@ -66,6 +67,15 @@ NAV = (
     ("monitor", "License Plates"),
     ("image", "AI Face Angles"),
 )
+
+
+def default_window_size(screen):
+    """The window's opening size, never larger than the screen's usable area."""
+    width, height = DEFAULT_WINDOW_SIZE
+    if screen is None:
+        return QSize(width, height)
+    available = screen.availableGeometry()
+    return QSize(min(width, available.width()), min(height, available.height()))
 
 
 class HeaderDetails(QLabel):
@@ -107,7 +117,7 @@ class MainWindow(QMainWindow):
             notify_inactive=settings.telegram_notify_inactive,
         )
         self.setWindowTitle("Face ID Attendance - Admin Dashboard")
-        self.resize(1280, 800)
+        self.resize(default_window_size(QApplication.primaryScreen()))
         self.setMinimumSize(1100, 680)
         self.notifications = NotificationCenter(self)
         self.access = AccessControl(current_user, settings.theme, self)
@@ -433,6 +443,7 @@ class MainWindow(QMainWindow):
         self.hrm_angles.updated.connect(self.screens[2].on_angle_templates_updated)
         self.hrm_angles.failed.connect(lambda message: self._note(f"Could not update face angles from HRM: {message}"))
         self.hrm_live.employeesChanged.connect(self.hrm_angles.request)
+        self.hrm_live.anglesVerified.connect(lambda _code: self.hrm_angles.request())  # A result changes who can match.
         self.hrm_uplink = AttendanceUplink(self.hrm_live, lambda: self.engine.config or self.settings.to_config(), self)
         self.engine.attendanceSaved.connect(lambda _result: self.hrm_uplink.kick())
         self.hrm_live.configure(hrm_config_from_settings(self.settings))

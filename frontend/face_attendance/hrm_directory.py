@@ -342,7 +342,7 @@ def fetch_saved_angles(config, settings, employee_id, opener=None):
                 problems.append(f"{key}: HRM sent a damaged image.")
                 continue
             _write_private(path, data)
-        items.append({"key": key, "path": path, "version": row.get("version"),
+        items.append({"key": key, "path": path, "version": row.get("version"), "sha256": sha,
                       "check": row.get("verificationStatus")})
     for key in known - present:  # Deleted in HRM, so don't keep showing or storing it here.
         (folder / f"{key}.jpg").unlink(missing_ok=True)

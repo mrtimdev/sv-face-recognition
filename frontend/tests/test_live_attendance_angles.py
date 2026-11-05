@@ -37,7 +37,8 @@ def jpeg(value=120, size=(80, 80)):
 
 
 def row(code, angle, content):
-    return {"employeeCode": code, "angle": angle, "sha256": hashlib.sha256(content).hexdigest(), "version": 1}
+    return {"employeeCode": code, "angle": angle, "sha256": hashlib.sha256(content).hexdigest(), "version": 1,
+            "verificationStatus": "matched"}
 
 
 class OneFace:

@@ -1192,7 +1192,9 @@ class EmployeesScreen(QWidget):
         else:
             items, problems = result
             self._render_profile_angles({item["key"]: item for item in items})
-            self.angles_count_label.setText(f"{len(items)} of {len(ANGLES)} in SV HRM")
+            result = angle_checks.score(item.get("check") for item in items)
+            self.angles_count_label.setText(f"{len(items)} of {len(ANGLES)} in SV HRM · "
+                                            f"{result.verified_percent}% verified")
             if problems:
                 self.angles_hint.setText(f"{len(problems)} angle(s) couldn't be loaded from SV HRM.")
             elif items:

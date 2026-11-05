@@ -28,7 +28,7 @@ def write_directory(settings, *rows):
 def write_angles(settings, *codes):
     vector = angle_templates._vector_text(np.ones(128))
     angle_templates._save(angle_templates.store_path(settings),
-                          {code: {"straight": {"sha256": "x", "vector": vector}} for code in codes})
+                          {code: {"straight": {"sha256": "x", "vector": vector, "check": "matched"}} for code in codes})
 
 
 class LiveCatalogTests(unittest.TestCase):
