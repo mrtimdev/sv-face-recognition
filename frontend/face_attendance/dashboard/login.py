@@ -305,7 +305,7 @@ class _SignInDialog(QDialog):
         self._shake_anim = None
         self._shake_origin = QPoint()
         self.setWindowTitle(window_title)
-        self.setFixedSize(860, 620)
+        self.setFixedSize(860, 660)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         root = QHBoxLayout(self)
@@ -560,9 +560,10 @@ class UserLoginDialog(_SignInDialog):
         server_label.setObjectName("authFooter")
         server_label.setContentsMargins(3, 0, 0, 0)
         self.below_form.addWidget(server_label)
-        self.server = ServerPicker()
+        self.server = ServerPicker(office_input=True)
         self.server.set_profile(hrm_servers.profile(settings))
         self.server.modeChanged.connect(self._server_changed)
+        self.server.officeChanged.connect(self._server_changed)
         self.below_form.addWidget(self.server)
 
         self.username.returnPressed.connect(self.password.setFocus)
@@ -571,7 +572,7 @@ class UserLoginDialog(_SignInDialog):
         if notice:
             self.alert.show_message(notice)
 
-    def _server_changed(self, _mode):
+    def _server_changed(self, _value):
         self._settings.update(hrm_servers.to_settings(self.server.profile()))
         try:
             self._settings.save()
@@ -596,6 +597,10 @@ class UserLoginDialog(_SignInDialog):
             missing.append(self.password)
         if missing:
             missing[0].setFocus()
+        elif self.server.pending_office():
+            self.alert.show_message("Press Use to check the office address before signing in.")
+            self.server.office_input.setFocus()
+            return False
         return not missing
 
     def _start_work(self, token):

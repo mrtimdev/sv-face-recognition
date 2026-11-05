@@ -1,7 +1,7 @@
 """Choose the SV HRM server: Automatic, Online or Office, with a live connection check.
 
-The sign-in form only switches between the saved addresses. Editing them is for Settings,
-behind a signed-in account (see ``hrm_auth``); ``editable`` adds those fields.
+Settings edits both addresses (``editable``). The sign-in form switches modes and takes an
+office address only (``office_input``): one on the local network that answers as SV HRM.
 """
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (QButtonGroup, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -29,8 +29,9 @@ class ServerCheckWorker(QThread):
 
 class ServerPicker(QWidget):
     modeChanged = pyqtSignal(str)   # The user picked another mode.
+    officeChanged = pyqtSignal(str)  # A typed office address answered as SV HRM and is now in use.
 
-    def __init__(self, editable=False, parent=None):
+    def __init__(self, editable=False, office_input=False, parent=None):
         super().__init__(parent)
         self.setObjectName("plain")
         self._mode = hrm_servers.AUTO
@@ -39,7 +40,8 @@ class ServerPicker(QWidget):
         self._checked = None       # The choice the status line describes.
         self._saved_online = ""    # Keep addresses this form doesn't show when it has no fields.
         self._saved_office = ""
-        self.online_edit = self.office_edit = None
+        self.online_edit = self.office_edit = self.office_input = None
+        self._trying_office = None  # A typed address waiting on its check.
 
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
@@ -64,6 +66,8 @@ class ServerPicker(QWidget):
             self.buttons[mode] = button
             segments.addWidget(button, 1)
         column.addWidget(bar)
+        if office_input:
+            self._add_office_input(column)
 
         status_row = QHBoxLayout()
         status_row.setContentsMargins(3, 0, 3, 0)
@@ -86,6 +90,26 @@ class ServerPicker(QWidget):
         if editable:
             self._add_address_fields(column)
         self.buttons[self._mode].setChecked(True)
+
+    def _add_office_input(self, column):
+        self.office_row = QWidget()
+        self.office_row.setObjectName("plain")
+        row = QHBoxLayout(self.office_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.office_input = QLineEdit()
+        self.office_input.setPlaceholderText(default_base_url())
+        self.office_input.setToolTip("The SV HRM address on the office network.")
+        self.office_input.returnPressed.connect(self.use_office)
+        row.addWidget(self.office_input, 1)
+        self.use_button = QPushButton("Use")
+        self.use_button.setObjectName("softButton")
+        self.use_button.setAutoDefault(False)
+        self.use_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.use_button.clicked.connect(self.use_office)
+        row.addWidget(self.use_button)
+        column.addWidget(self.office_row)
+        self.office_row.setVisible(self._mode == hrm_servers.OFFICE)
 
     def _add_address_fields(self, column):
         form = QFormLayout()
@@ -122,6 +146,9 @@ class ServerPicker(QWidget):
         self._mode = choice.mode
         self._saved_online, self._saved_office = choice.online, choice.office
         self.buttons[choice.mode].setChecked(True)
+        if self.office_input is not None:
+            self.office_input.setText(choice.office)
+            self.office_row.setVisible(choice.mode == hrm_servers.OFFICE)
         if self.online_edit is not None:
             self.online_edit.setText(choice.online)
             self.office_edit.setText(choice.office)
@@ -137,13 +164,37 @@ class ServerPicker(QWidget):
                 return f"{label} address: {problem}"
         return ""
 
+    def pending_office(self):
+        """A typed office address that isn't in use yet; "" when there is none."""
+        if self.office_input is None or self._mode != hrm_servers.OFFICE:
+            return ""
+        typed = hrm_servers.normalize_url(self.office_input.text())
+        return typed or " " if typed != self._saved_office else ""
+
     # --- behaviour --------------------------------------------------------
     def _pick(self, mode):
         if mode == self._mode:
             return
         self._mode = mode
+        if self.office_input is not None:
+            self.office_input.setText(self._saved_office)
+            self.office_row.setVisible(mode == hrm_servers.OFFICE)
         self.check()
         self.modeChanged.emit(mode)
+
+    def use_office(self):
+        """Check a typed office address; it is only kept once it answers as SV HRM."""
+        if not self.check_button.isEnabled() and self._trying_office is not None:
+            return
+        address = hrm_servers.normalize_url(self.office_input.text())
+        problem = hrm_servers.office_address_problem(address)
+        if problem:
+            self._token += 1
+            self._trying_office = None
+            self._set_checking(False)
+            self._show_status("Can't use this address", problem, "bad")
+            return
+        self._start_check(hrm_servers.Profile(hrm_servers.OFFICE, self._saved_online, address), address)
 
     def _addresses_edited(self):
         warnings = [plain_http_warning(hrm_servers.normalize_url(edit.text()))
@@ -165,14 +216,24 @@ class ServerPicker(QWidget):
         if problem:
             self._token += 1
             self._checked = None
+            self._trying_office = None
             self._show_status("Can't connect", problem, "bad")
-            self.check_button.setEnabled(True)
+            self._set_checking(False)
             return
+        self._start_check(self.profile())
+
+    def _set_checking(self, checking):
+        self.check_button.setEnabled(not checking)
+        if self.office_input is not None:
+            self.use_button.setEnabled(not checking)
+
+    def _start_check(self, choice, office=None):
         self._token += 1
-        self._checked = self.profile()
-        self.check_button.setEnabled(False)
-        self._show_status("Checking the connection…", hrm_servers.DESCRIPTIONS[self._mode])
-        worker = ServerCheckWorker(self._token, self._checked)
+        self._checked = choice
+        self._trying_office = office
+        self._set_checking(True)
+        self._show_status("Checking the connection…", hrm_servers.DESCRIPTIONS[choice.mode])
+        worker = ServerCheckWorker(self._token, choice)
         worker.checked.connect(self._on_checked)
         # Parked, not owned: closing the form mid-check must not end the thread.
         self._worker = worker
@@ -181,7 +242,14 @@ class ServerPicker(QWidget):
     def _on_checked(self, token, connection):
         if token != self._token:
             return
-        self.check_button.setEnabled(True)
+        self._set_checking(False)
+        office, self._trying_office = self._trying_office, None
+        if office is not None and not connection.ok:
+            self._checked = None
+        elif office is not None:
+            self._saved_office = office
+            self.office_input.setText(office)
+            self.officeChanged.emit(office)
         headline, detail = hrm_servers.status_lines(connection)
         self._show_status(headline, detail, "ok" if connection.ok else "bad")
 

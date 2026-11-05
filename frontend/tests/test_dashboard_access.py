@@ -96,7 +96,7 @@ class SignInDialogTests(_TempAccounts, unittest.TestCase):
     def test_wrong_password_counts_attempts_then_locks_out(self):
         from PyQt6.QtWidgets import QDialog
         with patch("face_attendance.dashboard.login.STAGE_MIN_MS", 1), \
-                patch("face_attendance.dashboard.login.LOCKOUT_CLOSE_MS", 10):
+                patch("face_attendance.dashboard.login.LOCKOUT_CLOSE_MS", 300):
             dialog = self._dialog()
             dialog.username.setText("sokha")
             dialog.password.setText("wrong")

@@ -183,10 +183,68 @@ class SignInFormTests(_Qt):
         self.assertEqual(config_from_settings(self.settings).base_url, ONLINE)
         self.assertEqual(servers.profile(Settings.load(self.path)), servers.Profile(servers.ONLINE, ONLINE, OFFICE))
 
-    def test_the_form_has_no_address_fields(self):
+    def test_only_the_office_address_can_be_typed_and_only_on_office(self):
         dialog = self._dialog()
         self.assertIsNone(dialog.server.online_edit)
-        self.assertIsNone(dialog.server.office_edit)
+        dialog.show()
+        self.assertFalse(dialog.server.office_row.isVisible())
+        dialog.server.buttons[servers.OFFICE].click()
+        self.assertTrue(dialog.server.office_row.isVisible())
+        dialog.server.buttons[servers.ONLINE].click()
+        self.assertFalse(dialog.server.office_row.isVisible())
+
+    def _office_dialog(self):
+        self.settings.update(servers.to_settings(servers.Profile(servers.OFFICE, ONLINE, OFFICE)))
+        return self._dialog()
+
+    def test_a_typed_office_address_that_answers_is_saved(self):
+        dialog = self._office_dialog()
+        typed = "http://192.168.1.50:8082"
+        with patch.object(servers, "_open", network({typed: HRM})):
+            dialog.server.office_input.setText(f"{typed}/api")
+            dialog.server.use_button.click()
+            self.assertTrue(pump(lambda: dialog.server.status.text().startswith("Connected")))
+        self.assertEqual(dialog.server.office_input.text(), typed)
+        self.assertEqual(config_from_settings(self.settings).base_url, typed)
+        self.assertEqual(servers.profile(Settings.load(self.path)), servers.Profile(servers.OFFICE, ONLINE, typed))
+
+    def test_a_typed_address_that_is_not_hrm_is_not_saved(self):
+        dialog = self._office_dialog()
+        typed = "http://192.168.1.50:8082"
+        with patch.object(servers, "_open", network({typed: b'{"app":"other"}'})):
+            dialog.server.office_input.setText(typed)
+            dialog.server.use_button.click()
+            self.assertTrue(pump(lambda: dialog.server.status.text() == "Can't connect"))
+        self.assertEqual(config_from_settings(self.settings).base_url, OFFICE)
+        self.assertFalse(self.path.exists())
+        self.assertTrue(dialog.server.pending_office())
+
+    def test_an_internet_address_is_refused_without_contacting_it(self):
+        dialog = self._office_dialog()
+        opener = network({})
+        with patch.object(servers, "_open", opener):
+            for typed in (ONLINE, "http://8.8.8.8:8082", "http://192.168.1.46.example.com", "ftp://192.168.1.46"):
+                dialog.server.office_input.setText(typed)
+                dialog.server.use_button.click()
+                self.assertEqual(dialog.server.status.text(), "Can't use this address", typed)
+        self.assertEqual(opener.seen, [])
+        self.assertEqual(config_from_settings(self.settings).base_url, OFFICE)
+
+    def test_sign_in_waits_until_a_typed_address_is_checked(self):
+        dialog = self._office_dialog()
+        dialog.username.setText("a")
+        dialog.password.setText("b")
+        dialog.server.office_input.setText("http://192.168.1.50:8082")
+        with patch("face_attendance.dashboard.login._SignInWorker") as worker:
+            dialog._submit()
+        worker.assert_not_called()
+        self.assertIn("Use", dialog.alert.label.text())
+
+    def test_emptying_the_address_goes_back_to_the_default(self):
+        dialog = self._office_dialog()
+        dialog.server.office_input.setText("")
+        self.assertTrue(dialog.server.pending_office())
+        self.assertEqual(servers.office_address_problem(""), "")
 
     def test_the_choice_cannot_change_during_a_sign_in(self):
         dialog = self._dialog()

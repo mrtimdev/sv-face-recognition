@@ -3,8 +3,10 @@
 The password goes straight to HRM and is never stored. HRM answers with a signed
 JWT, which is what a remembered session keeps. A token read back from disk is only
 trusted after HRM has accepted it, so editing the session file can't raise anyone's
-access. The HRM address itself is deliberately not editable before sign-in: anyone
-who could change it could point the app at a server that says they are an admin.
+access. Before sign-in only an office address can be typed, and only one that answers
+as SV HRM (see ``hrm_servers``); the internet address is not editable until signed in.
+A server on the local network can still claim anyone is an admin, so the office network
+itself has to be trusted.
 
 No Qt here; the dashboard calls these functions from worker threads.
 """

@@ -94,6 +94,16 @@ def is_office_address(url):
     return _is_private_host(urllib.parse.urlsplit(url).hostname or "")
 
 
+def office_address_problem(text):
+    """Why the sign-in form won't take this office address; "" when it will (empty uses the default)."""
+    url = normalize_url(text)
+    problem = address_problem(url)
+    if problem or not url or is_office_address(url):
+        return problem
+    return ("The office address must be on the local network, for example "
+            "http://192.168.1.46:8082. Other addresses can be set in Settings after signing in.")
+
+
 def profile(settings):
     """The saved choice. An address saved before modes existed stays the only one used."""
     mode = str(getattr(settings, "hrm_server_mode", "") or "")
