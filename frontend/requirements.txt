@@ -3,6 +3,8 @@ numpy==1.26.4
 PyQt6==6.10.2
 psutil>=5.9.0
 certifi>=2024.2.2             # HTTPS trust store for AI providers in packaged builds
+requests>=2.32,<3             # Telegram notifications
+openpyxl>=3.1,<4              # Excel report export
 # Remote database drivers. Release builds must bundle both, or an app set to
 # PostgreSQL/MySQL cannot open the user database and nobody can sign in.
 psycopg2-binary==2.9.10        # PostgreSQL
