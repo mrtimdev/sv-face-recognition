@@ -6,7 +6,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -38,14 +39,56 @@ class LiveCatalogTests(unittest.TestCase):
         self.settings = Settings(employees_path=str(Path(folder.name) / "employees.json"),
                                  encodings_path=str(Path(folder.name) / "encodings_sface.pickle"))
 
-    def test_connected_catalog_uses_hrm_angles_and_blocks_who_hrm_does_not_list(self):
+    def test_connected_catalog_uses_hrm_angles_and_leaves_out_who_hrm_does_not_list(self):
         write_directory(self.settings, ("EMP1", "Dara", "ACTIVE"))
-        write_angles(self.settings, "EMP1", "GONE9")
+        write_angles(self.settings, "emp1", "GONE9")
         catalog = hd.live_catalog(self.settings)
-        people = {employee.employee_id: employee for employee in catalog.employees}
-        self.assertEqual(people["EMP1"].name, "Dara")
-        self.assertTrue(people["EMP1"].active)
-        self.assertFalse(people["GONE9"].active)
+        people = {employee.employee_id.casefold(): employee for employee in catalog.employees}
+        self.assertEqual(people["emp1"].name, "Dara")
+        self.assertTrue(people["emp1"].active)
+        self.assertNotIn("gone9", people)
+        self.assertEqual(catalog.enrolled_count, 1)
+
+    def test_a_new_employee_list_changes_who_the_catalog_has(self):
+        write_directory(self.settings, ("EMP1", "Dara", "ACTIVE"), ("EMP2", "Sok", "ACTIVE"))
+        write_angles(self.settings, "EMP1", "EMP2")
+        self.assertEqual(hd.live_catalog(self.settings).enrolled_count, 2)
+        write_directory(self.settings, ("EMP2", "Sok", "ACTIVE"))
+        self.assertEqual(hd.live_catalog(self.settings).enrolled_count, 1)
+
+    def test_a_finished_sync_or_override_updates_the_angles_and_then_the_live_monitor(self):
+        from face_attendance.dashboard.app import MainWindow
+        window = SimpleNamespace(hrm_angles=MagicMock(), engine=MagicMock(), screens={2: MagicMock(), 6: MagicMock()},
+                                 hrm_live=MagicMock(connected=True), _exit=None, _exit_done=False)
+        MainWindow._on_hrm_directory_synced(window, RuntimeError("HRM is down"))
+        window.hrm_angles.request.assert_not_called()
+        MainWindow._on_hrm_directory_synced(window, hd.Directory())
+        window.hrm_angles.request.assert_called_once()
+
+        MainWindow._on_angle_templates_updated(window, SimpleNamespace(changed=False, changed_codes=()))
+        window.engine.reload_catalog.assert_not_called()
+        MainWindow._on_angle_templates_updated(window, SimpleNamespace(changed=True, changed_codes=("E1",)))
+        window.engine.reload_catalog.assert_called_once()
+        window.screens[6].on_hrm_angles_changed.assert_not_called()   # A live event already said so.
+
+        window.hrm_angles.reset_mock()
+        MainWindow._on_server_changed(window)
+        window.screens[2].request_hrm_refresh.assert_called_once()
+        window.hrm_angles.request.assert_called_once()
+
+    def test_without_the_live_connection_the_app_keeps_checking_hrm(self):
+        from face_attendance.dashboard.app import MainWindow
+        window = SimpleNamespace(hrm_angles=MagicMock(), engine=MagicMock(), screens={2: MagicMock(), 6: MagicMock()},
+                                 hrm_live=MagicMock(connected=True), _exit=None, _exit_done=False)
+        MainWindow._refresh_without_live(window)
+        window.screens[2].request_hrm_refresh.assert_not_called()
+        window.hrm_live.connected = False
+        MainWindow._refresh_without_live(window)
+        window.screens[2].request_hrm_refresh.assert_called_once()
+
+        MainWindow._on_angle_templates_updated(window, SimpleNamespace(changed=True, changed_codes=("E1", "E2")))
+        self.assertEqual([call.args[0] for call in window.screens[6].on_hrm_angles_changed.call_args_list], ["E1", "E2"])
+        self.assertEqual([call.args[0] for call in window.screens[2].on_hrm_angles_changed.call_args_list], ["E1", "E2"])
 
     def test_terminal_uses_the_same_catalog_as_the_dashboard(self):
         from face_attendance.runtime import AttendanceApplication

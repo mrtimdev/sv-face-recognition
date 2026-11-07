@@ -292,6 +292,7 @@ class EmployeesScreen(QWidget):
     probeReady = pyqtSignal(object)
     duplicatesReady = pyqtSignal(object)
     hrmSyncDone = pyqtSignal(object)
+    hrmOverrideChecked = pyqtSignal(object)  # hd.OverridePreview or an exception.
     anglesRequested = pyqtSignal(str)  # Employee code: enroll their face angles on AI Face Angles.
     hrmSyncProgress = pyqtSignal(int, int)
     hrmPhotoReady = pyqtSignal(str)
@@ -388,8 +389,10 @@ class EmployeesScreen(QWidget):
         self.enroll_cta.setObjectName("primary")
         self.more_button = QPushButton("More")
         self.more_button.setProperty("overflowMenu", True)
-        self.more_button.setToolTip("Import or export enrolled employees")
+        self.more_button.setToolTip("Override the employee list from HRM, or import or export enrolled employees")
         more = QMenu(self)
+        self.override_action = more.addAction("Override from HRM…", self.override_from_hrm)
+        self.override_action.setToolTip("Check hrm_employees.json against HRM by employee ID, then replace it")
         self.import_action = more.addAction("Import employees…", self._import_employees)
         self.export_action = more.addAction("Export employees…", self._export_employees)
         self.more_button.setMenu(more)
@@ -809,6 +812,7 @@ class EmployeesScreen(QWidget):
         self.reload_button.clicked.connect(self._refresh_directory)
         self.hrm_sync_button.clicked.connect(lambda: self.sync_hrm(quiet=False))
         self.hrmSyncDone.connect(self._on_hrm_synced)
+        self.hrmOverrideChecked.connect(self._on_override_checked)
         self.hrmSyncProgress.connect(self._on_hrm_progress)
         self.hrmPhotoReady.connect(self._on_hrm_photo)
         self.hrmAnglesReady.connect(self._on_profile_angles)
@@ -911,7 +915,7 @@ class EmployeesScreen(QWidget):
         total, size = len(self.filtered_rows), self._page_size()
         first = self.page * size + 1 if total else 0
         last = min(total, (self.page + 1) * size)
-        enrolled = sum(1 for row in self.directory_rows if hd.face_count(row))
+        enrolled = sum(1 for row in self.directory_rows if hd.is_enrolled(row))
         self.result_count.setText(
             f"Showing {first}–{last} of {total} employees"
             + (f" (filtered from {len(self.directory_rows)})" if total != len(self.directory_rows) else "")
@@ -1120,8 +1124,8 @@ class EmployeesScreen(QWidget):
             f"ID: {row['employee_id']}" if row["employee_id"] else "No employee ID")
         duplicates = self._duplicates_by_label.get(row["name"], [])
         self.profile_pill.set_status(
-            "Inactive" if not row.get("active", True) else "Not in HRM" if row.get("hrm_blocked") else "Review face match" if duplicates else ("Active" if hd.face_count(row) else "Needs enrollment"),
-            "bad" if not row.get("active", True) or row.get("hrm_blocked") else "warn" if duplicates or not hd.face_count(row) else "ok")
+            "Inactive" if not row.get("active", True) else "Not in HRM" if row.get("hrm_blocked") else "Review face match" if duplicates else ("Active" if hd.is_enrolled(row) else "Needs enrollment"),
+            "bad" if not row.get("active", True) or row.get("hrm_blocked") else "warn" if duplicates or not hd.is_enrolled(row) else "ok")
         lines = [f"First name: {row.get('first_name') or '—'}  •  Last name: {row.get('last_name') or '—'}"]
         if duplicates:
             lines.append("Possible duplicate face with " + "; ".join(owner for _, owner in duplicates))
@@ -1891,12 +1895,12 @@ class EmployeesScreen(QWidget):
         self._set_filter_options(self.position_filter, hd.options(self.directory_rows, "position"))
         self._set_filter_options(self.location_filter, hd.options(self.directory_rows, "location"))
         self._set_filter_options(self.employee_type_filter, hd.options(self.directory_rows, "employee_type"))
-        enrolled = {row["employee_id"] for row in self.directory_rows if hd.face_count(row)}
+        enrolled = {row["employee_id"] for row in self.directory_rows if hd.is_enrolled(row)}
         review = {row["employee_id"] for row in self.rows if row["name"] in self._duplicates_by_label}
         inactive = {row["employee_id"] for row in self.rows if not row.get("active", True)}
         ready = len(enrolled-review-inactive)
         pending = len({row["employee_id"] for row in self.directory_rows
-                       if not hd.face_count(row) and row.get("active", True)} - enrolled)
+                       if not hd.is_enrolled(row) and row.get("active", True)} - enrolled)
         self.stat_enrolled.set_value(ready, "warn" if review else "ok" if ready else "idle")
         self.stat_enrolled.set_hint(f"{len(review)} employees need face-match review" if review
                                     else f"{len(inactive)} inactive · active employees ready for attendance")
@@ -1970,9 +1974,9 @@ class EmployeesScreen(QWidget):
                               "Not in HRM" if row.get("hrm_blocked") else
                               f"HRM {str(row['hrm_status']).title()}" if hrm_left else
                               "Review match" if duplicates else
-                              ("Active" if hd.face_count(row) else "Needs enrollment"),
+                              ("Active" if hd.is_enrolled(row) else "Needs enrollment"),
                               "bad" if not row.get("active", True) or row.get("hrm_blocked") else
-                              "warn" if hrm_left or duplicates or not hd.face_count(row) else "ok")
+                              "warn" if hrm_left or duplicates or not hd.is_enrolled(row) else "ok")
             if row.get("hrm_blocked"):
                 pill.setToolTip(NOT_IN_HRM_TIP)
             if hrm_left:
@@ -2052,7 +2056,7 @@ class EmployeesScreen(QWidget):
         status_layout = QHBoxLayout(status)
         status_layout.setContentsMargins(8, 0, 8, 0)
         active = row.get("hrm_status") == "ACTIVE"
-        ready = active and hd.face_count(row) > 0
+        ready = active and hd.is_enrolled(row)
         pill = StatusPill("Active" if ready else "Not enrolled" if active
                           else f"HRM {str(row.get('hrm_status') or '').title()}",
                           "ok" if ready else "warn" if active else "idle")
@@ -2146,11 +2150,7 @@ class EmployeesScreen(QWidget):
                 problem = hd.hrm_sync.configuration_problem(config)
                 self._notify(problem.replace("send angles to HRM", "load employees from HRM"), "warn")
             return False
-        self._hrm_syncing = True
-        self._hrm_quiet = quiet
-        self.hrm_sync_button.setEnabled(False)
-        self.hrm_sync_button.setText("Syncing…")
-        self._update_hrm_status()
+        self._begin_hrm_sync(quiet)
         path = hd.cache_path(self.settings)
 
         def work():
@@ -2168,15 +2168,100 @@ class EmployeesScreen(QWidget):
         threading.Thread(target=work, name="hrm-directory-sync", daemon=True).start()
         return True
 
+    def _begin_hrm_sync(self, quiet):
+        self._hrm_syncing = True
+        self._hrm_quiet = quiet
+        self.hrm_sync_button.setEnabled(False)
+        self.hrm_sync_button.setText("Syncing…")
+        self.override_action.setEnabled(False)
+        self._update_hrm_status()
+
+    def _end_hrm_sync(self):
+        """Back to idle; True when another sync was asked for meanwhile."""
+        self._hrm_syncing = False
+        self.hrm_sync_button.setEnabled(True)
+        self.hrm_sync_button.setText("Sync from HRM")
+        self.override_action.setEnabled(True)
+        again, self._hrm_sync_again = self._hrm_sync_again, False
+        return again
+
+    def override_from_hrm(self):
+        """Check hrm_employees.json against HRM by employee ID; nothing changes until that's confirmed."""
+        if self._hrm_syncing or not guard(self, "manage_employees", "override the employee list"):
+            return False
+        config = self._hrm_config()
+        if not config.configured:
+            problem = hd.hrm_sync.configuration_problem(config)
+            self._notify(problem.replace("send angles to HRM", "load employees from HRM"), "warn")
+            return False
+        self._begin_hrm_sync(False)
+        path = hd.cache_path(self.settings)
+
+        def work():
+            try:
+                result = hd.preview_override(config, path,
+                                             progress=lambda done, total: self.hrmSyncProgress.emit(done, total))
+            except HRMError as exc:
+                result = exc
+            except Exception as exc:  # Never let a worker die silently.
+                result = HRMError(f"Could not check the employees against HRM: {exc}")
+            try:
+                self.hrmOverrideChecked.emit(result)
+            except RuntimeError:
+                pass  # The screen was closed meanwhile.
+
+        threading.Thread(target=work, name="hrm-directory-override", daemon=True).start()
+        return True
+
+    def _on_override_checked(self, result):
+        if isinstance(result, Exception):
+            self.hrmSyncDone.emit(result)
+            return
+        if result.removed and not self._confirm_override(result):
+            again = self._end_hrm_sync()
+            self._update_hrm_status()
+            self._notify("Nothing changed. hrm_employees.json still holds the same employees.", "ok")
+            if again:
+                self.sync_hrm(quiet=True)
+            return
+        try:
+            directory = hd.apply_override(hd.cache_path(self.settings), result)
+        except OSError as exc:
+            self.hrmSyncDone.emit(HRMError(f"Could not replace hrm_employees.json: {exc}"))
+            return
+        self._hrm_quiet = True   # The summary below says more than a sync's message.
+        self.hrmSyncDone.emit(directory)
+        self._notify(f"Overrode hrm_employees.json from HRM: {result.matched} matched ({result.changed} updated), "
+                     f"{len(result.added)} added, {len(result.removed)} deleted.", "ok")
+
+    def _confirm_override(self, preview):
+        """Show who no longer matches the server, and ask before deleting them."""
+        shown = 15
+        names = [f"• {row.get('employee_name') or '—'} ({row.get('employee_id')})" for row in preview.removed]
+        if len(names) > shown:
+            names[shown:] = [f"…and {len(names) - shown} more"]
+        removed = {str(row.get("employee_id") or "").strip().casefold() for row in preview.removed}
+        enrolled = sum(1 for row in self.rows if str(row.get("employee_id") or "").strip().casefold() in removed)
+        lines = [f"Checked against {preview.directory.source}: {preview.matched} employees matched by employee ID, "
+                 f"{len(preview.added)} are new.", "",
+                 f"{len(preview.removed)} in hrm_employees.json have no active employee with that ID on the server "
+                 "and will be deleted:", *names]
+        if preview.previous_source and preview.previous_source != preview.directory.source:
+            lines += ["", f"The current list came from a different server: {preview.previous_source}."]
+        if enrolled:
+            lines += ["", f"{enrolled} of them have a face enrolled on this computer. The enrollment stays, but "
+                          "they can't record attendance while HRM doesn't list them."]
+        return QMessageBox.warning(
+            self, "Delete employees that don't match HRM?", "\n".join(lines),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+
     def _on_hrm_progress(self, done, total):
         if self._hrm_syncing:
             self.hrm_status_label.setText(f"Loading employees from HRM… {done} of {total}")
 
     def _on_hrm_synced(self, result):
-        self._hrm_syncing = False
-        self.hrm_sync_button.setEnabled(True)
-        self.hrm_sync_button.setText("Sync from HRM")
-        again, self._hrm_sync_again = self._hrm_sync_again, False
+        again = self._end_hrm_sync()
         if isinstance(result, Exception):
             self._hrm_sync_error = str(result)
             self._update_hrm_status()
@@ -2186,9 +2271,14 @@ class EmployeesScreen(QWidget):
                 self.sync_hrm(quiet=True)
             return
         self._hrm_sync_error = ""
+        changed = result.employees != self._hrm_directory.employees
         self._hrm_directory = result
         self._hrm_photo_missing.clear()
-        self.reload(refresh_profile_photos=False)
+        # Checking every minute without a live connection mustn't redraw the table for no change.
+        if changed or not getattr(self, "_hrm_quiet", False):
+            self.reload(refresh_profile_photos=False)
+        else:
+            self._update_hrm_status()
         # The Live Monitor takes the new names and statuses now, not on its next file check.
         try:
             self.engine.reload_if_directory_changed()
@@ -2216,7 +2306,8 @@ class EmployeesScreen(QWidget):
             in_hrm = len(directory.employees)
             local_only = sum(1 for row in self.directory_rows if not row.get("in_hrm"))
             text = (f"{in_hrm} active employees from HRM, synced {directory.age_text()}."
-                    + (" Live updates on." if self._hrm_live else "")
+                    + (" Live updates on." if self._hrm_live else
+                       " Live updates off, checking every minute." if self._hrm_config().configured else "")
                     + (f" {local_only} local enrollments are not active in HRM." if local_only else ""))
         if self._hrm_sync_error and not self._hrm_syncing:
             text += f" Last sync failed: {self._hrm_sync_error}"

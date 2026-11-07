@@ -321,7 +321,7 @@ class FollowsTheNetworkTests(unittest.TestCase):
         window = SimpleNamespace(
             settings=saved(hrm_server_mode=servers.AUTO, hrm_online_url=ONLINE, hrm_office_url=OFFICE,
                            hrm_api_key="k"),
-            hrm_live=Mock(), _note=Mock(), _server_url=url)
+            hrm_live=Mock(), _note=Mock(), _server_url=url, _on_server_changed=Mock())
         return window, app.MainWindow._server_checked
 
     def test_a_new_network_reconnects_the_live_link(self):
@@ -330,6 +330,7 @@ class FollowsTheNetworkTests(unittest.TestCase):
         checked(window, 0, connection)
         self.assertEqual(window._server_url, ONLINE)
         self.assertEqual(window.hrm_live.configure.call_args.args[0].base_url, ONLINE)
+        window._on_server_changed.assert_called_once()
 
     def test_no_answer_or_the_same_network_changes_nothing(self):
         window, checked = self._window(OFFICE)

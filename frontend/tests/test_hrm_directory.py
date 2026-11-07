@@ -122,6 +122,24 @@ class CacheAndMergeTests(unittest.TestCase):
         self.assertEqual(rows["EMP010"]["samples"], 0)
         self.assertEqual(rows["EMP010"]["name"], "")
 
+    def test_enrolled_status_comes_from_hrm_and_falls_back_to_the_local_count(self):
+        directory = hd.Directory(tuple(hd.normalize(r) for r in (
+            api_row("EMP001", "A", "One", faceEnrolled=True),
+            api_row("EMP002", "B", "Two", faceEnrolled=False),
+            api_row("EMP003", "C", "Three"))), 1.0)   # A server or cache without the field.
+        counts = {"emp002": 6, "emp003": 2}
+        rows = {row["employee_id"]: row for row in hd.merge(
+            [{"name": "Two", "employee_id": "EMP002", "employee_name": "Two", "samples": 6, "active": True},
+             {"name": "Guest", "employee_id": "LOCAL1", "employee_name": "Guest", "samples": 1, "active": True}],
+            directory, counts)}
+        self.assertTrue(hd.is_enrolled(rows["EMP001"]))   # No local angles yet; HRM has verified ones.
+        self.assertFalse(hd.is_enrolled(rows["EMP002"]))  # Local angles, but HRM says they don't qualify.
+        self.assertTrue(hd.is_enrolled(rows["EMP003"]))
+        self.assertIsNone(rows["LOCAL1"]["face_enrolled"])
+        self.assertFalse(hd.is_enrolled(rows["LOCAL1"]))
+        needs = hd.Filters(enrollment=hd.NEEDS).apply(list(rows.values()))
+        self.assertEqual({row["employee_id"] for row in needs}, {"EMP002", "LOCAL1"})
+
     def test_filters_and_pages(self):
         directory = hd.Directory(tuple(hd.normalize(api_row(f"E{n:03}", f"P{n:03}", "X",
                                                              department="IT" if n % 2 else "HR",
@@ -139,6 +157,113 @@ class CacheAndMergeTests(unittest.TestCase):
         self.assertEqual((len(shown), number, pages), (10, 2, 3))
         self.assertEqual(hd.paginate([], 3, 25), ([], 0, 1))
         self.assertEqual(hd.options(rows, "department"), ["HR", "IT"])
+
+
+class OverrideTests(unittest.TestCase):
+    def setUp(self):
+        self._root = tempfile.TemporaryDirectory()
+        self.addCleanup(self._root.cleanup)
+        self.path = Path(self._root.name) / hd.CACHE_NAME
+        hd.sync(CONFIG, self.path, opener=FakeHTTP(page(
+            [api_row("EMP001", "A", "One"), api_row("OLD002", "B", "Two"), api_row("emp003", "C", "Three")], 0, 1, 3)),
+            now=100.0)
+
+    def _preview(self, rows, total=None):
+        return hd.preview_override(CONFIG, self.path, opener=FakeHTTP(page(rows, 0, 1, total or len(rows))), now=200.0)
+
+    def _codes(self):
+        return {row["employee_id"] for row in hd.load(self.path).employees}
+
+    def test_the_check_matches_by_employee_id_and_changes_nothing_yet(self):
+        preview = self._preview([api_row("EMP001", "A", "Renamed"), api_row("EMP003", "C", "Three"),
+                                 api_row("NEW004", "D", "Four")])
+        self.assertEqual([row["employee_id"] for row in preview.removed], ["OLD002"])
+        self.assertEqual([row["employee_id"] for row in preview.added], ["NEW004"])
+        self.assertEqual(preview.matched, 2)    # emp003 and EMP003 are the same employee.
+        self.assertEqual(preview.changed, 2)
+        self.assertEqual(self._codes(), {"EMP001", "OLD002", "emp003"})
+        self.assertEqual(hd.load(self.path).fetched_at, 100.0)
+
+    def test_applying_deletes_the_unmatched_and_stores_the_server_list(self):
+        preview = self._preview([api_row("EMP001", "A", "Renamed"), api_row("NEW004", "D", "Four")])
+        stored = hd.apply_override(self.path, preview)
+        self.assertEqual(self._codes(), {"EMP001", "NEW004"})
+        self.assertEqual(stored.fetched_at, 200.0)
+        self.assertEqual(next(r for r in stored.employees if r["employee_id"] == "EMP001")["last_name"], "Renamed")
+
+    def test_an_empty_or_partial_answer_never_deletes_anyone(self):
+        with self.assertRaisesRegex(HRMError, "no active employees"):
+            self._preview([])
+        with self.assertRaisesRegex(HRMError, "only 1 of 3"):
+            self._preview([api_row("EMP001", "A", "One")], total=3)
+        self.assertEqual(self._codes(), {"EMP001", "OLD002", "emp003"})
+
+    def test_a_save_that_did_not_take_is_an_error(self):
+        preview = self._preview([api_row("EMP001", "A", "One")])
+        with patch.object(hd, "_atomic_json"), self.assertRaisesRegex(OSError, "still holds"):
+            hd.apply_override(self.path, preview)
+
+    def test_an_employee_who_left_is_not_a_match(self):
+        preview = self._preview([api_row("EMP001", "A", "One"), api_row("EMP003", "C", "Three"),
+                                 api_row("OLD002", "B", "Two", status="TERMINATED")])
+        self.assertEqual([row["employee_id"] for row in preview.removed], ["OLD002"])
+
+
+class OverrideScreenTests(unittest.TestCase):
+    def setUp(self):
+        from tests.test_dashboard import EmployeesScreenTests, _app
+        self.application = _app()
+        self._root = tempfile.TemporaryDirectory()
+        self.addCleanup(self._root.cleanup)
+        self.screen = EmployeesScreenTests()._screen(self._root.name)
+        self.addCleanup(self.screen.deleteLater)
+        self.path = hd.cache_path(self.screen.settings)
+        hd.sync(CONFIG, self.path, opener=FakeHTTP(page([api_row("EMP001", "A", "One"),
+                                                         api_row("OLD002", "B", "Two")], 0, 1, 2)))
+
+    def _override(self, rows, confirmed):
+        real_check = hd.preview_override
+
+        def check(config, path, progress=None):
+            return real_check(config, path, opener=FakeHTTP(page(rows, 0, 1, len(rows))))
+        with patch.object(self.screen, "_hrm_config", return_value=CONFIG), \
+                patch.object(hd, "preview_override", side_effect=check), \
+                patch.object(self.screen, "_confirm_override", return_value=confirmed) as confirm:
+            self.assertTrue(self.screen.override_from_hrm())
+            deadline = time.monotonic() + 5
+            while self.screen._hrm_syncing and time.monotonic() < deadline:
+                self.application.processEvents()
+                time.sleep(0.005)
+        self.assertFalse(self.screen._hrm_syncing)
+        self.assertTrue(self.screen.override_action.isEnabled())
+        self.assertTrue(self.screen.hrm_sync_button.isEnabled())
+        return confirm
+
+    def _codes(self):
+        return {row["employee_id"] for row in hd.load(self.path).employees}
+
+    def test_saying_no_keeps_the_file(self):
+        confirm = self._override([api_row("EMP001", "A", "One")], False)
+        confirm.assert_called_once()
+        self.assertEqual(self._codes(), {"EMP001", "OLD002"})
+
+    def test_saying_yes_deletes_the_unmatched_and_refreshes_the_table(self):
+        self._override([api_row("EMP001", "A", "One")], True)
+        self.assertEqual(self._codes(), {"EMP001"})
+        listed = {row["employee_id"] for row in self.screen.directory_rows if row.get("in_hrm")}
+        self.assertEqual(listed, {"EMP001"})
+
+    def test_nothing_to_delete_needs_no_confirmation(self):
+        confirm = self._override([api_row("EMP001", "A", "One"), api_row("OLD002", "B", "Two"),
+                                  api_row("NEW003", "C", "Three")], False)
+        confirm.assert_not_called()
+        self.assertEqual(self._codes(), {"EMP001", "OLD002", "NEW003"})
+
+    def test_a_failed_check_leaves_the_file_and_says_why(self):
+        with patch.object(self.screen, "_notify") as notify:
+            self._override([], True)
+        self.assertEqual(self._codes(), {"EMP001", "OLD002"})
+        self.assertIn("no active employees", notify.call_args.args[0])
 
 
 class ScreenTests(unittest.TestCase):

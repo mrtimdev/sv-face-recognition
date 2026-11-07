@@ -10,6 +10,7 @@ No Qt here; the dashboard runs ``sync`` on a worker thread.
 """
 import hashlib
 import json
+import logging
 import math
 import os
 import tempfile
@@ -72,7 +73,8 @@ def normalize(row):
             "cost_center": _text(row.get("costCenterName")),
             "hrm_status": status,
             "employee_type": _text(row.get("employeeType")).upper(),
-            "has_photo": bool(row.get("hasPhoto"))}
+            "has_photo": bool(row.get("hasPhoto")),
+            "face_enrolled": row.get("faceEnrolled")}  # None from a server without this field.
 
 
 def _atomic_json(path, data):
@@ -133,16 +135,80 @@ def load(path):
 
 def sync(config, path, opener=None, progress=None, now=None):
     """Download the active HRM employees and replace the cache. Raises ``hrm_sync.HRMError``."""
+    directory = _fetch_directory(config, opener, progress, now)
+    _write_directory(path, directory)
+    return directory
+
+
+def _fetch_directory(config, opener=None, progress=None, now=None, fetched=None):
+    """The active HRM employees as a Directory. *fetched* collects the rows before they're filtered."""
     problem = hrm_sync.configuration_problem(config)
     if problem:
         raise hrm_sync.HRMError(problem.replace("send angles to HRM", "load employees from HRM"))
-    rows = [normalize(row) for row in hrm_sync.fetch_all_employees(config, opener=opener, progress=progress)]
+    raw = hrm_sync.fetch_all_employees(config, opener=opener, progress=progress)
+    if fetched is not None:
+        fetched.extend(raw)
+    rows = [normalize(row) for row in raw]
     # A row can say ACTIVE and terminated at once; normalize calls that TERMINATED.
     rows = [row for row in rows if row["employee_id"] and row["hrm_status"] == "ACTIVE"]
-    directory = Directory(tuple(rows), now or time.time(), config.base_url.strip().rstrip("/"))
+    return Directory(tuple(rows), now or time.time(), config.base_url.strip().rstrip("/"))
+
+
+def _write_directory(path, directory):
     _atomic_json(path, {"version": CACHE_VERSION, "fetched_at": directory.fetched_at,
                         "source": directory.source, "employees": list(directory.employees)})
-    return directory
+
+
+@dataclass(frozen=True)
+class OverridePreview:
+    """What overriding the cache would do. Nothing is written until ``apply_override``."""
+    directory: Directory
+    removed: tuple = ()      # In the cache, but the server has no active employee with that ID.
+    added: tuple = ()        # On the server, not in the cache yet.
+    matched: int = 0
+    changed: int = 0         # Matched employees whose details differ.
+    previous_source: str = ""
+
+
+def preview_override(config, path, opener=None, progress=None, now=None):
+    """Compare the cache with the server by employee ID, without changing the cache.
+
+    Raises ``hrm_sync.HRMError`` when the server's list can't be trusted, because deleting
+    employees because of an empty or partial answer would stop them recording attendance.
+    """
+    total = []
+
+    def track(done, expected):
+        total[:] = [expected]
+        if progress is not None:
+            progress(done, expected)
+
+    fetched = []
+    directory = _fetch_directory(config, opener, track, now, fetched)
+    if not directory.employees:
+        raise hrm_sync.HRMError("HRM returned no active employees, so hrm_employees.json was left unchanged.")
+    if total and len(fetched) < total[0]:
+        raise hrm_sync.HRMError(f"HRM returned only {len(fetched)} of {total[0]} employees, "
+                                "so hrm_employees.json was left unchanged. Try again.")
+    current = load(path)
+    before = {_key(row.get("employee_id")): row for row in current.employees}
+    after = {_key(row["employee_id"]): row for row in directory.employees}
+    both = before.keys() & after.keys()
+    return OverridePreview(directory,
+                           tuple(row for key, row in before.items() if key not in after),
+                           tuple(row for key, row in after.items() if key not in before),
+                           len(both), sum(1 for key in both if before[key] != after[key]), current.source)
+
+
+def apply_override(path, preview):
+    """Replace the cache with the verified list, then read it back. Raises ``OSError`` if it didn't take."""
+    _write_directory(path, preview.directory)
+    stored = load(path)
+    if (stored.fetched_at != preview.directory.fetched_at
+            or {_key(row.get("employee_id")) for row in stored.employees}
+            != {_key(row["employee_id"]) for row in preview.directory.employees}):
+        raise OSError(f"{path} still holds the old employee list after saving.")
+    return stored
 
 
 def _key(employee_id):
@@ -178,10 +244,17 @@ def live_catalog(config, allow_empty=False):
     """The face catalog attendance must use, for both the dashboard and the terminal.
 
     Connected to HRM it matches only the enrolled angles and applies HRM's names and statuses.
-    A computer that has never reached HRM has no angles to use, so it keeps its local samples.
+    Angles of anyone HRM's list doesn't have are left out: they're from before an override or a
+    server switch, and the next angle sync deletes them. A computer that has never reached HRM
+    has no angles to use, so it keeps its local samples.
     """
-    resolve = resolver(load(cache_path(config)))
-    angle_store = None if resolve is None else angle_templates.load(angle_templates.store_path(config))
+    directory = load(cache_path(config))
+    resolve = resolver(directory)
+    angle_store = None
+    if resolve is not None:
+        listed = {_key(row["employee_id"]) for row in directory.employees}
+        angle_store = {code: angles for code, angles in angle_templates.load(angle_templates.store_path(config)).items()
+                       if _key(code) in listed}
     return FaceCatalog(config.encodings_path, config.employees_path, allow_empty=allow_empty,
                        resolve=resolve, angle_store=angle_store)
 
@@ -196,6 +269,12 @@ def fingerprint(directory):
 def face_count(row):
     """Enrolled angles when matching on angles, else local samples."""
     return row.get("angles", row.get("samples", 0)) or 0
+
+
+def is_enrolled(row):
+    """HRM's employees.face_enrolled; the local count when the server or cache doesn't have it."""
+    stored = row.get("face_enrolled")
+    return stored if isinstance(stored, bool) else face_count(row) > 0
 
 
 def merge(enrollment_rows, directory, angle_counts=None):
@@ -222,6 +301,7 @@ def merge(enrollment_rows, directory, angle_counts=None):
         for field in ("department", "position", "location", "cost_center", "hrm_status", "employee_type",
                       "has_photo", "hrm_id"):
             combined[field] = info.get(field, "") if info else ""
+        combined["face_enrolled"] = info.get("face_enrolled") if info else None
         if info:
             # HRM owns the name, so this table agrees with what the Live Monitor shows.
             for field in ("employee_name", "first_name", "last_name"):
@@ -267,7 +347,7 @@ class Filters:
             wanted = getattr(self, field)
             if wanted and str(row.get(field) or "") != wanted:
                 return False
-        enrolled = face_count(row) > 0
+        enrolled = is_enrolled(row)
         active = row.get("active", True) and not row.get("hrm_blocked")
         return {ANY: True,
                 READY: enrolled and active,
@@ -347,6 +427,34 @@ def fetch_saved_angles(config, settings, employee_id, opener=None):
     for key in known - present:  # Deleted in HRM, so don't keep showing or storing it here.
         (folder / f"{key}.jpg").unlink(missing_ok=True)
     return items, problems
+
+
+def _auto_enrolled_path(settings):
+    return Path(settings.encodings_path).parent / "auto_enrolled_angles.json"
+
+
+def _read_auto_enrolled(settings):
+    try:
+        data = json.loads(_auto_enrolled_path(settings).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def auto_enrolled(settings, employee_id):
+    """{angle: sha256} of this employee's HRM images already added to enrollment."""
+    added = _read_auto_enrolled(settings).get(_key(employee_id))
+    return added if isinstance(added, dict) else {}
+
+
+def mark_auto_enrolled(settings, employee_id, added):
+    """Remember HRM images added to enrollment, so another live update doesn't add them again."""
+    data = _read_auto_enrolled(settings)
+    data[_key(employee_id)] = {**auto_enrolled(settings, employee_id), **added}
+    try:
+        _atomic_json(_auto_enrolled_path(settings), data)
+    except OSError as exc:
+        logging.warning("Could not remember the images added to enrollment: %s", exc)
 
 
 def cached_photo(settings, employee_id):

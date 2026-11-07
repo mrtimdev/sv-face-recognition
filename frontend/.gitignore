@@ -32,6 +32,7 @@ attendance.db-shm
 employees.json
 hrm_employees.json
 hrm_angle_templates.json
+auto_enrolled_angles.json
 hrm_photos/
 captures/
 

@@ -58,6 +58,7 @@ APP_VERSION = f"v{__version__}"
 UPDATE_CHECK_DELAY_MS = 4000
 CATALOG_POLL_MS = 2000  # Mobile API enrollments appear within ~2-4 s.
 SERVER_CHECK_MS = 60_000
+LIVE_FALLBACK_MS = 60_000     # How often to look for HRM changes while the live connection is down.
 SIDEBAR_WIDTH = 244
 DEFAULT_WINDOW_SIZE = (1280, 1000)
 
@@ -444,12 +445,15 @@ class MainWindow(QMainWindow):
         self.hrm_live.anglesVerified.connect(self.screens[2].on_hrm_angles_changed)
         self.hrm_angles = AngleTemplateWorker(lambda: self.settings, self)
         self.hrm_angles.updated.connect(self.screens[2].on_angle_templates_updated)
+        self.hrm_angles.updated.connect(self._on_angle_templates_updated)
+        self.screens[2].hrmSyncDone.connect(self._on_hrm_directory_synced)
         self.hrm_angles.failed.connect(lambda message: self._note(f"Could not update face angles from HRM: {message}"))
         self.hrm_live.employeesChanged.connect(self.hrm_angles.request)
         self.hrm_live.anglesVerified.connect(lambda _code: self.hrm_angles.request())  # A result changes who can match.
         self.hrm_uplink = AttendanceUplink(self.hrm_live, lambda: self.engine.config or self.settings.to_config(), self)
         self.engine.attendanceSaved.connect(lambda _result: self.hrm_uplink.kick())
         self.hrm_live.configure(hrm_config_from_settings(self.settings))
+        self.hrm_angles.request()   # Without the live connection nothing else would ask for them.
         updates_page = self.screens[4].updates_page
         updates_page.installRequested.connect(self._install_update)
         updates_page.updateFound.connect(self._on_update_found)
@@ -470,6 +474,10 @@ class MainWindow(QMainWindow):
         self.server_timer.setInterval(SERVER_CHECK_MS)
         self.server_timer.timeout.connect(self._check_server)
         self.server_timer.start()
+        self.live_fallback_timer = QTimer(self)
+        self.live_fallback_timer.setInterval(LIVE_FALLBACK_MS)
+        self.live_fallback_timer.timeout.connect(self._refresh_without_live)
+        self.live_fallback_timer.start()
 
     # --- state propagation ------------------------------------------------
     def _engine_state(self, running):
@@ -833,7 +841,9 @@ class MainWindow(QMainWindow):
         if self.account_watcher is not None:
             self.account_watcher.settings = settings
         self.hrm_live.configure(hrm_config_from_settings(settings))
-        self._server_url = hrm_config_from_settings(settings).base_url
+        previous_url, self._server_url = self._server_url, hrm_config_from_settings(settings).base_url
+        if self._server_url != previous_url:
+            self._on_server_changed()
         self._check_server()
         self.apply_theme(settings.theme)
         self.telegram.reconfigure(
@@ -906,8 +916,34 @@ class MainWindow(QMainWindow):
             return
         self._server_url = config.base_url
         self.hrm_live.configure(config)
+        self._on_server_changed()
         name = hrm_servers.NETWORK_NAMES.get(connection.network, "server")
         self._note(f"Now connected to SV HRM over: {name} ({hrm_servers.host_of(connection.url)}).")
+
+    def _on_server_changed(self):
+        """Another server has other employees and angles, so don't wait for its live connection."""
+        self.screens[2].request_hrm_refresh()
+        self.hrm_angles.request()
+
+    def _on_hrm_directory_synced(self, result):
+        """A new employee list, so bring the Live Monitor's face angles in line with that server."""
+        if not isinstance(result, Exception):
+            self.hrm_angles.request()
+
+    def _on_angle_templates_updated(self, result):
+        """The Live Monitor matches these angles, so it takes the new ones now, not on its next file check."""
+        if result.changed and self._exit is None and not self._exit_done:
+            self.engine.reload_catalog()
+        if not self.hrm_live.connected:  # No live event told the open screens about these.
+            for code in result.changed_codes:
+                self.screens[6].on_hrm_angles_changed(code)
+                self.screens[2].on_hrm_angles_changed(code)
+
+    def _refresh_without_live(self):
+        """A proxy can block the live connection for good, and then only this finds HRM's changes.
+        A finished sync goes on to update the angles."""
+        if not self.hrm_live.connected:
+            self.screens[2].request_hrm_refresh()
 
     def _note(self, message):
         logging.info("dashboard: %s", message)

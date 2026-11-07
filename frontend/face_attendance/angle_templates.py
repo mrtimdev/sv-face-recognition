@@ -29,6 +29,7 @@ class SyncResult:
     employees: int
     changed: bool
     problems: tuple = ()
+    changed_codes: tuple = ()    # Employees whose angles or check results differ from before.
 
 
 def store_path(settings):
@@ -318,4 +319,5 @@ def sync(config, path, backend=None, opener=None):
         _save(path, new)
     _report_checks(config, new, rows, opener=opener)
     return SyncResult(sum(1 for angles in new.values() if any(vector_of(e) is not None for e in angles.values())),
-                      changed, tuple(problems))
+                      changed, tuple(problems),
+                      tuple(sorted(code for code in old.keys() | new.keys() if old.get(code) != new.get(code))))

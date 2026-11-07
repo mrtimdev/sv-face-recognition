@@ -32,7 +32,7 @@ from ...hrm_sync import configuration_problem as hrm_configuration_problem
 from ...hrm_sync import upload_angle, upload_profile_photo
 from ...enrollment_photos import portrait_path, sample_photo_map
 from ...storage import read_image
-from ..access import guard
+from ..access import access_for, guard
 from ..angle_image import MARK_MATCHED, MARK_WARNING, MATCHED_COLOR, AngleImage, ScoreBar
 from ..bridge import to_pixmap
 from ..icons import apply_button_icon
@@ -212,6 +212,7 @@ class AngleTile(QFrame):
         row = QHBoxLayout()
         self.include = QCheckBox("Use")
         self.include.setToolTip("Include this image when adding to enrollment")
+        self.include.clicked.connect(lambda checked: setattr(self, "opted_out", not checked))
         self.retry = QPushButton("Redo")
         self.retry.setToolTip("Generate this angle again")
         self.retry.clicked.connect(lambda: self.regenerate.emit(self.angle.key))
@@ -243,10 +244,12 @@ class AngleTile(QFrame):
         self.status.setText(status)
         self.status.setToolTip("")
         self.include.setChecked(include_enabled)
+        self.opted_out = False
         self.set_check(check)
 
     def reset(self):
         self.path = None
+        self.sha256 = None
         self.hrm_sent = False
         self.from_hrm = False
         self._show("—", "Waiting")
@@ -285,13 +288,19 @@ class AngleTile(QFrame):
                                    Qt.TransformationMode.SmoothTransformation)
         self.image.setPixmap(pixmap)
 
-    def set_saved(self, path, version=None, check=None):
-        """Show an image already stored in HRM. Adding it to enrollment stays a deliberate choice."""
+    def set_saved(self, path, version=None, check=None, sha256=None):
+        """Show an image already stored in HRM, ticked for enrollment unless its check flagged it.
+        An untick stays while the image is the same, because live updates reload it often."""
+        same_image = (self.hrm_sent and not self.from_hrm) or (bool(sha256) and sha256 == self.sha256)
+        opted_out = self.opted_out and same_image
         self.set_result(path, check)
         if self.path is None:
             return
         self.hrm_sent = self.from_hrm = True
-        self.include.setChecked(False)
+        self.sha256 = sha256
+        if opted_out:
+            self.opted_out = True
+            self.include.setChecked(False)
         self.status.setText(f"Saved in HRM · v{version}" if version else "Saved in HRM")
 
 
@@ -313,6 +322,8 @@ class AIAnglesScreen(QWidget):
         self._saved_dir = None
         self._angles_loading = None
         self._angles_again = False
+        self._auto_enroll = False    # A live update arrived; add what it verified once it has loaded.
+        self._enroll_added = None    # (employee ID, {angle: sha256}) of the HRM images being enrolled.
         self._worker = None
         self._hrm_worker = None
         self._saving = False
@@ -590,6 +601,9 @@ class AIAnglesScreen(QWidget):
             self._photo_again = False
             self._refresh_profile_photo()
             self._load_saved_angles()
+        if self._angles_again and not busy and self._angles_loading is None:
+            self._angles_again = False
+            self._load_saved_angles()
 
     def _show_match_summary(self):
         """How much of this person is verified, and what that means for the Live Monitor."""
@@ -702,6 +716,7 @@ class AIAnglesScreen(QWidget):
         self._update_buttons()
 
     def _employee_changed(self, *_):
+        self._auto_enroll = False
         self._set_photo_status("")
         self._clear_results()
         self._set_source(None)
@@ -815,6 +830,7 @@ class AIAnglesScreen(QWidget):
             self._set_source(None)
             self._use_local_photo(row, False, f"{row['employee_name']} has no profile photo in SV HRM.")
         self._update_buttons()
+        self._auto_add_to_enrollment()  # A first enrollment may have been waiting for this photo.
 
     def _choose_photo(self):
         path, _ = QFileDialog.getOpenFileName(self, "Choose a photo", str(Path.home()), PHOTO_FILTER)
@@ -1125,10 +1141,10 @@ class AIAnglesScreen(QWidget):
             items, problems = result
             for index, item in enumerate(items):
                 tile = self.tiles.get(item["key"])
-                # Never replace a newly generated image; HRM's copy may be older.
-                if tile is not None and (not tile.path or tile.from_hrm):
+                # Never replace a new image HRM doesn't have yet; its copy may be older.
+                if tile is not None and (not tile.path or tile.from_hrm or tile.hrm_sent):
                     tile.image.next_delay_ms = index * STAGGER_MS
-                    tile.set_saved(item["path"], item.get("version"), item.get("check"))
+                    tile.set_saved(item["path"], item.get("version"), item.get("check"), item.get("sha256"))
             present = {item["key"] for item in items}
             for key, tile in self.tiles.items():
                 if tile.from_hrm and key not in present:  # Deleted in HRM.
@@ -1138,18 +1154,19 @@ class AIAnglesScreen(QWidget):
             if problems:
                 self.toast.show_message(f"{len(problems)} saved angle(s) couldn't be loaded from HRM.", "warn")
         self._update_buttons()
-        if finished and self._angles_again:
-            self._angles_again = False
-            self._load_saved_angles()
+        if finished and not isinstance(result, Exception):
+            self._auto_add_to_enrollment()
 
     def on_hrm_angles_changed(self, code):
-        """HRM says this employee's angles changed; refresh the tiles if they're on screen."""
+        """HRM says this employee's angles changed; refresh the tiles if they're on screen, and add
+        whatever that verified to enrollment."""
         row = self._current_employee() if self.person_stack.currentIndex() == EXISTING else None
         if not row or str(row.get("employee_id") or "").casefold() != str(code).casefold():
             return
-        if self._angles_loading == row["employee_id"]:
+        self._auto_enroll = True
+        if self._angles_loading is not None or self.busy or self._saving:
             self._angles_again = True
-        elif not self.busy and not self._saving:
+        else:
             self._load_saved_angles()
 
     def on_hrm_photo_changed(self, code):
@@ -1258,11 +1275,53 @@ class AIAnglesScreen(QWidget):
         # A first enrollment starts from their real photo; AI images are checked against it.
         if first_enrollment:
             images.insert(0, self.source)
+        saved = {key: tile.sha256 for key, tile in self.tiles.items()
+                 if tile.from_hrm and tile.sha256 and tile.path in paths}
+        self._submit_enrollment(images, name, employee_id, saved,
+                                *((first_name, last_name) if first_enrollment else ("", "")))
+
+    def _submit_enrollment(self, images, name, employee_id, saved, first_name="", last_name=""):
         self._saving = True
+        self._enroll_added = (employee_id, saved)
         self.toast.show_message("Checking and encoding images…", "info")
         self._update_buttons()
-        self.runner.submit(images, name, employee_id, True,
-                           *((first_name, last_name) if first_enrollment else ("", "")))
+        self.runner.submit(images, name, employee_id, True, first_name, last_name)
+
+    def _auto_add_to_enrollment(self):
+        """After a live HRM update, add this employee's newly verified images without asking.
+
+        Only images that passed the face check, with Use ticked, and each one only once. Without a
+        profile photo a first enrollment can't start, so it waits for one.
+        """
+        if not self._auto_enroll or self._angles_loading is not None:
+            return
+        if self.busy or self._saving:
+            self._angles_again = True
+            return
+        row = self._current_employee() if self.person_stack.currentIndex() == EXISTING else None
+        first_enrollment = bool(row) and not row.get("enrolled", True)
+        if row and first_enrollment and self.source is None and not self._uploaded:
+            return
+        self._auto_enroll = False
+        access = access_for(self)
+        if (not row or row.get("hrm_status") not in (None, "", "ACTIVE")
+                or (first_enrollment and self._uploaded)
+                or (access is not None and not access.allows("manage_employees"))):
+            return
+        code = row["employee_id"]
+        added = {} if first_enrollment else hd.auto_enrolled(self.settings, code)
+        tiles = {key: tile for key, tile in self.tiles.items()
+                 if tile.from_hrm and tile.path and tile.sha256 and tile.include.isChecked()
+                 and tile.check == angle_checks.MATCHED and added.get(key) != tile.sha256}
+        images = [image for image in (read_image(tile.path) for tile in tiles.values()) if image is not None]
+        if not images:
+            return
+        names = ("", "")
+        if first_enrollment:
+            images.insert(0, self.source)
+            names = (row.get("first_name", ""), row.get("last_name", ""))
+        self._submit_enrollment(images, self._row_label(row), code,
+                                {key: tile.sha256 for key, tile in tiles.items()}, *names)
 
     def _matches_existing(self, name, employee_id):
         for index in range(self.employee_combo.count()):
@@ -1273,6 +1332,10 @@ class AIAnglesScreen(QWidget):
 
     def _on_enrolled(self, outcome):
         self._saving = False
+        added, self._enroll_added = self._enroll_added, None
+        # A rejected image would be rejected again, so only a failure to save is worth retrying.
+        if added and added[1] and outcome.status != "error":
+            hd.mark_auto_enrolled(self.settings, *added)
         if outcome.ok:
             self._reload_employees()
             self.engine.reload_catalog()
