@@ -98,6 +98,14 @@ class VersionTests(unittest.TestCase):
         self.assertIn('"version.py"', spec)
         self.assertNotRegex(spec, r'(?m)^VERSION = "\d')
 
+    def test_draft_release_is_verified_by_the_upload_steps_release_id(self):
+        workflow = (ROOT.parent / ".github" / "workflows" / "build-release.yml").read_text(encoding="utf-8")
+        self.assertIn('id: draft_release', workflow)
+        self.assertIn('RELEASE_ID: ${{ steps.draft_release.outputs.id }}', workflow)
+        self.assertIn('github.rest.repos.getRelease({', workflow)
+        self.assertIn('release_id: releaseId', workflow)
+        self.assertNotIn('getReleaseByTag(', workflow)
+
 
 class ReleaseCheckTests(unittest.TestCase):
     def test_latest_release_and_platform_assets(self):

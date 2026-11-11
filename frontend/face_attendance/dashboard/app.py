@@ -870,7 +870,9 @@ class MainWindow(QMainWindow):
         self.access.theme = theme
         application = QApplication.instance()
         if application is not None:
-            application.setStyleSheet(stylesheet(theme))
+            style = stylesheet(theme)
+            if application.styleSheet() != style:
+                application.setStyleSheet(style)
         for screen in getattr(self, "screens", []):
             setter = getattr(screen, "set_theme", None)
             if callable(setter):

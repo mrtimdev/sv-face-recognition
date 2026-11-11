@@ -142,6 +142,7 @@ jobs:
           path: artifacts
 
       - name: Upload both installers to a draft release
+        id: draft_release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
@@ -153,13 +154,22 @@ jobs:
 
       - name: Verify installers and publish release
         uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ steps.draft_release.outputs.id }}
         with:
           script: |
             const tag = context.ref.replace('refs/tags/', '');
             const version = tag.replace(/^v/, '');
-            const {data: release} = await github.rest.repos.getReleaseByTag({
-              ...context.repo, tag
+            const releaseId = Number(process.env.RELEASE_ID);
+            if (!Number.isSafeInteger(releaseId) || releaseId <= 0) {
+              throw new Error('Draft upload did not return a valid release ID');
+            }
+            const {data: release} = await github.rest.repos.getRelease({
+              ...context.repo, release_id: releaseId
             });
+            if (release.tag_name !== tag) {
+              throw new Error('Uploaded draft belongs to a different version tag');
+            }
             for (const name of [`SV-Face-ID-${tag}-mac.dmg`, `SV-Face-ID-Setup-${version}.exe`]) {
               const asset = release.assets.find(item => item.name === name);
               if (!asset || asset.state !== 'uploaded' || asset.size <= 0) {

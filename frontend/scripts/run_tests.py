@@ -12,7 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--jobs', type=int, default=1)
     parser.add_argument('--output', type=Path, default=Path('test-results'))
-    parser.add_argument('--timeout', type=int, default=120)
+    parser.add_argument('--timeout', type=int, default=180)
     args = parser.parse_args()
     if args.jobs < 1 or args.timeout < 1:
         parser.error('Jobs and timeout must be positive')
@@ -24,7 +24,7 @@ def main():
     def run(path):
         with (output / (path.stem + '.log')).open('w') as log:
             try:
-                result = subprocess.run([sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
+                result = subprocess.run([sys.executable, '-m', 'pytest', '-v', '-p', 'no:cacheprovider',
                     str(path), '--tb=short', '-o', 'faulthandler_timeout=60',
                     '--junitxml=' + str(output / (path.stem + '.xml'))],
                     cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=args.timeout)

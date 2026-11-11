@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 from PyQt6.QtTest import QTest
+from PyQt6.QtCore import QCoreApplication, QEvent
 
 from tests.test_dashboard import _app, temp_settings
 
@@ -28,6 +29,11 @@ class DetachedPagesTests(unittest.TestCase):
 
     def close_window(self):
         self.window.close()
+        self.application.processEvents()
+        self.window.deleteLater()
+        # Closed widgets otherwise remain in QApplication's global stylesheet
+        # tree until cyclic Python/Qt ownership is collected on the CI runner.
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         self.application.processEvents()
 
     def assert_closed(self, external):
