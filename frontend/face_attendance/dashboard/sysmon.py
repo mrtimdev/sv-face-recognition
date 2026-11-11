@@ -152,9 +152,10 @@ def _take_snapshot(prev_disk_io, prev_net_io, prev_time):
     snap.cpu_percent = psutil.cpu_percent(interval=None)
     snap.cpu_per_core = psutil.cpu_percent(interval=None, percpu=True)
     try:
-        freq = psutil.cpu_freq()
+        read_frequency = getattr(psutil, 'cpu_freq', None)
+        freq = read_frequency() if read_frequency is not None else None
         snap.cpu_freq_mhz = freq.current if freq else 0.0
-    except (OSError, RuntimeError, NotImplementedError, psutil.Error):
+    except (OSError, RuntimeError, NotImplementedError, AttributeError, psutil.Error):
         # Some Apple Silicon/virtualized macOS hosts do not expose CPU frequency.
         # Optional telemetry must not escape QThread.run (PyQt aborts the process).
         pass

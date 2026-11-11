@@ -93,7 +93,7 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(workflow.count("working-directory: frontend"), 2)
         self.assertEqual(workflow.count("path: frontend/dist/"), 2)
         self.assertEqual(workflow.count("scripts/set_version.py \""), 2)
-        self.assertIn('iscc "/DMyAppVersion=$version" scripts\\installer.iss', workflow)
+        self.assertIn('& $iscc "/DMyAppVersion=$version" scripts\\installer.iss', workflow)
         spec = (ROOT / "build.spec").read_text(encoding="utf-8")
         self.assertIn('"version.py"', spec)
         self.assertNotRegex(spec, r'(?m)^VERSION = "\d')

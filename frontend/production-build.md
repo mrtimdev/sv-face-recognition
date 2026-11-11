@@ -41,13 +41,15 @@ old dlib templates require photo migration or re-enrollment (see README).
 
 ## CI/CD (GitHub Actions)
 
-### Build a Windows installer without publishing a release
+### Build both installers without publishing a release
 
 Once the updated workflow is on the repository's default branch, open
 **Actions → Build & Release → Run workflow**. Select the branch containing
 the installer fix (for example, `uniface-version`) and click **Run workflow**.
-This manual run builds Windows only. When it succeeds, download the
-`windows-installer` artifact from the run summary and extract the setup `.exe`.
+Manual runs build a macOS Apple Silicon DMG and a Windows x64 installer.
+Download `macos-dmg` and `windows-installer` from the successful run summary.
+The selected branch keeps its committed application version; a selected version
+tag stamps both installers from that tag.
 
 ### One version, taken from the tag
 
@@ -71,7 +73,17 @@ Push a version tag to automatically build both platforms and create a GitHub Rel
 This triggers `.github/workflows/build-release.yml` which:
 - Builds macOS `.app` and packages it as a `.dmg`
 - Builds Windows `.exe` and creates an Inno Setup installer
-- Creates a GitHub Release with both artifacts attached
+- Uploads both installers to a draft, verifies their exact versioned names and
+  nonzero sizes, then publishes the GitHub Release
+
+Both build jobs run only after the regression suite passes. Dependency and
+packaging failures stop the workflow. The macOS build verifies the app bundle
+version before making the DMG. Release write permission is limited to the
+publishing job. Concurrent runs for the same ref are serialized.
+
+The current macOS artifact targets Apple Silicon (arm64); Windows targets x64.
+Intel Mac and universal macOS artifacts are not produced by this workflow.
+Distribution signing and macOS notarization are not configured.
 
 ## In-app updates
 

@@ -5,7 +5,16 @@ from face_attendance.dashboard import sysmon
 
 
 def test_unavailable_cpu_frequency_does_not_disable_other_metrics():
-    with (patch.object(sysmon.psutil, 'cpu_freq', side_effect=RuntimeError('frequency unavailable')),
+    with (patch.object(sysmon.psutil, 'cpu_freq', side_effect=RuntimeError('frequency unavailable'), create=True),
+          patch.object(sysmon.psutil, 'cpu_percent', return_value=0),
+          patch.object(sysmon.psutil, 'virtual_memory', return_value=SimpleNamespace(used=12, total=32, percent=37.5))):
+        snapshot, _, _ = sysmon._take_snapshot(None, None, 0)
+    assert snapshot.cpu_freq_mhz == 0
+    assert snapshot.ram_used_bytes == 12
+
+
+def test_hosts_without_a_cpu_frequency_api_still_report_other_metrics():
+    with (patch.object(sysmon.psutil, 'cpu_freq', None, create=True),
           patch.object(sysmon.psutil, 'cpu_percent', return_value=0),
           patch.object(sysmon.psutil, 'virtual_memory', return_value=SimpleNamespace(used=12, total=32, percent=37.5))):
         snapshot, _, _ = sysmon._take_snapshot(None, None, 0)
