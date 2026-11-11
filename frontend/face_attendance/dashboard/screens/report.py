@@ -910,7 +910,13 @@ class ReportScreen(QWidget):
         self.cards["presence"].set_value(f"{summary['duration'] / 60:.1f}m")
 
         self.page_info.setText(f"Page {self.page + 1} of {pages}  •  {self.total} records")
-        self.outbox_label.setText(f"Outbox: {counts['pending']} pending, {counts['synced']} synced")
+        self.outbox_label.setText(
+            f"Outbox: {counts['pending']} pending ({counts['unassigned']} unassigned), "
+            f"{counts['synced']} delivered, {counts['rejected']} rejected, "
+            f"{counts['legacy_resolved']} legacy acknowledgements")
+        self.outbox_label.setToolTip("\n".join(
+            f"{row['event_id']}: {row['delivery_status']} — {row['delivery_reason'] or row['destination'] or 'Destination needs review'}"
+            for row in self.reader.delivery_issues()))
         self.prev_button.setEnabled(self.page > 0)
         self.next_button.setEnabled(self.page + 1 < pages)
         self._update_page_buttons(self.page, pages)

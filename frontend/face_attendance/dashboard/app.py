@@ -56,9 +56,10 @@ from .widgets.user_menu import role_title
 
 APP_VERSION = f"v{__version__}"
 UPDATE_CHECK_DELAY_MS = 4000
-CATALOG_POLL_MS = 2000  # Mobile API enrollments appear within ~2-4 s.
+CATALOG_POLL_MS = 2000  # External catalog changes appear within ~2-4 s.
 SERVER_CHECK_MS = 60_000
 LIVE_FALLBACK_MS = 60_000     # How often to look for HRM changes while the live connection is down.
+SESSION_RENEW_MS = 24 * 60 * 60 * 1000   # Unattended: a remembered sign-in otherwise ends after 30 days.
 SIDEBAR_WIDTH = 244
 DEFAULT_WINDOW_SIZE = (1280, 1000)
 
@@ -451,6 +452,8 @@ class MainWindow(QMainWindow):
         self.hrm_live.employeesChanged.connect(self.hrm_angles.request)
         self.hrm_live.anglesVerified.connect(lambda _code: self.hrm_angles.request())  # A result changes who can match.
         self.hrm_uplink = AttendanceUplink(self.hrm_live, lambda: self.engine.config or self.settings.to_config(), self)
+        self.hrm_uplink.statusChanged.connect(self.screens[0].set_sync_status)
+        self.screens[0].set_sync_status(self.hrm_uplink.status)
         self.engine.attendanceSaved.connect(lambda _result: self.hrm_uplink.kick())
         self.hrm_live.configure(hrm_config_from_settings(self.settings))
         self.hrm_angles.request()   # Without the live connection nothing else would ask for them.
@@ -462,7 +465,7 @@ class MainWindow(QMainWindow):
         self.clock_timer.timeout.connect(self._tick)
         self.clock_timer.start()
         self._tick()
-        # The mobile API runs as its own process and publishes into the same
+        # CLI enrollment runs as its own process and publishes into the same
         # catalog files; pick those enrollments up without a manual restart.
         self.catalog_timer = QTimer(self)
         self.catalog_timer.setInterval(CATALOG_POLL_MS)
@@ -1131,6 +1134,9 @@ class MainWindow(QMainWindow):
 
     def _spawn_replacement(self):
         from PyQt6.QtCore import QProcess
+        from .. import hrm_auth
+        if hrm_auth.unattended():
+            return    # What keeps this app running starts it again, and a second copy would fight it.
         program, arguments = relaunch_command()
         started, _pid = QProcess.startDetached(program, arguments)
         if not started:
@@ -1197,7 +1203,7 @@ def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False):
             from .. import hrm_auth
             from ..hrm_sync import HRMError
             from ..hrm_sync import config_from_settings as hrm_config_from_settings
-            from ..users import clear_session, load_session, save_session
+            from ..users import clear_session, load_session, renew_session, save_session
             application.setStyleSheet(stylesheet(settings.theme))
             if run_setup:
                 wizard = SetupWizard(settings, theme=settings.theme, version=APP_VERSION)
@@ -1217,6 +1223,10 @@ def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False):
                 except HRMError as exc:
                     logging.warning("Could not restore the remembered session: %s", exc)
                     notice = str(exc)
+                    # Attendance must come back after a restart with no internet. Should HRM have
+                    # ended this account meanwhile, the account watcher signs out once it answers.
+                    if hrm_auth.unattended():
+                        current_user = hrm_auth.remembered_user(session)
                 else:
                     if current_user is None:
                         clear_session()
@@ -1240,6 +1250,12 @@ def run_dashboard(settings_path=None, autostart=False, argv=None, setup=False):
             errors.errorRaised.connect(window.on_unhandled_error)
             window.show()
             _show_main.window = window
+            if hrm_auth.unattended():
+                renew = QTimer(application)
+                renew.setInterval(SESSION_RENEW_MS)
+                renew.timeout.connect(lambda: renew_session(_show_main.window.current_user))
+                renew.start()
+                renew_session(current_user)
 
         application.setQuitOnLastWindowClosed(False)
         splash = SplashScreen(settings=settings)

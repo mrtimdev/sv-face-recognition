@@ -1,4 +1,4 @@
-"""First-run setup wizard: welcome, database, MySQL, administrator, done."""
+"""First-run setup wizard: welcome, database, MySQL, HRM connection, done."""
 from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
@@ -7,13 +7,13 @@ from PyQt6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, 
 from .. import first_run, hrm_servers
 from ..hrm_sync import HRMConfig, HRMError
 from ..hrm_sync import _base_url as hrm_base_url
-from ..users import DEFAULT_ADMIN_USERNAME, UserRepository
+from ..users import UserRepository
 from .login import AuthHero
 from .threads import start_detached
 from .widgets import StatusPill
 from .widgets.form import ChoiceCard, FormField, TextInput
 
-STEPS = ("Welcome", "Database", "MySQL", "Administrator", "Finish")
+STEPS = ("Welcome", "Database", "MySQL", "SV HRM", "Finish")
 WELCOME, DATABASE, MYSQL, ADMIN, FINISH = range(5)
 
 
@@ -228,27 +228,8 @@ class SetupWizard(QDialog):
         return page
 
     def _build_admin(self):
-        page, layout = self._page("Administrator", "Create the administrator",
-                                  "This local account is for the mobile API.")
-        self.admin_username = TextInput("Username", icon="user", theme=self._theme)
-        self.admin_username.setText(DEFAULT_ADMIN_USERNAME)
-        self.admin_password = TextInput("Password", password=True, theme=self._theme)
-        self.admin_confirm = TextInput("Repeat password", password=True, theme=self._theme)
-        self.admin_fields = QWidget()
-        self.admin_fields.setObjectName("plain")
-        fields = QVBoxLayout(self.admin_fields)
-        fields.setContentsMargins(0, 0, 0, 0)
-        fields.setSpacing(10)
-        fields.addWidget(FormField("Username", self.admin_username, theme=self._theme))
-        fields.addWidget(FormField("Password", self.admin_password, optional=True, theme=self._theme,
-                                   help_text="Leave empty to use the default release password."))
-        fields.addWidget(FormField("Repeat password", self.admin_confirm, optional=True, theme=self._theme))
-        layout.addWidget(self.admin_fields)
-        self.accounts_note = QLabel("This database already has local accounts for the mobile API; "
-                                    "no new account is needed.")
-        self.accounts_note.setObjectName("authSubtitle")
-        self.accounts_note.setWordWrap(True)
-        layout.addWidget(self.accounts_note)
+        page, layout = self._page("SV HRM", "Connect your HRM server",
+                                  "Sign in to the dashboard with your SV HRM account.")
         self.hrm_address = TextInput("https://hrm.example.com", theme=self._theme)
         self.hrm_address.setText(getattr(self.settings, "hrm_api_url", "") or "")
         layout.addWidget(FormField("SV HRM address", self.hrm_address, optional=True, theme=self._theme,
@@ -287,9 +268,6 @@ class SetupWizard(QDialog):
                                   FINISH: "Open SV Face ID"}.get(index, "Continue"))
         if index == MYSQL:
             self._check_mysql()
-        elif index == ADMIN:
-            self.admin_fields.setVisible(not self._has_accounts)
-            self.accounts_note.setVisible(self._has_accounts)
 
     def _back(self):
         index = self.pages.currentIndex()
@@ -372,10 +350,6 @@ class SetupWizard(QDialog):
     # --- finishing -----------------------------------------------------------
 
     def _finish_setup(self):
-        password = self.admin_password.text()
-        if not self._has_accounts and password != self.admin_confirm.text():
-            self.error.setText("The two passwords don't match.")
-            return
         address = self.hrm_address.text().strip()
         try:
             if address:
@@ -386,8 +360,6 @@ class SetupWizard(QDialog):
         server = hrm_servers.single_address_settings(address) if address else {"hrm_api_url": ""}
         self.settings.update({**self._values, **server})
         try:
-            if not self._has_accounts:
-                first_run.create_administrator(self.settings, self.admin_username.text(), password)
             self.settings.save()
         except Exception as exc:
             self.error.setText(str(exc))
@@ -396,10 +368,5 @@ class SetupWizard(QDialog):
             location = f"Data is stored in the MySQL database “{self.settings.db_name}” on this computer."
         else:
             location = "Your database is unchanged." if self._existing else "Data is stored in the built-in database."
-        account = ("your existing accounts" if self._has_accounts
-                   else f"the account “{self.admin_username.text().strip()}”")
-        self.summary.setText(f"{location} The mobile API signs in with {account}. "
-                             "The dashboard signs in with your SV HRM account.")
-        self.admin_password.clear()
-        self.admin_confirm.clear()
+        self.summary.setText(f"{location} Sign in with your SV HRM account.")
         self._go(FINISH)

@@ -83,6 +83,16 @@ class AttendanceRepository:
                     timestamp TEXT NOT NULL, action TEXT NOT NULL,
                     detail TEXT, actor TEXT DEFAULT 'system')""")
 
+            columns = conn.get_columns("attendance_outbox")
+            for name, kind in (("destination", "TEXT"), ("delivery_status", "VARCHAR(32)"),
+                               ("delivery_reason", "TEXT"), ("resolved_at", "TEXT")):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE attendance_outbox ADD COLUMN {name} {kind}")
+            # Historical acknowledgements did not distinguish rejection from delivery.
+            conn.execute("UPDATE attendance_outbox SET delivery_status='legacy_resolved' "
+                         "WHERE delivery_status IS NULL AND synced_at IS NOT NULL")
+            conn.execute("UPDATE attendance_outbox SET delivery_status='pending' "
+                         "WHERE delivery_status IS NULL AND synced_at IS NULL")
             self._create_indexes(conn)
             self._backfill_legacy(conn)
 
@@ -202,7 +212,17 @@ class AttendanceRepository:
                 last = conn.execute(
                     "SELECT last_capture_epoch FROM attendance_cooldowns WHERE employee_id=?",
                     (job.employee_id,)).fetchone()
-                if last and now - last[0] < self.cooldown_sec:
+                if job.from_spool:
+                    # Backlog may contain visits hours apart committed seconds
+                    # apart after an outage. Deduplicate by capture time, not replay time.
+                    nearby = conn.execute(
+                        "SELECT recorded_at_epoch FROM attendance WHERE employee_id=? "
+                        "AND captured_at_epoch > ? AND captured_at_epoch < ? LIMIT 1",
+                        (job.employee_id, job.captured_at - self.cooldown_sec,
+                         job.captured_at + self.cooldown_sec)).fetchone()
+                    if nearby:
+                        return SaveResult(job, "duplicate", nearby[0])
+                elif last and now - last[0] < self.cooldown_sec:
                     return SaveResult(job, "duplicate", last[0])
                 snapshot = snapshots.save(job)
                 conn.execute(
@@ -218,8 +238,10 @@ class AttendanceRepository:
                            "verifiedPresenceSeconds": round(job.duration, 2),
                            "matchDistance": job.match_distance, "liveScore": job.live_score}
                 conn.execute(
-                    "INSERT INTO attendance_outbox(event_id, payload, created_at) VALUES (?, ?, ?)",
-                    (job.event_id, json.dumps(payload, ensure_ascii=False), utc_iso(now)))
+                    "INSERT INTO attendance_outbox(event_id, payload, created_at, destination, delivery_status) "
+                    "VALUES (?, ?, ?, ?, 'pending')",
+                    (job.event_id, json.dumps(payload, ensure_ascii=False), utc_iso(now),
+                     job.destination if job.destination is not None else getattr(self.config, "hrm_destination", "")))
             return SaveResult(job, "saved", now, snapshot)
         except Exception as exc:
             if snapshot:
@@ -229,16 +251,35 @@ class AttendanceRepository:
                     pass
             return SaveResult(job, "error", error=str(exc))
 
-    def pending_outbox(self, limit=100):
+    def pending_outbox(self, limit=100, destination=None):
+        clause, params = "", []
+        if destination is not None:
+            if not destination:
+                return []  # Never upload unassigned/legacy events implicitly.
+            clause = " AND destination=?"
+            params.append(destination)
         return [json.loads(row[0]) for row in self.connection.execute(
-            "SELECT payload FROM attendance_outbox WHERE synced_at IS NULL "
-            "ORDER BY created_at LIMIT ?", (limit,))]
+            "SELECT payload FROM attendance_outbox WHERE delivery_status='pending'" + clause +
+            " ORDER BY created_at LIMIT ?", (*params, limit))]
 
     def mark_synced(self, event_id):
+        self.resolve_delivery(event_id, "saved")
+
+    def resolve_delivery(self, event_id, result, destination=None, reason=""):
+        if result not in ("saved", "duplicate", "rejected"):
+            raise ValueError("Unknown delivery outcome")
+        status = "rejected" if result == "rejected" else "delivered"
+        clause, params = "", []
+        if destination is not None:
+            clause = " AND destination=?"
+            params.append(destination)
         with self.connection:
             self.connection.execute(
-                "UPDATE attendance_outbox SET synced_at=? WHERE event_id=?",
-                (utc_iso(self.clock()), event_id))
+                "UPDATE attendance_outbox SET synced_at=?, delivery_status=?, delivery_reason=?, resolved_at=? "
+                "WHERE event_id=? AND delivery_status='pending'" + clause,
+                (None if status == "rejected" else utc_iso(self.clock()), status,
+                 reason or ("HRM rejected this event" if status == "rejected" else result),
+                 utc_iso(self.clock()), event_id, *params))
 
     def audit(self, action, detail="", actor="system"):
         try:

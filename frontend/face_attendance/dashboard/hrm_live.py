@@ -94,6 +94,16 @@ class HrmLiveLink(QObject):
     def connected(self):
         return self._connected
 
+    @property
+    def destination(self):
+        from ..destination import destination_id
+        if not self._url:
+            return ""
+        parts = urllib.parse.urlsplit(self._url)
+        return destination_id(urllib.parse.urlunsplit((
+            {"ws": "http", "wss": "https"}[parts.scheme], parts.netloc,
+            parts.path.removesuffix(EVENTS_PATH), "", "")))
+
     def configure(self, config):
         """Connect with this HRM address and key; a change replaces the connection."""
         url = events_url(config.base_url) if config.configured else ""

@@ -1,7 +1,12 @@
 # Face ID attendance terminal
 
 This desktop app lives in `frontend/`; run every command below from that folder.
-The SV HRM server is a separate Git repository in `backend/`.
+The SV HRM server is the separate `svhrm` repository (locally at
+`/Users/timdev/Desktop/works/SpringBoot/svhrm`).
+
+See [production hardening and migration](HARDENING.md) before upgrading.
+The Flutter enrollment integration has been removed; this repository provides
+the desktop attendance application and its SV HRM synchronization.
 
 For unattended macOS operation, see [OPERATIONS.md](OPERATIONS.md) and the
 [security/reliability review](SECURITY_REVIEW.md). Hardware soak acceptance is
@@ -272,10 +277,9 @@ reported in the save result and do not get saved as enrollment photos.
 Detection and encoding share one RGB image and one model lock, avoiding a second
 YuNet pass. Service commits within one Python process are serialized and re-read
 the latest catalog. If catalog publication fails, the prior employee mapping is
-restored and newly created sample photos are removed. Mapping and catalog remain
-separate filesystem files: this is recovery from reported write failures, not a
-power-loss transaction or coordination between separate API/CLI/dashboard
-processes. Keep a single enrollment writer active and back up the files together.
+restored and newly created sample photos are removed. Mapping and catalog remain separate filesystem files, protected by a durable
+undo journal and cross-process lock. Cooperating readers recover interrupted
+publication before using the catalog. Back up the files together; see HARDENING.md.
 
 An optional local `employees.json` maps enrollment labels to permanent HRM IDs
 and display names; see [employees.example.json](employees.example.json):
@@ -315,9 +319,8 @@ history is retained. Restart the dashboard after updating the code to load this
 behavior.
 
 Imports apply the same cross-employee check, including conflicts between entries
-inside one archive. Mobile captures name the conflicting employee; completion
-checks the current published catalog again before saving, so old pending
-sessions cannot bypass the duplicate gate. These checks compare face templates;
+inside one archive. Enrollment rechecks the current published catalog under
+a cross-process lock before saving. These checks compare face templates;
 deployment threshold calibration and human review remain necessary for close
 matches.
 
@@ -457,13 +460,24 @@ A committed outbox event contains:
 }
 ```
 
-`AttendanceRepository.pending_outbox(limit)` reads unsent events and
-`mark_synced(event_id)` acknowledges one after your backend confirms receipt.
-Use a separate synchronizer process/connection, an idempotent Spring Boot
-endpoint keyed by `eventId`, and upload the local image separately if needed.
-No endpoint, authentication scheme or network requests are invented here.
-Local attendance continues independently of future network availability.
-Historical pre-refactor rows are not automatically queued for upload.
+Live Monitor processes faces and liveness locally. With SQLite selected, attendance
+and its outbox are saved on this device before backend delivery. Capture staging,
+DB/photo persistence and network upload run on separate background workers.
+
+The dashboard triggers upload after every successful local save, checks pending
+events every **5 seconds**, and resumes immediately on HRM reconnect. Missing
+acknowledgements retry after **30 seconds**, using the same event ID. Photos are
+resized to a maximum side of 480 pixels for upload; live video is not streamed
+to HRM. The backend must acknowledge an event before it is marked delivered.
+Live Monitor's System Status shows the backend state separately from local
+recording. No hourly/nightly schedule is configured or required.
+
+Uploads continue while the dashboard is open, including when monitoring is
+paused/stopped; quitting pauses sync until reopening. The standalone terminal
+entry point does not run this dashboard uploader. Rejected, unassigned, and
+legacy events remain reviewable in Attendance Report. See [HARDENING.md](HARDENING.md)
+for destination binding and recovery details. Historical pre-refactor attendance
+rows are not automatically queued for upload.
 
 `attendance_log.csv` remains a throttled **recognition observation log**.
 It is not proof that attendance committed; SQLite is the attendance record.

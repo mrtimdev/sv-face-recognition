@@ -169,6 +169,45 @@ class RememberedSessionTests(unittest.TestCase):
         with self.assertRaises(HRMError):
             hrm_auth.restore(HRMConfig(base_url="http://127.0.0.1:9"), self._session(jwt()))
 
+    def test_an_unattended_restart_can_use_a_remembered_session_without_hrm(self):
+        user = hrm_auth.remembered_user(self._session(jwt()))
+        self.assertEqual(user.username, "dara")
+        self.assertEqual(self.hrm.check_auth, [], "this is the path for when HRM can't answer")
+        for session in (self._session(jwt(expires_in=-5)), self._session(jwt(sub="other")), self._session("")):
+            self.assertIsNone(hrm_auth.remembered_user(session))
+
+    def test_unattended_is_off_unless_the_deployment_turns_it_on(self):
+        with patch.dict(os.environ, clear=False):
+            os.environ.pop("SV_FACE_UNATTENDED", None)
+            self.assertFalse(hrm_auth.unattended())
+            os.environ["SV_FACE_UNATTENDED"] = "1"
+            self.assertTrue(hrm_auth.unattended())
+
+    def test_relaunch_leaves_the_restart_to_the_supervisor_when_unattended(self):
+        from PyQt6.QtCore import QProcess
+        from face_attendance.dashboard.app import MainWindow
+        with patch.object(QProcess, "startDetached", return_value=(True, 1)) as start:
+            with patch.dict(os.environ, {"SV_FACE_UNATTENDED": "1"}):
+                MainWindow._spawn_replacement(None)
+            start.assert_not_called()
+            with patch.dict(os.environ, {"SV_FACE_UNATTENDED": ""}):
+                MainWindow._spawn_replacement(None)
+            start.assert_called_once()
+
+    def test_renewing_restarts_the_time_limit_only_for_the_remembered_account(self):
+        from face_attendance import users
+        from face_attendance.users import User, load_session, renew_session, save_session
+        dara = User("hrm:7", "dara", "Dara", "", "", "", "admin", hrm_token=jwt())
+        with tempfile.TemporaryDirectory() as directory, patch.object(users, "SESSION_PATH", Path(directory) / "s"):
+            renew_session(dara)
+            self.assertIsNone(load_session(), "signed out stays signed out")
+            save_session(dara)
+            before = load_session()
+            renew_session(replace(dara, username="sok"))
+            self.assertEqual(load_session().token, before.token)
+            renew_session(dara)
+            self.assertNotEqual(load_session().token, before.token)
+
     def test_session_file_keeps_the_token_private(self):
         from face_attendance import users
         from face_attendance.users import User, load_session, save_session

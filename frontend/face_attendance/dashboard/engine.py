@@ -9,10 +9,12 @@ handed to enrollment through ``grab_clean_frame``.
 """
 from datetime import datetime
 import logging
+import os
 from pathlib import Path
 import threading
 import time
 
+import cv2
 import numpy as np
 from PyQt6.QtCore import QObject, Qt, pyqtSignal, pyqtSlot
 
@@ -117,6 +119,11 @@ class AttendanceEngine(QObject):
         """Construct workers for the current settings; may raise for bad input."""
         self._assert_workers_stopped()
         self.config = self.settings.to_config()
+        # Match the terminal runtime: avoid OpenCV creating a competing CPU pool
+        # for every local recognition/model operation.
+        from ..enrollment import FACE_BACKEND_LOCK
+        with FACE_BACKEND_LOCK:
+            cv2.setNumThreads(self.config.opencv_threads)
         # Taken before loading, so a write racing the load is still seen later.
         self._catalog_seen = self._catalog_signature()
         self._catalog_pending = None
@@ -127,7 +134,7 @@ class AttendanceEngine(QObject):
             RecognitionService(self.config, self.catalog, backend=self._backend))
         self.persistence = PersistenceWorker(self.config, self.catalog.employee_map, audio_enabled=False)
         self.tracker = FaceTracker(self.config)
-        self.attendance = AttendanceService(self.config, self.persistence)
+        self.attendance = AttendanceService(self.config, self.persistence, async_staging=True)
         # Qt paints the dashboard-wide flash without altering camera pixels.
         self.renderer = UIRenderer(self.config, capture_effects=False)
 
@@ -157,6 +164,10 @@ class AttendanceEngine(QObject):
             worker = getattr(self, name, None)
             if worker is not None and worker.thread.is_alive():
                 raise RuntimeError(f"The previous {name} worker has not stopped. Restart the application before starting again.")
+        persistence = getattr(self, 'persistence', None)
+        staging = getattr(persistence, 'staging_thread', None)
+        if staging is not None and staging.is_alive():
+            raise RuntimeError('The previous attendance staging worker has not stopped. Restart the application before starting again.')
 
     def start(self):
         if self.running:
@@ -331,7 +342,7 @@ class AttendanceEngine(QObject):
         return cached[1]
 
     def reload_if_catalog_changed(self):
-        """Reload when another process (e.g. the mobile API) rewrote the catalog.
+        """Reload when another process (e.g. CLI enrollment) rewrote the catalog.
 
         Polled from the GUI thread. A change must be seen on two consecutive
         polls, so the dashboard's own writes, which call ``reload_catalog``
@@ -382,6 +393,7 @@ class AttendanceEngine(QObject):
         recognition_error, published, last_liveness_log = "", 0.0, float("-inf")
         frame_budget = 1 / max(1.0, float(cfg.target_fps))
         rendered_at, frames_version = float("-inf"), -1
+        health_at = float('-inf')
         while not self._stop.is_set():
             started = now = time.monotonic()
             wall_time = time.time()
@@ -413,6 +425,10 @@ class AttendanceEngine(QObject):
                 self.recognition.requests.put(RecognitionRequest(packet, self.tracker.hints()))
                 submitted = sequence
             for kind, saved in self.attendance.poll(self.tracker.tracks, now, wall_time):
+                if kind == 'capture':
+                    self.renderer.animations.capture(saved, now)
+                    self.captureTriggered.emit(saved)
+                    continue
                 self.renderer.animations.result(kind, saved, now)
                 if kind == "success":
                     self.attendanceSaved.emit(saved)
@@ -440,6 +456,18 @@ class AttendanceEngine(QObject):
                                      for track in self.tracker.tracks.values()]
                 self._stats = self._statistics(status, preview_fps, recognition_error)
                 updates['stats'] = self._stats
+                health_path = os.environ.get('SV_FACE_HEALTH_FILE')
+                if health_path and now - health_at >= 5:
+                    from ..health import write_health
+                    try:
+                        write_health(health_path, self._stats,
+                                     None if packet is None else max(0, now - packet.captured_at),
+                                     all(worker.thread.is_alive() for worker in
+                                         (self.camera, self.recognition, self.persistence))
+                                     and self.persistence.staging_thread.is_alive())
+                    except OSError:
+                        logging.warning('Could not publish engine health', exc_info=True)
+                    health_at = now
                 if self._stats["liveness_blocked"] and now - last_liveness_log >= 5.0:
                     last_liveness_log = now
                     self.logMessage.emit("Attendance blocked by liveness: " +
@@ -550,6 +578,7 @@ class AttendanceEngine(QObject):
                 "storage_error": self.attendance.storage_error,
                 "recognition_error": recognition_error,
                 "queue": self.persistence.jobs.qsize(),
+                "staging_queue": self.persistence.staging_jobs.qsize(),
                 "queue_max": cfg.persistence_queue_size,
                 "db_path": str(cfg.db_path),
                 "capture_dir": str(cfg.capture_dir),

@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 
 from .channels import LatestValue
@@ -13,6 +14,7 @@ from .audio import SoundPlayer
 from .repository import AttendanceRepository
 from .models import SaveResult
 from .storage import SnapshotService
+from .durable_jobs import DurableJobs
 
 OBSERVATION_LOG_BYTES = 10 * 1024 * 1024
 OBSERVATION_LOG_BACKUPS = 3
@@ -23,28 +25,68 @@ class PersistenceWorker:
         self.config, self.employee_map = config, employee_map
         self.repository_factory = repository_factory
         self.snapshots = snapshots or SnapshotService(config.capture_dir)
-        self.jobs = queue.Queue(maxsize=config.persistence_queue_size)
+        self.jobs = DurableJobs(str(config.db_path) + '.pending.sqlite', config.persistence_queue_size)
         self.observations = queue.Queue(maxsize=32)
         self._audit_queue = queue.Queue(maxsize=64)
         self.results = queue.Queue(maxsize=config.persistence_queue_size + 1)
         self.startup = LatestValue()
         self.stop_event, self.wake = threading.Event(), threading.Event()
         self.thread = threading.Thread(target=self._run, name="persistence", daemon=True)
+        self.staging_jobs = queue.Queue(maxsize=config.persistence_queue_size)
+        self.staging_results = queue.Queue(maxsize=config.persistence_queue_size + 1)
+        self.staging_stop = threading.Event()
+        self.staging_thread = threading.Thread(target=self._stage_run, name="attendance-staging", daemon=True)
         self.sound = None
         self.audio_enabled = audio_enabled
         self.daily_totals = {}
 
     def start(self):
         self.thread.start()
+        self.staging_thread.start()
+
+    def stage(self, job):
+        """Queue evidence for durable staging without blocking the live coordinator.
+
+        This is a pending request. Confirmation follows a successful spool commit,
+        delivered through staging_results; attendance success follows the main DB commit.
+        """
+        if self.staging_stop.is_set() or self.stop_event.is_set():
+            return False
+        try:
+            self.staging_jobs.put_nowait(job)
+            return True
+        except queue.Full:
+            return False
+
+    def _stage_run(self):
+        while not self.staging_stop.is_set() or not self.staging_jobs.empty():
+            try:
+                job = self.staging_jobs.get(timeout=.1)
+            except queue.Empty:
+                continue
+            accepted = self.submit(job)
+            while True:
+                try:
+                    self.staging_results.put((job, accepted), timeout=.1)
+                    break
+                except queue.Full:
+                    if self.staging_stop.is_set():
+                        break  # Durable jobs still finish; UI feedback is no longer needed.
+            self.staging_jobs.task_done()
 
     def submit(self, job):
         if self.stop_event.is_set():
             return False
         try:
+            if job.destination is None:
+                job = replace(job, destination=self.config.hrm_destination)
             self.jobs.put_nowait(job)
             self.wake.set()
             return True
         except queue.Full:
+            return False
+        except Exception:
+            logging.exception('Attendance could not be staged durably')
             return False
 
     def observe(self, event):
@@ -135,15 +177,7 @@ class PersistenceWorker:
                 if repository is None:
                     repository = self._connect_repository()
                     if repository is None:
-                        # Shutdown during an outage: report every accepted job
-                        # as failed instead of silently abandoning pending IDs.
-                        while not self.jobs.empty():
-                            job = self.jobs.get_nowait()
-                            try:
-                                self.results.put_nowait(SaveResult(job, "error", error="Storage unavailable during shutdown"))
-                            except queue.Full:
-                                logging.error("Cannot deliver shutdown failure for %s", job.event_id)
-                            self.jobs.task_done()
+                        logging.warning('Storage unavailable; %d staged events will replay on restart', self.jobs.qsize())
                         break
                     last_checkpoint = last_totals = time.monotonic()
                 self.wake.clear()
@@ -171,7 +205,10 @@ class PersistenceWorker:
                             except queue.Full:
                                 if self.stop_event.is_set():
                                     break
-                        self.jobs.task_done()
+                        if result.outcome == 'error':
+                            self.jobs.retry()
+                        else:
+                            self.jobs.task_done()
                         if result.outcome == "saved":
                             try:
                                 self._alert()
@@ -193,6 +230,7 @@ class PersistenceWorker:
                     except queue.Empty:
                         self.wake.wait(0.1)
                 except Exception as exc:
+                    self.jobs.retry()
                     logging.warning("Storage interrupted; reconnecting: %s", exc)
                     self.daily_totals = {}
                     self.startup.put((None, str(exc)))
@@ -208,10 +246,16 @@ class PersistenceWorker:
                     logging.debug("Audio cleanup failed", exc_info=True)
 
     def close(self):
+        # Finish requested spool commits before asking persistence to drain/stop.
+        self.staging_stop.set()
+        if self.staging_thread.ident is not None:
+            self.staging_thread.join(timeout=10)
+            if self.staging_thread.is_alive():
+                logging.error('Attendance staging did not finish within 10s; restart is blocked until it exits')
         self.stop_event.set()
         self.wake.set()
         if self.thread.ident is not None:
             self.thread.join(timeout=10)
             if self.thread.is_alive():
                 logging.error("Persistence worker did not finish within 10s; "
-                              "%d job(s) may be lost", self.jobs.qsize())
+                              "%d job(s) remain in the durable spool", self.jobs.qsize())

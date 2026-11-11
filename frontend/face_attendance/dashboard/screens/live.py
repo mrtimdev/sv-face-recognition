@@ -428,7 +428,19 @@ class LiveScreen(QWidget):
             row.addWidget(dot)
             card.add(row_frame)
             self._status_rows[key] = (dot, value, icon)
+        self.sync_status_label = QLabel("Backend: waiting for HRM connection")
+        self.sync_status_label.setObjectName("muted")
+        self.sync_status_label.setWordWrap(True)
+        self.sync_status_label.setToolTip(
+            "Face detection, liveness and matching run on this device. "
+            "Attendance sync starts after a local save, retries every 5 seconds, "
+            "and resumes on reconnect. HRM must acknowledge delivery. "
+            "Rejected or unassigned events can be reviewed in Attendance Report.")
+        card.add(self.sync_status_label)
         return card
+
+    def set_sync_status(self, status):
+        self.sync_status_label.setText("Backend: " + status)
 
     def _build_activity_card(self):
         card = Card("Live Activity", "Attendance updates", icon="list", theme=self._theme)
@@ -646,7 +658,9 @@ class LiveScreen(QWidget):
                              else "Not Ready", stats.get("storage_ready", False))
         self._set_status_row("recognition", "Running" if self.engine.running else "Idle",
                              self.engine.running)
-        self._set_status_row("storage", f"{queue}/{queue_max} queued", queue < queue_max)
+        staging = stats.get('staging_queue', 0)
+        self._set_status_row("storage", f"{queue}/{queue_max} queued" +
+                             (f" · {staging} staging" if staging else ""), queue < queue_max)
         self._set_status_row("recording", "Paused" if self.engine.paused else
                              ("Enabled" if self.engine.running else "Off"),
                              self.engine.running and not self.engine.paused)

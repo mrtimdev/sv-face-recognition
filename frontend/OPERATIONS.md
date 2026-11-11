@@ -83,6 +83,9 @@ launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/local.sv-face-id.da
 
 ## Disk, evidence, and backup privacy
 
+See [HARDENING.md](HARDENING.md) for explicit backup, verification, delivery
+reconciliation and dry-run evidence-retention commands.
+
 Optional plate OCR now runs in a separate environment, keeping one OpenCV wheel
 in each environment. The desktop uses regular OpenCV; the OCR child uses headless
 OpenCV. From the checkout:
@@ -112,7 +115,7 @@ Attendance evidence and plate captures are sensitive personal data. In a source 
 - Watch free disk space and daily growth. Use `df -h .` and `du -sh captures plate_captures enrollment_photos logs` from the checkout for default directories that exist. Keep substantial operating headroom; the face snapshot service's 100 MiB low-space check is a last-resort safeguard, not a capacity plan or a plate-capture safeguard.
 - There is no automatic age-based retention for plate images or `captures.jsonl`. The UI keeping only 200 history rows does not delete evidence. Face evidence, logs, and database growth also require an explicit retention policy. No production data was purged by the hardening work.
 - Decide the approved evidence period, backup period, and deletion responsibility before deployment. Face evidence can have a portrait plus `captures/context` image and metadata companions. Preserve/delete related files coherently. Plate records reference full-frame and crop images; removing only images leaves broken history references. Do not use an unreviewed recursive deletion command against production evidence.
-- Encrypt backup storage and restrict access to the operator/administrator group. Include enrollment templates, `employees.json`, enrollment photos, configured attendance database, and required evidence. Treat settings, `.session`, `.mobile_api.key`, camera URLs, and database credentials as secrets. Do not attach them to support tickets or copy them to a public repository. Consider whether session/key material should be excluded from ordinary backups and reprovisioned on restore.
+- Encrypt backup storage and restrict access to the operator/administrator group. Include enrollment templates, `employees.json`, enrollment photos, configured attendance database, and required evidence. Treat settings, `.session`, camera URLs, and database credentials as secrets. Do not attach them to support tickets or copy them to a public repository. Consider whether session/key material should be excluded from ordinary backups and reprovisioned on restore.
 - Stop monitoring cleanly before a filesystem backup, then verify it restarts. For a live SQLite backup use SQLite's backup mechanism rather than copying only `attendance.db` while its WAL is active. Remote database deployments need their own database-native consistent backup. Test restoration into an isolated directory/account before depending on it; preserve employee-ID mappings and sample-photo references together.
 - Template loading now restricts pickle globals to NumPy numeric compatibility primitives and rejects object arrays, with a 256 MiB input limit. Import only approved employee exports/catalogs. This restriction does not make arbitrary external files safe against every allocation/resource-exhaustion attack.
 

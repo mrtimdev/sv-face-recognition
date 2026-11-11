@@ -1,0 +1,27 @@
+name: sv-face-stream
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/stream/Dockerfile
+    image: sv-face-stream:latest
+    restart: unless-stopped      # Comes back after a crash and after the computer reboots.
+    environment:
+      VNC_PASSWORD: ${VNC_PASSWORD:?Copy .env.example to .env and set VNC_PASSWORD}
+      TZ: ${TZ:-Asia/Phnom_Penh}   # Attendance times use this clock, and a VPS is usually on UTC.
+      SCREEN_SIZE: ${SCREEN_SIZE:-1600x900}
+    ports:
+      # This computer only. Reach it through HTTPS with a password (see README.md), never directly.
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-6080}:6080"
+    volumes:
+      - data:/data               # Settings, sign-in, attendance not yet sent, faces, captures.
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  data:

@@ -49,11 +49,19 @@ def save_sample_photo(encodings_path, image):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / (uuid4().hex + '.jpg')
     SnapshotService._write_image(path, image)
+    from .catalog_transaction import sync_directory
+    sync_directory(directory)
     return path
 
 
 def remove_sample_photos(encodings_path, references):
     """Catalog commit comes first; cleanup failure must not misreport a rollback."""
+    from .catalog_transaction import after_commit
+    references = tuple(references)
+    after_commit(lambda: _remove_sample_photos(encodings_path, references))
+
+
+def _remove_sample_photos(encodings_path, references):
     for reference in set(references):
         path = photo_path(encodings_path, reference)
         if path is not None:

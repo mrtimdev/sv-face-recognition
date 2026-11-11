@@ -128,6 +128,8 @@ class Settings:
 
     def to_config(self):
         """Build a validated ``Config``; raises ``ValueError`` for bad values."""
+        from .destination import destination_id
+        from .hrm_servers import current_url
         values = {"source": parse_source(self.source)}
         for field in fields(Config):
             if field.name in ("source",):
@@ -146,6 +148,7 @@ class Settings:
                 raise ValueError("report_work_start must be HH:MM or empty")
             if not (0 <= int(parts[0]) < 24 and 0 <= int(parts[1]) < 60):
                 raise ValueError("report_work_start must be a valid time of day")
+        values["hrm_destination"] = destination_id(current_url(self))
         return replace(Config(), **values)
 
     def update(self, values):

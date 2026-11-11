@@ -1,0 +1,15 @@
+# Allow-list: nothing from frontend/ enters the image unless it is named here.
+# settings.json, .session, .mobile_api.key, attendance.db, employees.json, encodings,
+# hrm_*.json, captures, faces and photos all hold secrets or personal data.
+*
+!dashboard.py
+!alert.wav
+!icon.png
+!requirements.txt
+!face_attendance
+!license_plate
+!deploy/stream
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+deploy/stream/.env

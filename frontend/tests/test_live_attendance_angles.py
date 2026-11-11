@@ -221,6 +221,7 @@ class FakeLink(QObject):
     def __init__(self):
         super().__init__()
         self.connected, self.sent = True, []
+        self.destination = "https://hrm.test"
 
     def send_text(self, text):
         if self.connected:
@@ -243,13 +244,16 @@ class UplinkTests(Base):
         super().setUp()
         self.application = QApplication.instance() or QApplication([])
         self.db = self.root / "attendance.db"
-        self.repo = AttendanceRepository(self.db)
+        from face_attendance.config import Config
+        self.config = Config(db_path=self.db, hrm_destination="https://hrm.test")
+        self.repo = AttendanceRepository(self.config)
         self.addCleanup(self.repo.close)
         self.snapshots = SnapshotService(self.root / "captures")
         self.link = FakeLink()
 
     def _uplink(self, **kw):
-        uplink = hrm_attendance.AttendanceUplink(self.link, lambda: self.db, tick_ms=60_000, device_name="Front desk",
+        kw.setdefault('tick_ms', 60_000)
+        uplink = hrm_attendance.AttendanceUplink(self.link, lambda: self.config, device_name="Front desk",
                                                  **kw)
         self.addCleanup(uplink.close)
         return uplink

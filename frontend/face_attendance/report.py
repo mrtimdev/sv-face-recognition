@@ -213,11 +213,31 @@ class AttendanceReader:
                  "last": local_text(row["last_epoch"])} for row in rows]
 
     def outbox_counts(self):
-        counts = {"pending": 0, "synced": 0}
-        for key, clause in (("pending", "synced_at IS NULL"), ("synced", "synced_at IS NOT NULL")):
+        counts = {"pending": 0, "synced": 0, "rejected": 0, "unassigned": 0, "legacy_resolved": 0}
+        if self.connection is None:
+            return counts
+        columns = self.connection.get_columns("attendance_outbox")
+        if "delivery_status" not in columns:
+            clauses = (("pending", "synced_at IS NULL"), ("unassigned", "synced_at IS NULL"),
+                       ("legacy_resolved", "synced_at IS NOT NULL"))
+        else:
+            clauses = (("pending", "delivery_status='pending'"),
+                       ("synced", "delivery_status='delivered'"),
+                       ("rejected", "delivery_status='rejected'"),
+                       ("legacy_resolved", "delivery_status='legacy_resolved'"),
+                       ("unassigned", "delivery_status='pending' AND (destination IS NULL OR destination='')"))
+        for key, clause in clauses:
             row = self._one(f"SELECT COUNT(*) AS total FROM attendance_outbox WHERE {clause}", [])
             counts[key] = int(row["total"]) if row else 0
         return counts
+
+    def delivery_issues(self, limit=100):
+        if self.connection is None or "delivery_status" not in self.connection.get_columns("attendance_outbox"):
+            return []
+        return [dict(row) for row in self.connection.execute(
+            "SELECT event_id, destination, delivery_status, delivery_reason, created_at "
+            "FROM attendance_outbox WHERE delivery_status IN ('rejected', 'pending', 'legacy_resolved') "
+            "ORDER BY created_at LIMIT ?", (limit,))]
 
     def close(self):
         if self.connection is not None:

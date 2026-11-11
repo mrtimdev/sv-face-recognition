@@ -12,7 +12,6 @@ FIRST_PARTY = {"face_attendance", "license_plate"}
 INSTALLED_AS = {"cv2": "opencv-python", "psycopg2": "psycopg2-binary", "mysql": "mysql-connector-python"}
 # Separate extras, each with its own requirements file and a message when absent.
 OPTIONAL = {
-    "anyio", "cryptography", "fastapi", "pydantic", "starlette", "uniface",  # requirements-mobile.txt
     "fast_alpr",                                                              # requirements-plates.txt
     "simpleaudio",                                                            # requirements-audio.txt
 }

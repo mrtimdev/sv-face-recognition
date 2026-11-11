@@ -1842,7 +1842,8 @@ class EmployeesScreen(QWidget):
                 matches, error = (), str(exc)
             self.duplicatesReady.emit((token, key, matches, error))
 
-        threading.Thread(target=work, name="enrollment-duplicates", daemon=True).start()
+        self._duplicate_thread = threading.Thread(target=work, name="enrollment-duplicates", daemon=True)
+        self._duplicate_thread.start()
 
     def _on_duplicates_ready(self, payload):
         token, key, matches, error = payload
@@ -2546,6 +2547,11 @@ class EmployeesScreen(QWidget):
 
     def closeEvent(self, event):
         self._duplicates_closed = True
+        duplicate_thread = getattr(self, '_duplicate_thread', None)
+        if duplicate_thread is not None:
+            duplicate_thread.join(timeout=3)
+            if duplicate_thread.is_alive():
+                logging.warning('Duplicate scan is still finishing after the employee screen closed')
         self._invalidate_checks()
         self.editor.hide()
         self.probe_timer.stop()

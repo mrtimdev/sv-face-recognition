@@ -9,6 +9,7 @@ import numpy as np
 from .models import Employee
 from .angle_templates import recognition_vectors
 from .template_store import read_templates
+from .catalog_transaction import catalog_guard
 
 
 def legacy_employee_id(name):
@@ -24,6 +25,7 @@ def employee_record(employee, **changes):
             if value or key in ("employee_id", "name", "status")}
 
 
+@catalog_guard
 def load_employee_map(path):
     path = Path(path)
     if not path.exists():
@@ -50,6 +52,7 @@ def load_employee_map(path):
 
 
 class FaceCatalog:
+    @catalog_guard
     def __init__(self, encodings_path, employees_path, allow_empty=False, resolve=None, angle_store=None):
         """*resolve* maps each ``Employee`` to its current details (see hrm_directory.resolver).
 

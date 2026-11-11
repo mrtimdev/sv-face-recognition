@@ -184,6 +184,8 @@ class CaptureJob:
     last_name: str = ""
     match_distance: Optional[float] = None
     live_score: Optional[float] = None
+    destination: Optional[str] = None
+    from_spool: bool = False
 
 
 @dataclass(frozen=True)

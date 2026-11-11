@@ -97,7 +97,7 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(totals[0]["employee_id"], "EMP-1")
 
     def test_outbox_counts(self):
-        self.assertEqual(self.reader.outbox_counts(), {"pending": 1, "synced": 1})
+        self.assertEqual(self.reader.outbox_counts(), {"pending": 1, "synced": 0, "rejected": 0, "unassigned": 1, "legacy_resolved": 1})
 
     def test_legacy_row_falls_back_to_captured_at(self):
         connection = sqlite3.connect(self.path)

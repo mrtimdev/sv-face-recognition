@@ -139,11 +139,13 @@ class TransferTests(unittest.TestCase):
         self.mac.enroll("Tim Dev", "EMP002", 60, 140)
         self.pc.enroll("Dara", "EMP009", 90)
         export_employees(self.file, self.mac.catalog, self.mac.mapping)
-        before = {path: path.read_bytes() for path in self.pc.root.rglob("*") if path.is_file()}
+        before = {path: path.read_bytes() for path in self.pc.root.rglob("*")
+                  if path.is_file() and not path.name.endswith(('.lock.sqlite', '.recovery.sqlite'))}
         with patch.object(transfer, "write_encodings", side_effect=OSError("disk full")):
             with self.assertRaises(OSError):
                 import_employees(self.file, self.pc.catalog, self.pc.mapping)
-        after = {path: path.read_bytes() for path in self.pc.root.rglob("*") if path.is_file()}
+        after = {path: path.read_bytes() for path in self.pc.root.rglob("*")
+                 if path.is_file() and not path.name.endswith(('.lock.sqlite', '.recovery.sqlite'))}
         self.assertEqual(after, before)
 
     def test_nothing_to_export(self):

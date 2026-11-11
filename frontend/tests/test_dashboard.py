@@ -237,7 +237,7 @@ class EngineTests(unittest.TestCase):
             rows = []
             engine.catalogChanged.connect(rows.append)
             self.assertFalse(engine.reload_if_catalog_changed())
-            # Another process (the mobile API) publishes a new employee.
+            # Another process (CLI enrollment) publishes a new employee.
             write_encodings(Path(directory) / "faces.pickle",
                             {"Seed": [np.ones(128)], "Mobile": [np.ones(128)]})
             write_employee(Path(directory) / "employees.json", "Mobile", "E9")

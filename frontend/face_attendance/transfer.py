@@ -75,6 +75,7 @@ def _count(number, noun):
 
 # --- export ------------------------------------------------------------------
 
+@_catalog_locked
 def export_employees(destination, encodings_path, employees_path):
     """Write every enrolled employee to *destination* (a .zip); returns (employees, samples)."""
     samples, refs = read_template_bundle(encodings_path)

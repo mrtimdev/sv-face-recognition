@@ -5,7 +5,7 @@ import uuid
 from .anti_spoof import SAMPLE_MAX_AGE
 from .capture import face_capture
 from .liveness import MAX_SAMPLE_GAP
-from .models import CaptureJob, ObservationEvent, State
+from .models import CaptureJob, ObservationEvent, SaveResult, State
 
 
 class CooldownManager:
@@ -22,7 +22,7 @@ class CooldownManager:
 
 
 class AttendanceService:
-    def __init__(self, config, persistence):
+    def __init__(self, config, persistence, async_staging=False):
         self.config, self.persistence = config, persistence
         self.cooldowns = CooldownManager(config.cooldown_sec)
         self.pending = {}  # employee_id -> event_id; survives a lost/replaced face track
@@ -30,9 +30,30 @@ class AttendanceService:
         self.storage_error = ""
         self.last_attendance = None
         self.last_observed = {}
+        self.async_staging = async_staging
+        self._awaiting_staging = set()
+        self._deferred_results = []
 
     def poll(self, tracks, now, wall_time):
         events = []
+        staging_failures = []
+        if self.async_staging:
+            while True:
+                try:
+                    job, accepted = self.persistence.staging_results.get_nowait()
+                except queue.Empty:
+                    break
+                self._awaiting_staging.discard(job.event_id)
+                if accepted:
+                    events.append(("capture", job))
+                else:
+                    staging_failures.append(SaveResult(job, "error", error="Could not save capture to the local spool"))
+        deferred, self._deferred_results = self._deferred_results, []
+        for result in deferred:
+            if result.job.event_id in self._awaiting_staging:
+                self._deferred_results.append(result)
+            else:
+                staging_failures.append(result)
         startup = self.persistence.startup.take()
         if startup is not None:
             cooldowns, error = startup
@@ -40,12 +61,19 @@ class AttendanceService:
             for employee_id, epoch in (cooldowns or {}).items():
                 self.cooldowns.synchronize(employee_id, epoch, now, wall_time)
         while True:
-            try:
-                result = self.persistence.results.get_nowait()
-            except queue.Empty:
-                break
+            if staging_failures:
+                result = staging_failures.pop(0)
+            else:
+                try:
+                    result = self.persistence.results.get_nowait()
+                except queue.Empty:
+                    break
             job = result.job
-            self.pending.pop(job.employee_id, None)
+            if job.event_id in self._awaiting_staging:
+                self._deferred_results.append(result)
+                continue
+            if self.pending.get(job.employee_id) == job.event_id:
+                self.pending.pop(job.employee_id, None)
             track = tracks.get(job.track_id)
             if track and track.pending_event_id == job.event_id:
                 track.pending_event_id = None
@@ -162,11 +190,15 @@ class AttendanceService:
                              source_generation=evidence.generation,
                              last_name=track.employee_last_name,
                              match_distance=track.recognition_distance, live_score=track.spoof_score)
-            if self.persistence.submit(job):
+            submit = self.persistence.stage if self.async_staging else self.persistence.submit
+            if submit(job):
+                if self.async_staging:
+                    self._awaiting_staging.add(job.event_id)
                 self.pending[job.employee_id] = job.event_id
                 track.pending_event_id = job.event_id
                 track.transition(State.CAPTURING, now)
-                captures.append(job)
+                if not self.async_staging:
+                    captures.append(job)
             else:
                 track.error = "Storage queue busy"
                 track.retry_at = now + cfg.retry_sec

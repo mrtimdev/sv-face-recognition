@@ -1,7 +1,10 @@
+> Updated implementation and migration notes: [HARDENING.md](HARDENING.md).
+> Historical validation counts below describe the earlier review, not the current build.
+
 # Security and continuous-operation review
 
 Reviewed the desktop engine, camera/reconnect lifecycle, persistence, credentials,
-template loading, optional plate OCR, and optional mobile enrollment API. This is
+template loading and optional plate OCR. This is
 a source review with regression/runtime evidence, not penetration-test certification.
 The deployment target supplied by the operator is macOS with a USB camera.
 
@@ -21,7 +24,6 @@ The deployment target supplied by the operator is macOS with a USB camera.
 | Unbounded observation logs / plate session identity set | CSV observations rotate at 10 MiB with three backups; the plate unique cache caps at 10,000 and explicitly displays a lower bound after overflow. Attendance/outbox/evidence are preserved. |
 | Plate capture metadata could retain camera credentials | Shared URL formatting redacts passwords, query strings and fragments. New plate files are private; low disk fails before image creation; saved metadata is flushed. |
 | Telegram failures could expose bot URLs; queued photos could change destination | Error messages omit request URLs; queue generations prevent face photos from being rerouted by destination reconfiguration. No real notifications were sent during tests. |
-| Mobile login/resource/stream limits were incomplete | Bounded per-IP/user throttling, HTTP body limit, connection/pending-session caps, frame/JPEG header validation, receive deadlines, authorization on reset, threadpool locking, and cancellation-safe ownership cleanup. |
 | Optional plate dependencies replaced desktop OpenCV with an incompatible headless wheel | OCR can run in a bounded persistent subprocess with its own environment and deadlines. The repaired desktop has only regular OpenCV 4.10/NumPy 1.26; OCR has only headless OpenCV 4.10/NumPy 1.26. |
 | Installed pip had published archive/path traversal advisories | Updated the desktop and isolated OCR installers to pip 26.2.1. |
 
@@ -67,12 +69,11 @@ Settings screen by type, preserving its actual sound-setting assertions.
   HRM sign-in. Protect the macOS user
   account, FileVault, settings, remembered session, employee data and backup media.
 - Approve retention/capacity/backups for attendance, outbox, audit rows, plate
-  history and evidence. Existing production data was not purged. RAM-queued
-  attendance is not a durable offline journal and can be lost on process/power loss
-  before database commit; use a UPS and reconcile failed/uncommitted events.
-- Use TLS for remote databases/mobile enrollment. Mobile caps are process-local:
-  deploy one API worker or add a shared limiter/ownership store. Configure transport
-  message limits too; the application check happens after ASGI receives a message.
+  history and evidence. Existing production data was not purged. Accepted attendance is now staged in a bounded local SQLite spool before
+  persistence. Include the spool in stopped-system backups. Hardware acceptance
+  and power-loss testing are still required.
+- Use TLS for remote databases and HRM connections. The Flutter-facing mobile
+  API has been removed from this repository.
 - Treat catalogs as approved local data even with restricted loading: crafted
   NumPy allocations can still exhaust resources. Models and RGB anti-spoofing are
   probabilistic and require camera-specific real-world validation.

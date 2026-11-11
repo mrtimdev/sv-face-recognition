@@ -85,3 +85,10 @@ mobile_enrollment.db-shm
 .mobile_api.key
 .cache/uniface/
 *.ses
+
+# Durable attendance spool and catalog recovery journals (sensitive local data)
+*.pending.sqlite*
+*.lock.sqlite*
+*.recovery.sqlite*
+engine-health.json
+test-results/

@@ -196,6 +196,13 @@ def load_session() -> Session | None:
         return None
 
 
+def renew_session(user):
+    """Restart the remembered session's time limit, if this *user* is still the one remembered."""
+    session = load_session()
+    if session and user and session.username == user.username:
+        save_session(user)
+
+
 def clear_session():
     SESSION_PATH.unlink(missing_ok=True)
 

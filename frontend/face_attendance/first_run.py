@@ -1,4 +1,4 @@
-"""First-run setup: choose the database and create the first administrator.
+"""First-run setup: choose the attendance database.
 
 Qt-free so every step can be tested on its own. The wizard in
 ``dashboard/setup_wizard.py`` only collects answers and shows progress.
@@ -15,13 +15,12 @@ from pathlib import Path
 from .config import ROOT
 from .repository import AttendanceRepository
 from .settings import SETTINGS_PATH
-from .users import DEFAULT_ADMIN_PASSWORD, UserRepository
+from .users import UserRepository
 
 LOCAL_HOST = "127.0.0.1"
 MYSQL_PORT = 3306
 DEFAULT_DATABASE = "sv_attendance"
 APP_DB_USER = "sv_face"
-MIN_PASSWORD_LENGTH = 6
 SETUP_MARKER = ".setup_complete"
 _DATABASE_NAME = re.compile(r"[A-Za-z0-9_]{1,64}")
 _ACCESS_DENIED, _CANNOT_CONNECT = 1045, 2003
@@ -162,14 +161,3 @@ def provision_local_mysql(settings, admin_user, admin_password, port=MYSQL_PORT,
     except Exception as exc:
         raise SetupError(f"The database was created, but its tables could not be: {exc}") from exc
     return values, has_accounts
-
-
-def create_administrator(settings, username, password=""):
-    """Create the first administrator; an empty password means the release default."""
-    username = str(username or "").strip()
-    if not username or len(username) > 100 or any(ord(char) < 32 for char in username):
-        raise SetupError("Enter a username of at most 100 characters.")
-    if password and len(password) < MIN_PASSWORD_LENGTH:
-        raise SetupError(f"Use a password of at least {MIN_PASSWORD_LENGTH} characters.")
-    return UserRepository(settings).create_user(username, "Administrator", "", "",
-                                                password or DEFAULT_ADMIN_PASSWORD, role="admin")

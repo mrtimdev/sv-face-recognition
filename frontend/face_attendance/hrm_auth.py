@@ -13,6 +13,7 @@ No Qt here; the dashboard calls these functions from worker threads.
 import base64
 import hashlib
 import json
+import os
 import platform
 import time
 import urllib.error
@@ -173,8 +174,8 @@ def check_account(config, user, opener=None):
     return user if data["exists"] else replace(user, disabled=True)
 
 
-def restore(config, session, opener=None):
-    """The remembered ``User`` once HRM accepts its token, else None. ``HRMError`` if HRM is offline."""
+def remembered_user(session):
+    """The ``User`` a remembered session describes, without asking HRM; None if it can't be one."""
     token = getattr(session, "hrm_token", "")
     if not token or token_expired(token):
         return None
@@ -183,7 +184,18 @@ def restore(config, session, opener=None):
     if not username or username != session.username:
         return None
     user = _build_user(session.user_uuid.removeprefix("hrm:"), username, session.full_name, claims.get("roles"), token)
-    if not user.permissions:
+    return user if user.permissions else None
+
+
+def unattended():
+    """True on a computer nobody sits at (the streaming container), where a restart must not wait for sign-in."""
+    return os.environ.get("SV_FACE_UNATTENDED") == "1"
+
+
+def restore(config, session, opener=None):
+    """The remembered ``User`` once HRM accepts its token, else None. ``HRMError`` if HRM is offline."""
+    user = remembered_user(session)
+    if user is None:
         return None
     fresh = check_account(config, user, opener=opener)
     return fresh if fresh is not None and not fresh.disabled else None

@@ -116,7 +116,6 @@ class ExistingInstallTests(TemporarySettings, _Qt):
         self.addCleanup(wizard.deleteLater)
         wizard._next()
         wizard._next()
-        self.assertTrue(wizard.admin_fields.isHidden())
         wizard._next()
         self.assertEqual(wizard.pages.currentIndex(), FINISH)
         self.assertEqual(self.settings.to_dict(), before)
@@ -160,17 +159,6 @@ class ProvisionTests(TemporarySettings):
                     first_run.provision_local_mysql(self.settings, "root", "bad")
 
 
-class AdministratorTests(TemporarySettings):
-    def test_empty_password_uses_the_default(self):
-        first_run.create_administrator(self.settings, "timdev")
-        self.assertIsNotNone(UserRepository(self.settings).authenticate("timdev", DEFAULT_ADMIN_PASSWORD))
-
-    def test_short_passwords_and_bad_names_are_refused(self):
-        for username, password in (("timdev", "short"), ("  ", "long enough"), ("a\nb", "long enough")):
-            with self.assertRaises(first_run.SetupError):
-                first_run.create_administrator(self.settings, username, password)
-
-
 class RecoveryTests(TemporarySettings):
     def setUp(self):
         super().setUp()
@@ -200,15 +188,14 @@ class WizardTests(TemporarySettings):
         wizard._next()
         self.assertEqual(wizard.pages.currentIndex(), ADMIN)
         self.assertFalse(self.settings_path.exists())
-        wizard.admin_password.setText("a good secret")
-        wizard.admin_confirm.setText("different")
+        wizard.hrm_address.setText("invalid")
         wizard._next()
         self.assertEqual(wizard.pages.currentIndex(), ADMIN)
-        wizard.admin_confirm.setText("a good secret")
+        wizard.hrm_address.setText("https://hrm.example.com")
         wizard._next()
         self.assertEqual(wizard.pages.currentIndex(), FINISH)
         self.assertTrue(self.settings_path.exists())
-        self.assertIsNotNone(UserRepository(self.settings).authenticate("timdev", "a good secret"))
+        self.assertFalse(UserRepository(self.settings).has_users())
 
     def test_mysql_path_applies_provisioned_settings(self):
         wizard = self.wizard()
@@ -223,22 +210,10 @@ class WizardTests(TemporarySettings):
         self.assertIn("rejected", wizard.error.text())
         wizard._on_provisioned(dict(db_backend="mysql", db_name="sv_attendance"), True)
         self.assertEqual(wizard.pages.currentIndex(), ADMIN)
-        self.assertTrue(wizard.admin_fields.isHidden())
-        with patch.object(first_run, "create_administrator") as create:
-            wizard._next()
-        create.assert_not_called()  # Existing accounts: nothing extra is created.
+        wizard._next()
         self.assertEqual(wizard.pages.currentIndex(), FINISH)
         self.assertEqual(self.settings.db_backend, "mysql")
 
-    def test_duplicate_username_keeps_the_wizard_open(self):
-        UserRepository(self.settings).create_user("timdev", "", "", "", "secret value")
-        wizard = self.wizard()
-        wizard._has_accounts = False
-        wizard.pages.setCurrentIndex(ADMIN)
-        wizard._next()
-        self.assertEqual(wizard.pages.currentIndex(), ADMIN)
-        self.assertTrue(wizard.error.text())
-        self.assertFalse(self.settings_path.exists())
 
 
 if __name__ == "__main__":

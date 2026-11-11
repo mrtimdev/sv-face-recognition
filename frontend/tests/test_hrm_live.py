@@ -18,11 +18,7 @@ from face_attendance import angle_templates as at
 from face_attendance import hrm_directory as hd
 from face_attendance.dashboard import hrm_live
 from face_attendance.hrm_sync import HRMConfig
-from tests.test_dashboard import FakeBackend, temp_settings
-
-
-def _app():
-    return QApplication.instance() or QApplication([])
+from tests.test_dashboard import FakeBackend, temp_settings, _app
 
 
 def wait_for(condition, seconds=5.0):
@@ -56,7 +52,7 @@ class ParsingTests(unittest.TestCase):
 
 class LinkTests(unittest.TestCase):
     def setUp(self):
-        _app()
+        self.application = _app()  # Keep the Qt event dispatcher alive in isolated runs.
         self.server = QWebSocketServer("test", QWebSocketServer.SslMode.NonSecureMode)
         self.assertTrue(self.server.listen(QHostAddress.SpecialAddress.LocalHost))
         self.clients = []

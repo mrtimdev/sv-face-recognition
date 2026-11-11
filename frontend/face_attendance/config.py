@@ -59,6 +59,7 @@ class Config:
     success_duration: float = 3.5
     retry_sec: float = 2.0
     persistence_queue_size: int = 8
+    hrm_destination: str = ""
     camera_timeout_ms: int = 2500
     reconnect_sec: float = 1.0
     camera_stale_sec: float = 1.0

@@ -11,6 +11,7 @@ import os
 import pickle
 import tempfile
 import threading
+import inspect
 from functools import wraps
 from itertools import islice
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from .template_store import (read_templates, template_payload, read_template_bun
                              preserve_photo_references)
 from .enrollment_photos import save_sample_photo, remove_sample_photos
 from .face_duplicates import FaceDuplicateIndex, find_face_duplicate
+from .catalog_transaction import catalog_transaction, before_write, sync_directory
 
 
 # Serialize model calls shared by enrollment workers and live recognition.
@@ -38,7 +40,15 @@ def _catalog_locked(method):
     @wraps(method)
     def locked(*args, **kwargs):
         with CATALOG_LOCK:
-            return method(*args, **kwargs)
+            bound = inspect.signature(method).bind(*args, **kwargs).arguments
+            service = bound.get('self')
+            encodings = getattr(service, 'encodings_path', bound.get('encodings_path'))
+            employees = getattr(service, 'employees_path', bound.get('employees_path', bound.get('path')))
+            with catalog_transaction(encodings, employees) as transaction:
+                result = method(*args, **kwargs)
+                if isinstance(result, EnrollmentOutcome) and result.status == 'error':
+                    transaction['rollback'] = True
+                return result
     return locked
 
 
@@ -73,6 +83,7 @@ class EnrollmentOutcome:
 def _atomic_write(path, writer, binary=True):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    before_write(path)
     handle = tempfile.NamedTemporaryFile(mode="w+b" if binary else "w", dir=path.parent,
                                          delete=False, encoding=None if binary else "utf-8")
     temporary = Path(handle.name)
@@ -87,6 +98,7 @@ def _atomic_write(path, writer, binary=True):
     handle.close()
     try:
         os.replace(temporary, path)
+        sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -162,6 +174,7 @@ def frame_quality(image, box, min_face_height=MIN_FACE_HEIGHT):
     return tuple(issues)
 
 
+@_catalog_locked
 def employee_rows(encodings_path, employees_path):
     """Enrollment table: label, permanent ID and sample count per label."""
     data = read_encodings(encodings_path)
@@ -285,6 +298,7 @@ class EnrollmentService:
     def employees(self):
         return employee_rows(self.encodings_path, self.employees_path)
 
+    @_catalog_locked
     def duplicate_faces(self):
         with CATALOG_LOCK:
             samples, _ = read_template_bundle(self.encodings_path)
@@ -392,7 +406,9 @@ class EnrollmentService:
                         _atomic_write(self.employees_path, lambda handle: handle.write(mapping_before))
                 except OSError as rollback_error:
                     message += f". Could not restore employee mapping: {rollback_error}; restore from backup before retrying"
-            remove_sample_photos(self.encodings_path, [path.name for path in created_photos])
+            # These files belong only to the failed operation, never the old catalog.
+            from .enrollment_photos import _remove_sample_photos
+            _remove_sample_photos(self.encodings_path, [path.name for path in created_photos])
             return EnrollmentOutcome("error", message, name=name, employee_id=employee_id)
 
         final_id = employee_id or (previous.employee_id if previous else legacy_employee_id(name))

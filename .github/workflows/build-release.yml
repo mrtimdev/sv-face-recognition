@@ -11,7 +11,13 @@ permissions:
   contents: write
 
 jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
   build-macos:
+    needs: tests
     if: github.event_name == 'push'
     runs-on: macos-latest
     defaults:
@@ -54,6 +60,7 @@ jobs:
           path: frontend/dist/SV-Face-ID-*.dmg
 
   build-windows:
+    needs: tests
     runs-on: windows-latest
     defaults:
       run:
