@@ -5,6 +5,7 @@ QThread that emits a ``snapshot`` signal every *interval* seconds with live
 CPU / RAM / GPU / disk / network stats.
 """
 import os
+import logging
 import platform
 import sys
 import time
@@ -150,8 +151,13 @@ def _take_snapshot(prev_disk_io, prev_net_io, prev_time):
     # CPU
     snap.cpu_percent = psutil.cpu_percent(interval=None)
     snap.cpu_per_core = psutil.cpu_percent(interval=None, percpu=True)
-    freq = psutil.cpu_freq()
-    snap.cpu_freq_mhz = freq.current if freq else 0.0
+    try:
+        freq = psutil.cpu_freq()
+        snap.cpu_freq_mhz = freq.current if freq else 0.0
+    except (OSError, RuntimeError, NotImplementedError, psutil.Error):
+        # Some Apple Silicon/virtualized macOS hosts do not expose CPU frequency.
+        # Optional telemetry must not escape QThread.run (PyQt aborts the process).
+        pass
 
     # RAM
     vm = psutil.virtual_memory()
@@ -234,13 +240,15 @@ class Monitor(QThread):
         self._stop = threading.Event()
 
     def run(self):
-        psutil.cpu_percent(interval=None)
         prev_disk = prev_net = None
         prev_time = 0.0
         while not self._stop.is_set():
-            snap, prev_disk, prev_net = _take_snapshot(prev_disk, prev_net, prev_time)
-            prev_time = snap.timestamp
-            self.snapshotReady.emit(snap)
+            try:
+                snap, prev_disk, prev_net = _take_snapshot(prev_disk, prev_net, prev_time)
+                prev_time = snap.timestamp
+                self.snapshotReady.emit(snap)
+            except Exception:
+                logging.warning('System telemetry unavailable; monitoring will retry', exc_info=True)
             self._stop.wait(self._interval)
 
     def stop(self):
