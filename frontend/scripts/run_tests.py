@@ -33,6 +33,11 @@ def main():
                 log.write('\nTest module exceeded its time limit\n')
                 success = False
         print(f'{"PASS" if success else "FAIL"} {path.name}', flush=True)
+        if not success:
+            # Surface the actual failure in the Actions job log, as well as in
+            # the uploaded artifact, so an exit-code annotation is actionable.
+            details = (output / (path.stem + '.log')).read_text(errors='replace')
+            print(f'Failure details for {path.name}:\n{details[-12000:]}', flush=True)
         return success
 
     paths = sorted((root / 'tests').glob('test_*.py'))

@@ -34,7 +34,9 @@ class ProfileAngleTests(unittest.TestCase):
         self._root = tempfile.TemporaryDirectory()
         self.addCleanup(self._root.cleanup)
         self.screen = EmployeesScreenTests()._screen(self._root.name)
-        self.addCleanup(self.screen.deleteLater)
+        # deleteLater alone neither closes the widget nor waits for its catalog
+        # scan. Close first so the worker exits before TemporaryDirectory cleanup.
+        self.addCleanup(self._close_screen)
         self.screen.settings.hrm_api_url = "http://127.0.0.1:9"
         self.screen.settings.hrm_api_key = "k" * 40
         self.saved = {"E1": ("left", "up"), "E2": ("down",)}
@@ -43,6 +45,11 @@ class ProfileAngleTests(unittest.TestCase):
             patcher = patch.object(hd.hrm_sync, target, side_effect=function)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def _close_screen(self):
+        self.screen.close()
+        self.screen.deleteLater()
+        self.application.processEvents()
 
     def _row(self, code, in_hrm=True):
         return {"name": f"Label {code}", "employee_id": code, "employee_name": f"Name {code}", "samples": 1,

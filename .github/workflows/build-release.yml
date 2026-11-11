@@ -1,4 +1,5 @@
 name: Build & Release
+run-name: Build installers for ${{ github.ref_name }}
 
 on:
   # Build both installers from the selected ref without publishing a release.
