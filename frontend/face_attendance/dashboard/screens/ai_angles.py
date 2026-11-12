@@ -12,6 +12,7 @@ SV HRM backend for that employee ID (see hrm_sync), or on demand with Send to HR
 import logging
 import pickle
 import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -29,7 +30,7 @@ from ...enrollment import EnrollmentService
 from ...hrm_sync import HRMError
 from ...hrm_sync import config_from_settings as hrm_config_from_settings
 from ...hrm_sync import configuration_problem as hrm_configuration_problem
-from ...hrm_sync import upload_angle, upload_profile_photo
+from ...hrm_sync import delete_angle, upload_angle, upload_profile_photo
 from ...enrollment_photos import portrait_path, sample_photo_map
 from ...storage import read_image
 from ..access import access_for, guard
@@ -136,6 +137,58 @@ class AngleWorker(QThread):
             self._uploader = None  # Keep generating; the images stay on disk for Send to HRM.
 
 
+DROP_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+
+
+class DroppedAngleWorker(AngleWorker):
+    """A photo dropped on one angle: saved like a generated one, checked against the profile photo,
+    and sent to HRM only when it matches. No AI request."""
+
+    def __init__(self, source_jpeg, key, image_path, directory, uploader=None):
+        super().__init__(None, source_jpeg, (), directory, uploader)
+        self._key = key
+        self._image_path = image_path
+
+    def _save_copy(self):
+        image = read_image(self._image_path)
+        if image is None:
+            raise ValueError("That file isn't an image this app can read.")
+        height, width = image.shape[:2]
+        longest = max(height, width)
+        if longest > STORED_IMAGE_SIDE * 2:
+            scale = STORED_IMAGE_SIDE * 2 / longest
+            image = cv2.resize(image, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
+        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            raise ValueError("The photo could not be prepared.")
+        directory = Path(self._directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{self._key}_dropped_{time.strftime('%H%M%S')}_{int(time.monotonic() * 1000) % 1000:03d}.jpg"
+        path.write_bytes(encoded.tobytes())
+        return path
+
+    def run(self):
+        key = self._key
+        self.angleStarted.emit(key)
+        problem = self._source_problem()
+        if problem:
+            self.angleFailed.emit(key, problem.replace("Nothing was generated. ", "The photo wasn't checked. "))
+            self.runDone.emit(True)
+            return
+        try:
+            path = self._save_copy()
+        except (OSError, ValueError, cv2.error) as exc:
+            self.angleFailed.emit(key, str(exc))
+            self.runDone.emit(True)
+            return
+        self.angleDone.emit(key, str(path))
+        if self._check(key, path) == angle_checks.MATCHED:
+            self._upload(key, path)
+        elif self._uploader is not None:
+            self.angleHeld.emit(key, NOT_SENT_UNMATCHED)
+        self.runDone.emit(False)
+
+
 class _UploadResult(str):
     """An error message that remembers the HTTP status, so a worker can stop retrying."""
 
@@ -183,12 +236,16 @@ PHOTO_SAVED = "saved"
 
 class AngleTile(QFrame):
     regenerate = pyqtSignal(str)
+    remove = pyqtSignal(str)
+    dropped = pyqtSignal(str, str)  # angle key, local image path
 
     def __init__(self, angle, parent=None):
         super().__init__(parent)
         self.angle = angle
         self.path = None
         self.setObjectName("panel")
+        self.setAcceptDrops(True)
+        self.setToolTip("Drop a photo here to add or replace this angle")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
@@ -216,12 +273,52 @@ class AngleTile(QFrame):
         self.retry = QPushButton("Redo")
         self.retry.setToolTip("Generate this angle again")
         self.retry.clicked.connect(lambda: self.regenerate.emit(self.angle.key))
+        self.discard = QPushButton("Remove")
+        self.discard.setToolTip("Remove this angle. One saved in HRM is deleted there too.")
+        self.discard.clicked.connect(lambda: self.remove.emit(self.angle.key))
         row.addWidget(self.include)
         row.addStretch(1)
+        row.addWidget(self.discard)
         row.addWidget(self.retry)
         layout.addLayout(row)
         layout.addStretch(1)
         self.reset()
+
+    @staticmethod
+    def _dropped_image(event):
+        """The first local image file in a drag, or ""."""
+        for url in event.mimeData().urls() if event.mimeData().hasUrls() else ():
+            if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in DROP_EXTENSIONS:
+                return url.toLocalFile()
+        return ""
+
+    def _highlight(self, on):
+        self.setProperty("dropOver", bool(on))
+        self.setStyleSheet("QFrame#panel { border: 2px dashed #3B82F6; }" if on else "")
+
+    def dragEnterEvent(self, event):
+        if self.isEnabled() and self._dropped_image(event):
+            event.acceptProposedAction()
+            self._highlight(True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self.isEnabled() and self._dropped_image(event):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._highlight(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self._highlight(False)
+        path = self._dropped_image(event)
+        if path:
+            event.acceptProposedAction()
+            self.dropped.emit(self.angle.key, path)
 
     def set_check(self, result):
         """Show the face check's result. An angle that fails it can't be added to enrollment."""
@@ -309,6 +406,8 @@ class AIAnglesScreen(QWidget):
     hrmPhotoFetched = pyqtSignal(str, object)  # employee code, photo path or None or HRMError
     hrmAnglesFetched = pyqtSignal(str, object)  # employee code, (items, problems) or an exception
     hrmPhotoSaved = pyqtSignal(str, object, bytes)  # employee code, PHOTO_SAVED, a check result or an exception; JPEG
+    hrmAngleRemoved = pyqtSignal(str, str, object)  # employee code, angle key, None or an HRMError
+    anglesChanged = pyqtSignal(str)  # This screen changed an employee's angles in HRM.
 
     def __init__(self, engine, settings, parent=None):
         super().__init__(parent)
@@ -339,6 +438,9 @@ class AIAnglesScreen(QWidget):
         self.hrmPhotoFetched.connect(self._on_hrm_photo)
         self.hrmAnglesFetched.connect(self._on_saved_angles)
         self.hrmPhotoSaved.connect(self._on_photo_saved)
+        self.hrmAngleRemoved.connect(self._on_angle_removed)
+        self._removing = set()  # Angle keys being deleted in HRM.
+        self._dropping = None   # The angle key a dropped photo is being checked for.
         self._make_service()
         self._build()
         self._reload_employees()
@@ -528,13 +630,16 @@ class AIAnglesScreen(QWidget):
         return card
 
     def _build_angles_card(self):
-        card = self._card("3. Six angles", "All six must show the same face as the profile photo.", "face-id")
+        card = self._card("3. Six angles", "All six must show the same face as the profile photo. "
+                          "Drop a photo on any angle to add or replace it.", "face-id")
         grid = QGridLayout()
         grid.setSpacing(10)
         self.tiles = {}
         for index, angle in enumerate(ANGLES):
             tile = AngleTile(angle)
             tile.regenerate.connect(self._regenerate)
+            tile.remove.connect(self._remove_angle)
+            tile.dropped.connect(self._drop_angle)
             tile.include.toggled.connect(lambda _on: self._update_buttons())
             self.tiles[angle.key] = tile
             grid.addWidget(tile, index // 3, index % 3)
@@ -597,6 +702,8 @@ class AIAnglesScreen(QWidget):
         self._fit_timer.start()  # A warning changes how much room the images have.
         for tile in self.tiles.values():
             tile.retry.setEnabled(not busy and self.source is not None)
+            tile.discard.setVisible(bool(tile.path))
+            tile.discard.setEnabled(not busy and (self._employee_code(), tile.angle.key) not in self._removing)
         if self._photo_again and not busy:
             self._photo_again = False
             self._refresh_profile_photo()
@@ -892,6 +999,8 @@ class AIAnglesScreen(QWidget):
                 if not confirmed:
                     outcome = angle_templates.check_new_profile_photo(jpeg, current_photo())
                 if outcome == PHOTO_SAVED or not angle_checks.is_warning(outcome):
+                    from ...identity_check import validate_hrm_upload
+                    validate_hrm_upload(config, code, jpeg)
                     upload_profile_photo(config, code, jpeg)
                     outcome = PHOTO_SAVED
             except HRMError as exc:
@@ -977,13 +1086,52 @@ class AIAnglesScreen(QWidget):
             return
         if self.output_dir is None:
             self.output_dir = angles_directory(self.settings.encodings_path, self._person_label())
-        self._done = 0
-        self.progress.setRange(0, len(angles))
-        self.progress.setValue(0)
-        self.progress.show()
         hrm = hrm_config_from_settings(self.settings)
         uploader, hrm_problem = self._hrm_uploader() if hrm.auto_upload else (None, "")
         worker = AngleWorker(config_from_settings(self.settings), source_jpeg, angles, self.output_dir, uploader)
+        if uploader is None and hrm_problem and hrm.configured:
+            message, tone = f"Generating… {hrm_problem}", "warn"
+        else:
+            message, tone = "Generating… this can take a minute per image.", "info"
+        self._launch(worker, len(angles), message, tone)
+
+    def _drop_angle(self, key, path):
+        """A photo dropped on one tile: check it against the profile photo and send it to HRM like a
+        generated angle. Needs no AI provider."""
+        label = self.tiles[key].angle.label
+        if self.busy or self._saving:
+            self.toast.show_message("Wait for the current work to finish, then drop the photo again.", "warn")
+            return
+        if not self._person_label():
+            self.toast.show_message("Choose an employee first." if self.person_stack.currentIndex() == EXISTING
+                                    else "Enter the employee's full name first.", "warn")
+            return
+        if self.source is None:
+            self.toast.show_message("Add the profile photo first. A dropped angle is checked against it.", "warn")
+            return
+        if read_image(path) is None:
+            self.toast.show_message(f"{label}: that file isn't an image this app can read.", "bad")
+            return
+        try:
+            source_jpeg = encode_source(self.source)
+        except (AIError, cv2.error) as exc:
+            self.toast.show_message(str(exc), "bad")
+            return
+        if self.output_dir is None:
+            self.output_dir = angles_directory(self.settings.encodings_path, self._person_label())
+        hrm = hrm_config_from_settings(self.settings)
+        uploader, hrm_problem = self._hrm_uploader() if hrm.auto_upload else (None, "")
+        worker = DroppedAngleWorker(source_jpeg, key, path, self.output_dir, uploader)
+        self._dropping = key
+        message = f"Checking the {label} photo…" + (f" {hrm_problem}" if uploader is None and hrm_problem
+                                                    and hrm.configured else "")
+        self._launch(worker, 1, message, "info")
+
+    def _launch(self, worker, count, message, tone):
+        self._done = 0
+        self.progress.setRange(0, count)
+        self.progress.setValue(0)
+        self.progress.show()
         worker.angleStarted.connect(self._on_angle_started)
         worker.angleDone.connect(self._on_angle_done)
         worker.angleChecked.connect(self._on_angle_checked)
@@ -993,10 +1141,7 @@ class AIAnglesScreen(QWidget):
         worker.sourceRejected.connect(self._on_source_rejected)
         worker.runDone.connect(self._on_run_done)
         self._worker = worker
-        if uploader is None and hrm_problem and hrm.configured:
-            self.toast.show_message(f"Generating… {hrm_problem}", "warn")
-        else:
-            self.toast.show_message("Generating… this can take a minute per image.", "info")
+        self.toast.show_message(message, tone)
         self._update_buttons()
         start_detached(worker)
 
@@ -1008,6 +1153,8 @@ class AIAnglesScreen(QWidget):
 
     def _on_angle_started(self, key):
         self.tiles[key].set_working()
+        if self._dropping == key:
+            self.tiles[key].status.setText("Checking the dropped photo…")
 
     def _advance(self):
         self._done += 1
@@ -1044,6 +1191,11 @@ class AIAnglesScreen(QWidget):
         self._worker = None
         self.stop_button.setEnabled(True)
         self.progress.hide()
+        dropped, self._dropping = self._dropping, None
+        if dropped is not None:
+            self._report_drop(self.tiles[dropped])
+            self._update_buttons()
+            return
         if self._rejection:
             self.toast.show_message(self._rejection, "bad")
             self._rejection = ""
@@ -1070,6 +1222,22 @@ class AIAnglesScreen(QWidget):
             self.toast.show_message(f"{flagged} of the angles don't match the profile photo, so they weren't "
                                     "sent to HRM and can't be enrolled. Redo makes a new one.", "warn")
         self._update_buttons()
+
+    def _report_drop(self, tile):
+        label = tile.angle.label
+        if not tile.path:
+            self._load_saved_angles()  # _on_angle_failed said why; show HRM's photo again.
+            return
+        if angle_checks.is_warning(tile.check):
+            self.toast.show_message(f"{label}: {angle_checks.WARNINGS[tile.check]} It wasn't sent to HRM.", "warn")
+        elif tile.hrm_sent:
+            self.toast.show_message(f"{label}: photo replaced and stored in HRM.", "ok")
+            if self._employee_code():
+                self.anglesChanged.emit(self._employee_code())
+        elif tile.status.toolTip():
+            self.toast.show_message(f"{label}: saved here but not in HRM. {tile.status.toolTip()}", "warn")
+        else:
+            self.toast.show_message(f"{label}: photo ready. Send to HRM stores it.", "ok")
 
     def _open_folder(self):
         folder = self.output_dir or self._saved_dir
@@ -1201,7 +1369,14 @@ class AIAnglesScreen(QWidget):
             problem = "This person has no employee ID, so the angles can't go to HRM."
         if problem:
             return None, problem
-        return (lambda key, path: upload_angle(config, code, key, path)), ""
+
+        def upload_checked(key, path):
+            from ...identity_check import validate_hrm_upload
+            content = Path(path).read_bytes()
+            validate_hrm_upload(config, code, content)
+            return upload_angle(config, code, key, content)
+
+        return upload_checked, ""
 
     def _send_to_hrm(self):
         if self.busy or self._saving:
@@ -1229,6 +1404,65 @@ class AIAnglesScreen(QWidget):
         self.toast.show_message(f"Sending {len(items)} angle(s) to HRM…", "info")
         self._update_buttons()
         start_detached(worker)
+
+    def _remove_angle(self, key):
+        """Clear one tile. An image saved in HRM is deleted there, which updates the employee's
+        enrolled status and the Live Monitor's templates."""
+        tile = self.tiles[key]
+        if self.busy or self._saving or not tile.path:
+            return
+        stored = tile.from_hrm or tile.hrm_sent
+        row = self._current_employee() if self.person_stack.currentIndex() == EXISTING else None
+        if not stored or not row:
+            tile.reset()
+            self._update_buttons()
+            return
+        if not guard(self, "manage_employees", "remove face angles"):
+            return
+        code = str(row.get("employee_id") or "").strip()
+        config = hrm_config_from_settings(self.settings)
+        problem = hrm_configuration_problem(config) or ("" if code else "This person has no employee ID.")
+        if problem:
+            self.toast.show_message(problem, "warn")
+            return
+        answer = QMessageBox.question(
+            self, "Remove face angle?",
+            f"Remove the \"{tile.angle.label}\" photo of {self._row_label(row)} from HRM?\n\n"
+            "The Live Monitor stops matching it right away.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._removing.add((code, key))
+        tile.status.setText("Removing from HRM…")
+        self._update_buttons()
+
+        def work():
+            try:
+                delete_angle(config, code, key)
+                outcome = None
+            except HRMError as exc:
+                outcome = exc
+            try:
+                self.hrmAngleRemoved.emit(code, key, outcome)
+            except RuntimeError:
+                pass  # The screen was closed meanwhile.
+
+        threading.Thread(target=work, name="hrm-remove-angle", daemon=True).start()
+
+    def _on_angle_removed(self, code, key, error):
+        self._removing.discard((code, key))
+        current = self._employee_code().casefold() == code.casefold()
+        tile = self.tiles.get(key)
+        if error is not None:
+            if current and tile is not None and tile.path:
+                tile.status.setText("Saved in HRM")
+            self.toast.show_message(f"Couldn't remove the angle from HRM. {error}", "bad")
+        else:
+            if current and tile is not None and (tile.from_hrm or tile.hrm_sent):
+                tile.reset()
+            self.toast.show_message(f"Removed {code}'s angle from HRM.", "ok")
+            self.anglesChanged.emit(code)
+        self._update_buttons()
 
     def _on_hrm_done(self, _stopped):
         self._hrm_worker = None
@@ -1285,7 +1519,15 @@ class AIAnglesScreen(QWidget):
         self._enroll_added = (employee_id, saved)
         self.toast.show_message("Checking and encoding images…", "info")
         self._update_buttons()
-        self.runner.submit(images, name, employee_id, True, first_name, last_name)
+        config = hrm_config_from_settings(self.settings)
+
+        def check_hrm(images, code):
+            from ...identity_check import validate_hrm_upload
+            for image in images:
+                validate_hrm_upload(config, code, encode_source(image))
+
+        self.runner.submit(images, name, employee_id, True, first_name, last_name,
+                           before_enroll=check_hrm if config.configured else None)
 
     def _auto_add_to_enrollment(self):
         """After a live HRM update, add this employee's newly verified images without asking.

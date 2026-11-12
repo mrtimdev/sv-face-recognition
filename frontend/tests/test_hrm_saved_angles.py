@@ -201,6 +201,191 @@ class ScreenTests(ScreenCase):
         self.assertEqual(self.screen.tiles["left"].status.text(), "Waiting")
 
 
+class RemoveTests(ScreenCase):
+    YES = patch("face_attendance.dashboard.screens.ai_angles.QMessageBox.question",
+                return_value=__import__("PyQt6.QtWidgets", fromlist=["QMessageBox"]).QMessageBox.StandardButton.Yes)
+
+    def setUp(self):
+        super().setUp()
+        self.changed = []
+        self.screen.anglesChanged.connect(self.changed.append)
+        self._select("EMP015")
+        self._settled()
+
+    def _removed(self, key):
+        return pump(lambda: (("EMP015", key) not in self.screen._removing))
+
+    def test_remove_shows_only_on_filled_tiles(self):
+        self.assertTrue(self.screen.tiles["left"].discard.isVisibleTo(self.screen))
+        self.assertFalse(self.screen.tiles["right"].discard.isVisibleTo(self.screen))
+
+    def test_removing_a_saved_angle_deletes_it_in_hrm_and_clears_the_tile(self):
+        with self.YES, patch("face_attendance.dashboard.screens.ai_angles.delete_angle") as delete:
+            self.screen.tiles["left"].discard.click()
+            self.assertTrue(self._removed("left"))
+        delete.assert_called_once()
+        self.assertEqual(delete.call_args.args[1:], ("EMP015", "left"))
+        self.assertIsNone(self.screen.tiles["left"].path)
+        self.assertTrue(self.screen.tiles["up"].path)
+        self.assertEqual(self.changed, ["EMP015"])
+
+    def test_cancel_keeps_the_angle(self):
+        no = patch("face_attendance.dashboard.screens.ai_angles.QMessageBox.question",
+                   return_value=__import__("PyQt6.QtWidgets", fromlist=["QMessageBox"]).QMessageBox.StandardButton.No)
+        with no, patch("face_attendance.dashboard.screens.ai_angles.delete_angle") as delete:
+            self.screen.tiles["left"].discard.click()
+        delete.assert_not_called()
+        self.assertTrue(self.screen.tiles["left"].path)
+
+    def test_a_failed_removal_keeps_the_tile(self):
+        with self.YES, patch("face_attendance.dashboard.screens.ai_angles.delete_angle",
+                             side_effect=HRMError("No permission", 403)):
+            self.screen.tiles["left"].discard.click()
+            self.assertTrue(self._removed("left"))
+        self.assertTrue(self.screen.tiles["left"].path)
+        self.assertEqual(self.screen.tiles["left"].status.text(), "Saved in HRM")
+        self.assertEqual(self.changed, [])
+
+    def test_switching_employee_during_removal_leaves_the_new_tiles_alone(self):
+        def slow_delete(*_args):
+            time.sleep(0.2)
+        with self.YES, patch("face_attendance.dashboard.screens.ai_angles.delete_angle", side_effect=slow_delete):
+            self.screen.tiles["left"].discard.click()
+            self._select("EMP020")
+            self.assertTrue(self._removed("left"))
+            self.assertTrue(self._settled())
+        self.assertTrue(self.screen.tiles["down"].path)
+        self.assertEqual(self.changed, ["EMP015"])
+
+    def test_an_unsaved_generated_image_is_cleared_without_hrm(self):
+        fresh = self.root / "fresh.jpg"
+        fresh.write_bytes(jpeg(200))
+        tile = self.screen.tiles["right"]
+        tile.set_result(fresh)
+        self.screen._update_buttons()
+        with patch("face_attendance.dashboard.screens.ai_angles.delete_angle") as delete:
+            tile.discard.click()
+        delete.assert_not_called()
+        self.assertIsNone(tile.path)
+
+
+class FakeChecker:
+    def __init__(self, result, source_problem=""):
+        self.result, self.problem = result, source_problem
+
+    def source_problem(self):
+        return self.problem
+
+    def __call__(self, _content):
+        return self.result
+
+
+def checker(result, problem=""):
+    return patch("face_attendance.dashboard.screens.ai_angles.angle_templates.generated_image_checker",
+                 return_value=FakeChecker(result, problem))
+
+
+class DroppedWorkerTests(Base):
+    def _run(self, result, image_bytes=None, problem=""):
+        from face_attendance.dashboard.screens.ai_angles import DroppedAngleWorker
+        source = self.root / "drop.png"
+        source.write_bytes(image_bytes if image_bytes is not None else jpeg(90))
+        uploaded, events = [], []
+        with checker(result, problem):
+            worker = DroppedAngleWorker(b"src", "left", str(source), self.root / "out",
+                                        lambda key, path: uploaded.append((key, Path(path))))
+        for name in ("angleDone", "angleChecked", "angleFailed", "angleUploaded", "angleHeld", "runDone"):
+            getattr(worker, name).connect(lambda *args, name=name: events.append((name, args)))
+        worker.run()
+        APP.processEvents()
+        return uploaded, dict((name, args) for name, args in events)
+
+    def test_a_matching_photo_is_saved_as_jpeg_and_sent_to_hrm(self):
+        uploaded, events = self._run("matched")
+        self.assertEqual(len(uploaded), 1)
+        key, path = uploaded[0]
+        self.assertEqual(key, "left")
+        self.assertEqual(path.read_bytes()[:2], b"\xff\xd8")
+        self.assertEqual(events["angleUploaded"], ("left", ""))
+        self.assertEqual(events["runDone"], (False,))
+
+    def test_a_photo_of_someone_else_is_kept_but_not_sent(self):
+        uploaded, events = self._run("mismatch")
+        self.assertEqual(uploaded, [])
+        self.assertIn("angleHeld", events)
+        self.assertIn("angleDone", events)
+
+    def test_an_unreadable_file_fails_without_sending(self):
+        uploaded, events = self._run("matched", image_bytes=b"not an image")
+        self.assertEqual(uploaded, [])
+        self.assertEqual(events["angleFailed"][0], "left")
+        self.assertNotIn("angleDone", events)
+
+
+class DropScreenTests(ScreenCase):
+    def setUp(self):
+        super().setUp()
+        self.changed = []
+        self.screen.anglesChanged.connect(self.changed.append)
+        self._select("EMP015")
+        self._settled()
+        self.photo = self.root / "new left.jpg"
+        self.photo.write_bytes(jpeg(60))
+
+    def test_tiles_only_take_image_files(self):
+        from PyQt6.QtCore import QMimeData, QUrl
+        tile = self.screen.tiles["left"]
+        def event(name):
+            data = QMimeData()
+            data.setUrls([QUrl.fromLocalFile(str(self.root / name))])
+            return SimpleNamespace(mimeData=lambda: data)
+        self.assertTrue(tile.acceptDrops())
+        self.assertEqual(tile._dropped_image(event("a.JPG")), str(self.root / "a.JPG"))
+        self.assertEqual(tile._dropped_image(event("notes.pdf")), "")
+
+    def test_without_a_profile_photo_a_drop_explains_why(self):
+        self.screen._set_source(None)
+        with patch.object(self.screen.toast, "show_message") as toast:
+            self.screen._drop_angle("left", str(self.photo))
+        self.assertIsNone(self.screen._worker)
+        self.assertIn("profile photo", toast.call_args.args[0])
+
+    def test_a_matching_drop_replaces_the_angle_in_hrm(self):
+        self.screen._set_source(np.full((80, 80, 3), 120, dtype=np.uint8))
+        sent = []
+        with checker("matched"), patch.object(self.screen, "_hrm_uploader",
+                                              return_value=(lambda key, path: sent.append(key), "")):
+            self.screen._drop_angle("left", str(self.photo))
+            self.assertTrue(pump(lambda: self.screen._worker is None))
+        tile = self.screen.tiles["left"]
+        self.assertEqual(sent, ["left"])
+        self.assertTrue(tile.path and tile.hrm_sent)
+        self.assertIn("dropped", Path(tile.path).name)
+        self.assertEqual(self.changed, ["EMP015"])
+
+    def test_a_drop_that_fails_shows_the_hrm_photo_again(self):
+        self.screen._set_source(np.full((80, 80, 3), 120, dtype=np.uint8))
+        bad = self.root / "broken.jpg"
+        bad.write_bytes(b"x")
+        from face_attendance.dashboard.screens import ai_angles
+        real, seen = ai_angles.read_image, []
+
+        def read(path):
+            # Readable at drop time, broken by the time the worker copies it.
+            if Path(path) != bad:
+                return real(path)
+            seen.append(path)
+            return np.zeros((8, 8, 3), np.uint8) if len(seen) == 1 else None
+
+        with patch.object(self.screen, "_hrm_uploader", return_value=(None, "")), checker("matched"):
+            with patch("face_attendance.dashboard.screens.ai_angles.read_image", side_effect=read):
+                self.screen._drop_angle("left", str(bad))
+                self.assertTrue(pump(lambda: self.screen._worker is None))
+            self.assertTrue(self._settled())
+        self.assertTrue(self.screen.tiles["left"].path)
+        self.assertTrue(self.screen.tiles["left"].from_hrm)
+
+
 class AutoEnrollTests(ScreenCase):
     """A live update adds verified angles to enrollment without asking."""
 

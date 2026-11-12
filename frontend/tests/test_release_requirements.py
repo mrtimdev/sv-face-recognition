@@ -17,10 +17,14 @@ OPTIONAL = {
 }
 
 
-def imported_packages():
+def imported_packages(web=False):
     found = set()
+    web_directory = ROOT / "face_attendance" / "web"
     for path in [ROOT / "dashboard.py", *(ROOT / "face_attendance").rglob("*.py"),
                  *(ROOT / "license_plate").rglob("*.py")]:
+        is_web = path.is_relative_to(web_directory) or path.name == "verification_server.py"
+        if is_web != web:
+            continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Import):
                 found.update(alias.name.split(".")[0] for alias in node.names)
@@ -29,9 +33,9 @@ def imported_packages():
     return found - set(sys.stdlib_module_names) - FIRST_PARTY
 
 
-def required_packages():
+def required_packages(filename="requirements.txt"):
     names = set()
-    for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines():
+    for line in (ROOT / filename).read_text(encoding="utf-8").splitlines():
         match = re.match(r"[A-Za-z0-9_.-]+", line.strip())
         if match:
             names.add(match.group().lower())
@@ -42,6 +46,12 @@ class ReleaseRequirementsTests(unittest.TestCase):
     def test_every_imported_package_is_a_release_requirement(self):
         required = required_packages()
         missing = {name for name in imported_packages() - OPTIONAL
+                   if INSTALLED_AS.get(name, name).lower() not in required}
+        self.assertEqual(missing, set())
+
+    def test_browser_imports_are_web_requirements(self):
+        required = required_packages() | required_packages("requirements-web.txt")
+        missing = {name for name in imported_packages(web=True)
                    if INSTALLED_AS.get(name, name).lower() not in required}
         self.assertEqual(missing, set())
 

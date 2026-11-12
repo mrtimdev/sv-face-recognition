@@ -82,6 +82,39 @@ its optional `alert.wav` observation/save alert; `generate_alert_sound.py`
 creates that legacy file.
 
 
+## Browser dashboard
+
+From `frontend/`, install the web dependencies and start the server:
+
+```bash
+python -m pip install -r requirements-web.txt
+python dashboard.py --web
+```
+
+Open [Face ID at localhost:8080](http://127.0.0.1:8080) and sign in with
+your SV HRM account. The browser supports live preview and engine controls,
+filtered attendance reports and CSV export, the employee directory and HRM
+sync, and camera source and attendance requirement settings. SV HRM
+permissions apply to each action. Use the desktop dashboard for enrollment,
+AI Face Angles, license plates, and the full settings and evidence workflows.
+
+The server uses the existing `settings.json` and data directory. Close the
+desktop dashboard or terminal before switching the same camera and data to
+web mode. A new installation needs the SV HRM address (`hrm_api_url`) and
+integration key (`hrm_api_key`) in its settings file. An administrator can
+set the camera in the browser, then start the engine from Live Monitor. The
+camera or video file must be reachable from the machine running Python.
+Signing out of a browser leaves the engine in its current state.
+
+The server starts with recording stopped. Pass `--start` to begin recording
+on launch. Use `--settings /path/to/settings.json` to select an alternate
+settings file, or set `SV_FACE_DATA_DIR` before launch to move the default
+settings, database, captures, enrollments, and lock together. The default bind
+address is loopback. For remote browser access, use HTTPS through a reverse
+proxy and keep the HTTP listener private.
+
+See [native web Docker setup](running-as-web-docker-local.md) for containers.
+
 ## Dashboard (PyQt6 admin UI)
 
 Launch the graphical admin dashboard:
@@ -308,6 +341,21 @@ Additional samples and aliases under the **same employee ID** remain allowed.
 The check uses normalized SFace cosine distance and the dashboard's configured
 face tolerance (default 0.5). CLI/service callers use the default unless an
 explicit `duplicate_distance` is supplied.
+
+When HRM is configured, AI Face Angles also checks profile saves, angle uploads,
+and enrollment against other employees' HRM profile photos and all stored angles
+(including inactive employees). A match blocks the save and identifies the other
+employee. The updated SV HRM face-profile and face-angle endpoints enforce the
+same check before committing, including bulk items and concurrent uploads.
+
+SV HRM requires the separate Python verifier for these uploads. Install
+`requirements-verifier.txt`, set `SV_FACE_VERIFIER_KEY` to a shared secret of at
+least 32 characters, and run `python -m face_attendance.verification_server`
+from this directory. Set the matching `FACE_VERIFICATION_KEY` and private
+`FACE_VERIFICATION_URL` on Spring Boot. A Docker image is provided in
+`deploy/verifier/Dockerfile`; the SV HRM repository contains the Compose override
+and deployment instructions in `docs/face-angle-api.md`. Uploads are refused if
+verification is unavailable; existing saved images remain intact.
 
 Existing records are reviewed asynchronously in **Enrolled Employees**. Use
 **Refresh**, select **Possible duplicate faces**, and choose **Edit → Review

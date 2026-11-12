@@ -1,9 +1,15 @@
-"""Run the admin dashboard: python dashboard.py [--start].
+"""Launch the desktop dashboard or serve the browser dashboard with --web."""
+import sys
 
-The terminal (``python main.py``) and the CLI enrollment (``python
-enroll_faces.py``) keep working unchanged; both use the same data files.
-"""
-from face_attendance.dashboard.app import main
+
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--web" in args:
+        from face_attendance.web.server import main as launch
+        args.remove("--web")
+    else:
+        from face_attendance.dashboard.app import main as launch
+    return launch(args)
 
 
 if __name__ == "__main__":

@@ -192,6 +192,16 @@ def upload_angle(config, employee_code, angle_key, image, source=SOURCE_AI, open
     return data.get("data") or {}
 
 
+def delete_angle(config, employee_code, angle_key, opener=None):
+    """Remove one angle image from HRM. An angle HRM no longer has counts as removed."""
+    path = f"{_employee_path(employee_code)}/face-angles/{urllib.parse.quote(angle_key, safe='')}"
+    try:
+        _request(config, "DELETE", path, opener=opener)
+    except HRMError as exc:
+        if exc.status != 404:
+            raise
+
+
 def list_angles(config, employee_code, opener=None):
     """The angles HRM already has for this employee: {"angles": [...], "missing": [...]}."""
     return _request(config, "GET", f"{_employee_path(employee_code)}/face-angles", opener=opener).get("data") or {}

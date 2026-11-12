@@ -11,6 +11,8 @@ def _app_root():
     PyInstaller, use a writable user-data directory so the app can create
     databases, captures, and settings without needing write access to the
     bundle itself."""
+    if directory := os.environ.get("SV_FACE_DATA_DIR"):
+        return Path(directory).expanduser().resolve()
     if getattr(sys, "frozen", False):
         if sys.platform == "darwin":
             base = Path.home() / "Library" / "Application Support" / "SV Face ID"

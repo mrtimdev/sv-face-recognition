@@ -11,7 +11,6 @@ itself has to be trusted.
 No Qt here; the dashboard calls these functions from worker threads.
 """
 import base64
-import hashlib
 import json
 import os
 import platform
@@ -54,8 +53,10 @@ def access_for_roles(roles):
 
 
 def _device_info(app_version):
-    # HRM only accepts a token later if the login that made it registered a device.
-    return {"deviceId": "sv-face-id-" + hashlib.sha256(str(uuid.getnode()).encode()).hexdigest()[:24],
+    # HRM replaces the token for an existing (user, deviceId) pair. Each
+    # independent login needs its own registration, including browser sessions
+    # served by the same machine. Restoring a saved token keeps its registration.
+    return {"deviceId": "sv-face-id-" + uuid.uuid4().hex,
             "deviceModel": "SV Face ID desktop", "platform": platform.system(),
             "osVersion": platform.release(), "appVersion": str(app_version or "")}
 

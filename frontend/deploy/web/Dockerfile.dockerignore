@@ -1,0 +1,8 @@
+*
+!dashboard.py
+!requirements.txt
+!requirements-web.txt
+!face_attendance
+**/__pycache__
+**/*.pyc
+**/.DS_Store

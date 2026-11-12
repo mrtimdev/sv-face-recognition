@@ -42,6 +42,26 @@ def header(request, name):
     return dict((k.lower(), v) for k, v in request.header_items()).get(name.lower())
 
 
+class DeleteAngleTests(unittest.TestCase):
+    def test_delete_sends_delete_for_the_employee_angle(self):
+        http = FakeHTTP({"success": True})
+        hrm.delete_angle(CONFIG, "EMP 002", "left", opener=http)
+        request, follow = http.requests[0]
+        self.assertEqual(request.get_method(), "DELETE")
+        self.assertEqual(request.full_url,
+                         "https://hrm.example.com/api/face-recognition/employees/EMP%20002/face-angles/left")
+        self.assertEqual(header(request, "X-API-KEY"), KEY)
+        self.assertFalse(follow)
+
+    def test_an_angle_already_gone_counts_as_removed(self):
+        hrm.delete_angle(CONFIG, "EMP1", "left", opener=FakeHTTP(http_error(404, {"message": "No image"})))
+
+    def test_other_failures_are_raised(self):
+        with self.assertRaises(hrm.HRMError) as raised:
+            hrm.delete_angle(CONFIG, "EMP1", "left", opener=FakeHTTP(http_error(403)))
+        self.assertEqual(raised.exception.status, 403)
+
+
 class UploadTests(unittest.TestCase):
     def test_upload_puts_the_image_for_the_employee_with_the_key_in_a_header(self):
         http = FakeHTTP({"success": True, "data": {"angle": "left", "version": 2}})

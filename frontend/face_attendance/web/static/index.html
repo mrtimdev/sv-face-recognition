@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SV Face ID</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
+</head>
+<body>
+  <main id="sign-in" class="sign-in" hidden>
+    <form id="login-form" class="login-card">
+      <div class="brand-mark" aria-hidden="true">SV</div>
+      <h1>Sign in to Face ID</h1>
+      <p>Use your SV HRM account to access the attendance dashboard.</p>
+      <label>Username<input name="username" autocomplete="username" required maxlength="256"></label>
+      <label>Password<input type="password" name="password" autocomplete="current-password" required maxlength="1024"></label>
+      <button class="primary" type="submit">Sign in</button>
+      <p id="login-error" class="error" role="status"></p>
+    </form>
+  </main>
+  <div id="dashboard" class="layout" hidden>
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">SV</span><div><strong>Face ID</strong><small>Attendance dashboard</small></div></div>
+      <nav aria-label="Dashboard">
+        <button data-page="live" data-permission="view_dashboard">Live monitor</button>
+        <button data-page="reports" data-permission="view_reports">Attendance report</button>
+        <button data-page="employees" data-permission="manage_employees">Employees</button>
+        <button data-page="settings" data-permission="manage_settings">Settings</button>
+      </nav>
+      <div class="account"><strong id="account-name"></strong><button id="sign-out" class="quiet">Sign out</button></div>
+    </aside>
+    <main class="workspace">
+      <p id="notice" class="notice" role="status" hidden></p>
+      <section id="live" hidden>
+        <header class="page-header"><div><h1>Live monitor</h1><p>Camera, recognition and attendance recording.</p></div>
+          <div id="engine-actions" class="actions" hidden>
+            <button data-action="start" class="primary">Start engine</button>
+            <button data-action="pause">Pause recording</button>
+            <button data-action="resume" class="primary">Resume recording</button>
+            <button data-action="stop">Stop engine</button>
+          </div>
+        </header>
+        <div class="metrics">
+          <div><span>Camera</span><strong id="camera-status">—</strong></div>
+          <div><span>Camera FPS</span><strong id="fps">—</strong></div>
+          <div><span>Faces in view</span><strong id="faces">—</strong></div>
+          <div><span>Verified today</span><strong id="verified">—</strong></div>
+        </div>
+        <article class="panel">
+          <header class="panel-header"><div><h2>Camera preview</h2><p id="camera-source"></p></div><span id="recording" class="pill">Stopped</span></header>
+          <div class="preview"><img id="camera-frame" alt="Live recognition camera" hidden><p id="preview-message">Start the engine to see the live camera.</p></div>
+          <footer class="panel-footer"><span id="hrm-status"></span><span id="storage-status"></span></footer>
+        </article>
+      </section>
+      <section id="reports" hidden>
+        <header class="page-header"><div><h1>Attendance report</h1><p>Search recorded attendance by employee or date.</p></div><button id="export" hidden>Download CSV</button></header>
+        <article class="panel">
+          <form id="report-filter" class="filters">
+            <label>Period<select name="preset"><option value="today">Today</option><option value="hour">Last hour</option><option value="week">Last 7 days</option><option value="month">This month</option><option value="all">All records</option><option value="custom">Date range</option></select></label>
+            <label class="custom-date" hidden>From<input name="start" type="date"></label>
+            <label class="custom-date" hidden>Through<input name="end" type="date"></label>
+            <label>Employee<input name="search" type="search" placeholder="Name or employee ID" maxlength="100"></label>
+            <button type="submit">Apply filters</button>
+          </form>
+          <div class="table-wrap"><table><thead><tr><th>Recorded at</th><th>Employee</th><th>Employee ID</th><th>Status</th><th>Verified presence</th></tr></thead><tbody id="report-rows"></tbody></table></div>
+          <p id="report-sync" class="report-sync"></p>
+          <footer id="report-pages" class="panel-footer pagination"><span></span><button data-step="-1">Previous</button><button data-step="1">Next</button></footer>
+        </article>
+      </section>
+      <section id="employees" hidden>
+        <header class="page-header"><div><h1>Employees</h1><p>Browse the SV HRM directory and face enrollments.</p></div><button id="sync-employees">Sync from HRM</button></header>
+        <article class="panel">
+          <form id="employee-filter" class="filters"><label>Employee<input name="search" type="search" placeholder="Name or employee ID" maxlength="100"></label><button type="submit">Search</button></form>
+          <div class="table-wrap"><table><thead><tr><th>Employee</th><th>Employee ID</th><th>Department</th><th>Status</th><th>Local samples</th><th>HRM angles</th></tr></thead><tbody id="employee-rows"></tbody></table></div>
+          <footer id="employee-pages" class="panel-footer pagination"><span></span><button data-step="-1">Previous</button><button data-step="1">Next</button></footer>
+        </article>
+      </section>
+      <section id="settings" hidden>
+        <header class="page-header"><div><h1>Settings</h1><p>Configure the camera and face verification requirements.</p></div></header>
+        <form id="settings-form" class="panel settings-form">
+          <h2>Camera and recognition</h2>
+          <p id="current-source"></p>
+          <label>New camera source<input name="source" type="password" placeholder="Webcam index, RTSP URL or server file path" autocomplete="off" maxlength="2048"></label>
+          <label>Attendance requirement<select name="attendance_mode"></select></label>
+          <p id="settings-help">Leave the camera source blank to keep the current camera.</p>
+          <button type="submit" class="primary">Save settings</button>
+        </form>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

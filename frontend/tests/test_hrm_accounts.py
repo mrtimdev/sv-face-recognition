@@ -568,5 +568,34 @@ class SignedInWindowTests(unittest.TestCase):
                 _app().processEvents()
 
 
+
+class IndependentSessionTests(unittest.TestCase):
+    def test_second_login_preserves_first_session_and_revocation_still_works(self):
+        # Model SV HRM's saveOrUpdateDevice and isTokenActive behavior.
+        registrations = {}
+        config = HRMConfig(base_url="http://127.0.0.1")
+
+        def call(_config, method, path, body=None, token="", **_kwargs):
+            if path == "/api/auth/login":
+                token = jwt()
+                registrations[(body["username"], body["deviceInfo"]["deviceId"])] = token
+                return 200, {"accessToken": token, "userId": "7",
+                             "username": body["username"], "roles": ["ROLE_ADMIN"]}
+            if token in registrations.values():
+                return 200, {"exists": True}
+            return 401, {}
+
+        with patch.object(hrm_auth, "_call", side_effect=call):
+            first = hrm_auth.sign_in(config, "dara", "secret")
+            second = hrm_auth.sign_in(config, "dara", "secret")
+            self.assertEqual(len(registrations), 2)
+            self.assertIs(hrm_auth.check_account(config, first), first)
+            self.assertIs(hrm_auth.check_account(config, second), second)
+            first_key = next(key for key, token in registrations.items() if token == first.hrm_token)
+            del registrations[first_key]
+            self.assertIsNone(hrm_auth.check_account(config, first))
+            self.assertIs(hrm_auth.check_account(config, second), second)
+
+
 if __name__ == "__main__":
     unittest.main()

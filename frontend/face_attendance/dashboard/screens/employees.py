@@ -125,16 +125,18 @@ class EnrollmentRunner(QObject):
         super().__init__(parent)
         self.service = service
 
-    def submit(self, images, name, employee_id, check_quality=True, first_name="", last_name=""):
+    def submit(self, images, name, employee_id, check_quality=True, first_name="", last_name="", before_enroll=None):
         copies = [image.copy() for image in images if image is not None]
         thread = threading.Thread(target=self._work,
                                   args=(self.service, copies, name, employee_id, check_quality,
-                                        first_name, last_name),
+                                        first_name, last_name, before_enroll),
                                   name="enrollment", daemon=True)
         thread.start()
 
-    def _work(self, service, images, name, employee_id, check_quality, first_name="", last_name=""):
+    def _work(self, service, images, name, employee_id, check_quality, first_name="", last_name="", before_enroll=None):
         try:
+            if before_enroll is not None:
+                before_enroll(images, employee_id)
             outcome = service.enroll_many(images, name, employee_id, check_quality,
                                           first_name=first_name, last_name=last_name)
         except Exception as exc:

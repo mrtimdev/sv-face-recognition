@@ -451,6 +451,7 @@ class MainWindow(QMainWindow):
         self.hrm_angles.failed.connect(lambda message: self._note(f"Could not update face angles from HRM: {message}"))
         self.hrm_live.employeesChanged.connect(self.hrm_angles.request)
         self.hrm_live.anglesVerified.connect(lambda _code: self.hrm_angles.request())  # A result changes who can match.
+        self.screens[6].anglesChanged.connect(self._on_local_angles_changed)
         self.hrm_uplink = AttendanceUplink(self.hrm_live, lambda: self.engine.config or self.settings.to_config(), self)
         self.hrm_uplink.statusChanged.connect(self.screens[0].set_sync_status)
         self.screens[0].set_sync_status(self.hrm_uplink.status)
@@ -890,6 +891,15 @@ class MainWindow(QMainWindow):
         self.screens[6].on_hrm_angles_changed(employee_code)
         self.screens[2].on_hrm_angles_changed(employee_code)
         self.hrm_angles.request()
+
+    def _on_local_angles_changed(self, employee_code):
+        """This app removed or replaced an angle. Update the Live Monitor now rather than waiting for HRM's
+        event; without the live connection no event comes, so also refresh the enrolled status and profile."""
+        self.engine.logMessage.emit(f"Face angles changed in HRM for {employee_code}")
+        self.hrm_angles.request()
+        if not self.hrm_live.connected:
+            self.screens[2].on_hrm_angles_changed(employee_code)
+            self.screens[2].request_hrm_refresh()
 
     def _on_hrm_photo_changed(self, employee_code):
         self.engine.logMessage.emit(f"Profile photo changed in HRM for {employee_code}")

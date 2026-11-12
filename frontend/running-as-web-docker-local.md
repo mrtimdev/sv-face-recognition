@@ -1,59 +1,41 @@
-I'll check the guide and compose file so the commands match what's actually in the repo.
+# Run the browser dashboard with Docker
 
-You can run it with Docker, using the commands below. Docker is already running on your Mac, port 6080 is free, and the only thing missing is the `.env` file, which step 2 creates.
-
-**1. Go to the folder:**
+From `frontend/`:
 
 ```bash
-cd "/Users/timdev/Desktop/works/Python Projects/sv-face-recognition/frontend/deploy/stream"
+mkdir -p deploy/web/data
 ```
 
-**2. Create your settings file:**
+Create `deploy/web/data/settings.json` with your SV HRM URL, integration key,
+and camera address. The file and directory must be writable by the container
+user (UID 1000 on Linux). Keep the settings file private.
+
+```json
+{
+  "hrm_api_url": "https://hrm.example.com",
+  "hrm_api_key": "YOUR_INTEGRATION_KEY",
+  "source": "rtsp://camera.example.com:554/stream1"
+}
+```
 
 ```bash
-cp .env.example .env && chmod 600 .env
+docker compose -f deploy/web/compose.yaml up -d --build
 ```
 
-**3. Set the password:** this opens the file in TextEdit. Set `VNC_PASSWORD=` to at least 8 characters and save.
+Open [Face ID at localhost:8080](http://127.0.0.1:8080), sign in with SV HRM,
+and use **Live monitor → Start engine**. On Docker Desktop, use a network
+camera reachable from the container. To record on every container start, add
+`command: ["--start"]` under the Compose `app` service.
+
+The bind-mounted `deploy/web/data/` directory keeps settings, attendance,
+unsent events, face templates and captures after a rebuild or shutdown. When
+moving an existing installation, stop its engine before copying data and update
+any configured absolute storage paths to point inside `/data`.
 
 ```bash
-open -e .env
+docker compose -f deploy/web/compose.yaml logs --tail 100
+docker compose -f deploy/web/compose.yaml down
 ```
 
-**4. Build and start it:** the first build can take several minutes, and the image is about 2.2 GB.
-
-```bash
-docker compose up -d --build
-```
-
-**5. Open it in your browser:** go to http://127.0.0.1:6080 and enter the password from step 3.
-
-**6. Set up the app:**
-- Sign in with your SV HRM account and leave **Remember me** ticked.
-- In Settings, enter the camera's `rtsp://` address and the HRM API key.
-
-## Checking and stopping it
-**Check attendance health:** expect `healthy` after signing in and starting the camera. A stopped, paused or signed-out engine is `unhealthy`, even when the browser is reachable.
-
-```bash
-docker compose ps
-```
-
-**See the logs if something's wrong:**
-
-```bash
-docker compose logs --tail 100
-```
-
-**Stop it:** your data is kept. Avoid adding `-v`, because `docker compose down -v` deletes all of it, including faces and any unsent attendance.
-
-```bash
-docker compose down
-```
-
-## What's different on a Mac
-- **Real attendance:** if you use your real HRM account and camera, check-ins go to the real HRM. Close the Desktop App while testing, because running both on one camera could record people twice.
-- **Separate data:** the container doesn't use your Desktop App's settings, sign-in or local data, so it starts empty.
-- **Camera:** use a network (RTSP) camera. Docker on a Mac can't see the built-in webcam or a USB camera.
-- **Staying on:** it stops while the Mac sleeps or Docker is closed, so this is good for testing but not for 24/7 use. If you don't run `docker compose down`, it starts again whenever Docker starts.
-- **Speed:** Docker Desktop limits the CPU and memory containers can use. If it's slow, raise them in Docker Desktop under Settings > Resources.
+Docker health checks the HTTP service. Live Monitor shows camera, storage and
+HRM delivery status.

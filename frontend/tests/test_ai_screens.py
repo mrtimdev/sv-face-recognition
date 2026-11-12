@@ -283,6 +283,9 @@ class FakeChecker:
 
 class AnglesScreenTests(Base):
     def setUp(self):
+        identity = patch("face_attendance.identity_check.validate_hrm_upload")
+        self.identity_check = identity.start()
+        self.addCleanup(identity.stop)
         super().setUp()
         self.settings.ai_provider = "custom"
         self.settings.ai_profiles = ai.dump_profiles({"custom": {
@@ -425,6 +428,24 @@ class AnglesScreenTests(Base):
             self.screen.preview.dropped.emit(path)
             self.assertTrue(pump(lambda: not self.screen.busy))
         return saved
+
+    def test_duplicate_profile_cannot_be_uploaded_even_after_confirmation(self):
+        self.identity_check.side_effect = HRMError("This face matches employee EMP002.")
+        with patch.object(QMessageBox, "warning", return_value=QMessageBox.StandardButton.Yes):
+            saved = self._drop(self._existing_employee(), check="mismatch")
+        saved.assert_not_called()
+        self.assertIn("EMP002", self.screen.photo_status.text())
+
+    def test_duplicate_generated_angles_are_never_uploaded(self):
+        self._with_hrm()
+        self._new_person()
+        self.screen.id_edit.setText("EMP002")
+        self.identity_check.side_effect = HRMError("This face matches employee EMP001.")
+        with self._fake_generate(), patch.object(ai_angles, "upload_angle") as upload:
+            self.screen.generate_button.click()
+            self.assertTrue(pump(lambda: not self.screen.busy))
+        upload.assert_not_called()
+        self.assertTrue(self.identity_check.called)
 
     def test_a_dropped_photo_is_saved_to_the_profile_straight_away(self):
         saved = self._drop(self._existing_employee())
@@ -673,6 +694,15 @@ class AnglesScreenTests(Base):
         with self._fake_generate():
             self.screen.generate_button.click()
             self.assertTrue(pump(lambda: not self.screen.busy))
+
+    def test_hrm_duplicate_blocks_local_ai_enrollment_before_any_samples_are_saved(self):
+        self._with_hrm()
+        self.identity_check.side_effect = HRMError("This face matches employee EMP002.")
+        with patch.object(self.screen.service, "enroll_many") as enroll:
+            self.screen._submit_enrollment([self.photo], "Jane", "EMP001", {})
+            self.assertTrue(pump(lambda: not self.screen._saving))
+        enroll.assert_not_called()
+        self.assertIn("EMP002", self.screen.toast.label.text())
 
     def test_enrollment_requires_confirmation(self):
         self._new_person()
