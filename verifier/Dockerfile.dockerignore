@@ -1,6 +1,10 @@
 *
-!requirements-verifier.txt
-!face_attendance
+!verifier/requirements.txt
+!verifier/sv_face_verifier
+!frontend/face_attendance/__init__.py
+!frontend/face_attendance/face_backend.py
+!frontend/face_attendance/geometry.py
+!frontend/face_attendance/assets/recognition
 **/__pycache__
 **/*.pyc
 **/.DS_Store

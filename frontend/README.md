@@ -348,13 +348,11 @@ and enrollment against other employees' HRM profile photos and all stored angles
 employee. The updated SV HRM face-profile and face-angle endpoints enforce the
 same check before committing, including bulk items and concurrent uploads.
 
-SV HRM requires the separate Python verifier for these uploads. Install
-`requirements-verifier.txt`, set `SV_FACE_VERIFIER_KEY` to a shared secret of at
-least 32 characters, and run `python -m face_attendance.verification_server`
-from this directory. Set the matching `FACE_VERIFICATION_KEY` and private
-`FACE_VERIFICATION_URL` on Spring Boot. A Docker image is provided in
-`deploy/verifier/Dockerfile`; the SV HRM repository contains the Compose override
-and deployment instructions in `docs/face-angle-api.md`. Uploads are refused if
+SV HRM requires the separate Python verifier for these uploads. It lives in
+this repository's `verifier` folder; see `../verifier/README.md` for running it
+locally or with Docker. Set the matching `FACE_VERIFICATION_KEY` and private
+`FACE_VERIFICATION_URL` on Spring Boot. The SV HRM repository contains the
+Compose override and deployment instructions in `docs/face-angle-api.md`. Uploads are refused if
 verification is unavailable; existing saved images remain intact.
 
 Existing records are reviewed asynchronously in **Enrolled Employees**. Use

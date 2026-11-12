@@ -11,7 +11,8 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from .face_backend import MODEL_ID, OpenCVFaceBackend
+# The same models and code as the desktop app, so HRM's checks and the Live Monitor agree.
+from face_attendance.face_backend import MODEL_ID, OpenCVFaceBackend
 
 MAX_BYTES = 10 * 1024 * 1024
 _MODEL_LOCK = threading.Lock()

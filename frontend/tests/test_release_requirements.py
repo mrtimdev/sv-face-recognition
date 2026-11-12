@@ -22,7 +22,7 @@ def imported_packages(web=False):
     web_directory = ROOT / "face_attendance" / "web"
     for path in [ROOT / "dashboard.py", *(ROOT / "face_attendance").rglob("*.py"),
                  *(ROOT / "license_plate").rglob("*.py")]:
-        is_web = path.is_relative_to(web_directory) or path.name == "verification_server.py"
+        is_web = path.is_relative_to(web_directory)
         if is_web != web:
             continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):

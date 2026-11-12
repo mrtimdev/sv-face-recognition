@@ -1,0 +1,35 @@
+services:
+  verifier:
+    build:
+      context: ..
+      dockerfile: verifier/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - verifier.env
+    expose:
+      - "8091"
+    networks:
+      - verifier
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      VERIFIER_DOMAIN: ${VERIFIER_DOMAIN:?Set VERIFIER_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - verifier
+
+networks:
+  verifier:
+
+volumes:
+  caddy_data:
+  caddy_config:
