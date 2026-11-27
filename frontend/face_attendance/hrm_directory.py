@@ -236,8 +236,9 @@ def resolver(directory):
 
     The name and status come from HRM. Someone HRM doesn't list, or doesn't list as
     ACTIVE, can't record attendance, and marking a person inactive here still holds
-    whatever HRM says. Returns None with no usable directory, so a computer that has
-    never reached HRM keeps its local list rather than blocking everyone.
+    whatever HRM says. Someone HRM marks not face enrolled can't record attendance either.
+    Returns None with no usable directory, so a computer that has never reached HRM
+    keeps its local list rather than blocking everyone.
     """
     if not directory.synced or not directory.employees:
         return None
@@ -252,7 +253,8 @@ def resolver(directory):
         return replace(employee, name=info.get("employee_name") or employee.name,
                        first_name=info.get("first_name") or employee.first_name,
                        last_name=info.get("last_name") or employee.last_name,
-                       active=employee.active and info.get("hrm_status") == "ACTIVE")
+                       active=employee.active and info.get("hrm_status") == "ACTIVE"
+                       and info.get("face_enrolled") is not False)
     return resolve
 
 
@@ -262,13 +264,15 @@ def live_catalog(config, allow_empty=False):
     Connected to HRM it matches only the enrolled angles and applies HRM's names and statuses.
     Angles of anyone HRM's list doesn't have are left out: they're from before an override or a
     server switch, and the next angle sync deletes them. A computer that has never reached HRM
-    has no angles to use, so it keeps its local samples.
+    has no angles to use, so it keeps its local samples. Angles of someone HRM marks not face
+    enrolled are left out too, so the Live Monitor shows them as Unknown.
     """
     directory = load(cache_path(config))
     resolve = resolver(directory)
     angle_store = None
     if resolve is not None:
-        listed = {_key(row["employee_id"]) for row in directory.employees}
+        listed = {_key(row["employee_id"]) for row in directory.employees
+                  if row.get("face_enrolled") is not False}
         angle_store = {code: angles for code, angles in angle_templates.load(angle_templates.store_path(config)).items()
                        if _key(code) in listed}
     return FaceCatalog(config.encodings_path, config.employees_path, allow_empty=allow_empty,
@@ -278,7 +282,7 @@ def live_catalog(config, allow_empty=False):
 def fingerprint(directory):
     """Changes only when something the Live Monitor uses changes, not on every sync."""
     rows = sorted((row.get("employee_id"), row.get("employee_name"), row.get("first_name"), row.get("last_name"),
-                   row.get("hrm_status")) for row in directory.employees)
+                   row.get("hrm_status"), row.get("face_enrolled")) for row in directory.employees)
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 

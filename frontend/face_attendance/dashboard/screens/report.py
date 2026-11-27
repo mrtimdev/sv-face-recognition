@@ -15,7 +15,9 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboB
                              QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ..access import guard
-from ...report import AttendanceReader, delete_records, export_excel, export_rows
+from ... import hrm_directory
+from ...report import (NOT_ENROLLED, STATUS_FILTERS, AttendanceReader, delete_observations, delete_records,
+                       export_excel, export_rows, report_page)
 from ...storage import context_path
 from ..icons import apply_button_icon, make_icon
 from ..theme import palette
@@ -545,7 +547,13 @@ class ReportScreen(QWidget):
         row2.setSpacing(8)
 
         self.status_filter = QComboBox()
-        self.status_filter.addItems(["All status", "KNOWN", "UNKNOWN"])
+        for key, label in STATUS_FILTERS:
+            self.status_filter.addItem(label, key)
+        self.status_filter.setToolTip(
+            "Known: check-ins by face-enrolled employees.\n"
+            "Not enrolled: check-ins by employees HRM marks not face enrolled.\n"
+            "Unknown: faces that matched nobody (saved by the Live Monitor).\n"
+            "Inactive: inactive employees whose scan was blocked.")
         self.status_filter.setFixedHeight(30)
         self.status_filter.setMinimumWidth(110)
         row2.addWidget(self.status_filter)
@@ -775,6 +783,10 @@ class ReportScreen(QWidget):
         self.clear_button.clicked.connect(self._clear_filters)
         self.table.cellClicked.connect(self._on_cell_click)
         self.engine.attendanceSaved.connect(lambda _: self.reload())
+        for name in ("unknownFaceAlert", "inactiveEmployeeAlert", "catalogChanged"):
+            signal = getattr(self.engine, name, None)
+            if signal is not None:  # New observations and enrollment changes show up right away.
+                signal.connect(lambda *_: self.reload())
 
     def _clear_filters(self):
         self.search_edit.clear()
@@ -886,23 +898,19 @@ class ReportScreen(QWidget):
     def reload(self, reset_page=False):
         if reset_page:
             self.page = 0
-        start, end = self.selected_range()
         search = self.search_edit.text().strip() or None
         status_text = self.status_filter.currentText()
 
         size = max(1, self.page_size_box.value())
-        self.total = self.reader.count(start=start, end=end, search=search)
+        rows, self.total, summary = self._page(size, self.page * size)
         pages = max(1, (self.total + size - 1) // size)
-        self.page = min(self.page, pages - 1)
-        rows = self.reader.records(start=start, end=end, search=search,
-                                   limit=size, offset=self.page * size)
-        if status_text not in ("All status", "All"):
-            rows = [r for r in rows if r["status"].upper() == status_text]
+        if self.page > pages - 1:
+            self.page = pages - 1
+            rows, self.total, summary = self._page(size, self.page * size)
 
         self._current_rows = rows
         self._populate_table(rows)
 
-        summary = self.reader.summary(start=start, end=end, search=search)
         counts = self.reader.outbox_counts()
         self.cards["records"].set_value(summary["records"])
         self.cards["employees"].set_value(summary["employees"])
@@ -935,6 +943,23 @@ class ReportScreen(QWidget):
 
         if self.reader.error:
             self.toast.show_message(self.reader.error, "bad")
+
+    def status_key(self):
+        return self.status_filter.currentData() or "all"
+
+    def _not_enrolled_ids(self):
+        """Employee codes HRM marks not face enrolled; their check-ins show as NOT ENROLLED."""
+        try:
+            directory = hrm_directory.load(hrm_directory.cache_path(self.settings))
+        except Exception:
+            return ()
+        return tuple(row["employee_id"] for row in directory.employees if row.get("face_enrolled") is False)
+
+    def _page(self, limit, offset):
+        start, end = self.selected_range()
+        search = self.search_edit.text().strip() or None
+        return report_page(self.reader, self.settings.capture_dir, self.status_key(), self._not_enrolled_ids(),
+                           start, end, search, limit, offset)
 
     def _populate_table(self, rows):
         self.table.setRowCount(len(rows))
@@ -996,7 +1021,9 @@ class ReportScreen(QWidget):
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if status_text == "KNOWN":
                 status_item.setForeground(QColor(c["success"]))
-            else:
+            elif status_text in ("UNKNOWN", "INACTIVE"):
+                status_item.setForeground(QColor(c["danger"]))
+            else:  # NOT ENROLLED and anything else unusual.
                 status_item.setForeground(QColor(c["warn"]))
             font_s = status_item.font()
             font_s.setWeight(QFont.Weight.Bold)
@@ -1043,8 +1070,6 @@ class ReportScreen(QWidget):
     def _export(self, scope):
         if not guard(self, "export_data", "export attendance records"):
             return
-        start, end = self.selected_range()
-        search = self.search_edit.text().strip() or None
         size = max(1, self.page_size_box.value())
         pages = max(1, (self.total + size - 1) // size)
 
@@ -1056,19 +1081,16 @@ class ReportScreen(QWidget):
             rows = [self._current_rows[i] for i in indices if i < len(self._current_rows)]
             scope_label = f"{len(rows)} selected"
         elif scope == "current":
-            rows = self.reader.records(start=start, end=end, search=search,
-                                       limit=size, offset=self.page * size)
+            rows = self._page(size, self.page * size)[0]
             scope_label = f"page {self.page + 1}"
         elif scope == "all":
-            rows = self.reader.records(start=start, end=end, search=search, limit=100000)
+            rows = self._page(100000, 0)[0]
             scope_label = "all pages"
         elif scope == "to_first":
-            rows = self.reader.records(start=start, end=end, search=search,
-                                       limit=(self.page + 1) * size, offset=0)
+            rows = self._page((self.page + 1) * size, 0)[0]
             scope_label = f"pages 1–{self.page + 1}"
         elif scope == "to_last":
-            rows = self.reader.records(start=start, end=end, search=search,
-                                       limit=100000, offset=self.page * size)
+            rows = self._page(100000, self.page * size)[0]
             scope_label = f"pages {self.page + 1}–{pages}"
         else:
             return
@@ -1127,8 +1149,9 @@ class ReportScreen(QWidget):
         if confirm.exec() != QMessageBox.StandardButton.Yes:
             return
 
-        record_ids = [r["id"] for r in rows]
-        dlg = _DeleteProgressDialog(len(record_ids), self._theme, self)
+        record_ids = [r["id"] for r in rows if r.get("id") is not None]
+        observations = [r for r in rows if r.get("id") is None]
+        dlg = _DeleteProgressDialog(len(rows), self._theme, self)
         overlay = _BlurOverlay(self) if self.isVisible() else None
         dlg.show()
         QApplication.processEvents()
@@ -1138,6 +1161,9 @@ class ReportScreen(QWidget):
                 self.settings, record_ids,
                 delete_snapshots=True,
                 progress_cb=dlg.update_progress)
+            removed = delete_observations(self.settings.capture_dir, observations)
+            deleted_rows, deleted_files = deleted_rows + removed, deleted_files + removed
+            dlg.update_progress(len(rows), len(rows))
             dlg.set_finished(deleted_rows, deleted_files)
             QApplication.processEvents()
             QTimer.singleShot(1200, dlg.accept)

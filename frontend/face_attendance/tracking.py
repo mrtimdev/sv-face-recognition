@@ -9,6 +9,9 @@ from .anti_spoof import PresentationGuard, SAMPLE_MAX_AGE, live_sample
 from .liveness import LivenessChecker
 from .models import FaceTrack, State, TrackHint
 
+# How far (in face widths) a face may reappear from where its track was lost and keep its #ID.
+REVIVE_DISTANCE = 1.0
+
 
 class FaceTracker:
     def __init__(self, config):
@@ -199,6 +202,16 @@ class FaceTracker:
                 track.spoof_progress = 0.0
                 track.last_spoof_at = float("-inf")
         for index, detection in enumerate(result.detections):
+            if index not in assignments:
+                revived = self._lost_nearby(detection.bounding_box, packet, used)
+                if revived is not None:
+                    # Same face, briefly lost or moved fast: keep its #ID instead of a new one.
+                    # Its identity, liveness and presence were already reset, so it re-verifies.
+                    revived.bounding_box = detection.bounding_box
+                    revived.box_history.clear()
+                    revived.points = None
+                    assignments[index] = revived.track_id
+                    used.add(revived.track_id)
             track = self.tracks.get(assignments.get(index))
             if track is None:
                 track = FaceTrack(self.next_id, detection.bounding_box, packet.captured_at,
@@ -283,6 +296,30 @@ class FaceTracker:
         self._mark_overlaps()
         return True
 
+    def _lost_nearby(self, box, packet, used):
+        """The closest recently lost track near *box*, or None."""
+        best, best_distance = None, REVIVE_DISTANCE
+        for track in self.tracks.values():
+            if (track.track_id in used or track.first_seen > packet.captured_at
+                    or packet.captured_at - track.last_seen > self.config.detection_fresh_sec):
+                continue
+            old = track.bounding_box
+            size = max(1, old[1] - old[3], old[2] - old[0], box[1] - box[3], box[2] - box[0])
+            distance = math.hypot((old[1] + old[3] - box[1] - box[3]) / 2,
+                                  (old[0] + old[2] - box[0] - box[2]) / 2) / size
+            if distance <= best_distance:
+                best, best_distance = track, distance
+        return best
+
+    def _drop_ghosts(self, track):
+        """A face now identified on *track* replaces any lost track of the same person on screen."""
+        for other in list(self.tracks.values()):
+            if (other is not track and not other.visible and other.employee_id == track.employee_id
+                    and other.pending_event_id is None):
+                self.liveness.reset(other.track_id)
+                self.presentation.reset(other.track_id)
+                del self.tracks[other.track_id]
+
     def _recognize(self, track, detection, packet, now):
         cfg = self.config
         employee = detection.employee
@@ -307,6 +344,7 @@ class FaceTracker:
             track.employee_id = employee.employee_id
             track.employee_active = employee.active
             track.identity_valid = True
+            self._drop_ghosts(track)
         # Pending persistence belongs to the original employee even if this track changes.
         if track.pending_event_id is None and track.state not in (State.SUCCESS, State.COOLDOWN, State.ERROR):
             track.transition(State.INACTIVE if track.identity_valid and not track.employee_active else

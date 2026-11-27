@@ -37,6 +37,27 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(self.tracker.tracks[2].employee_id, "B")
         self.assertTrue(all(t.identity_valid for t in self.tracker.tracks.values()))
 
+    def test_a_face_reappearing_nearby_keeps_its_track_id(self):
+        self.detect(1, 1, [Detection(self.box_a, self.a, .3, True)])
+        self.detect(7, 1.2, [])  # Briefly lost.
+        self.assertFalse(self.tracker.tracks[1].visible)
+        # Back a little further than normal association allows: same #ID, no second box.
+        moved = (60, 230, 180, 110)
+        self.detect(13, 1.4, [Detection(moved, self.a, .3, True)])
+        self.assertEqual(list(self.tracker.tracks), [1])
+        self.assertTrue(self.tracker.tracks[1].visible)
+        self.assertEqual(self.tracker.tracks[1].verified_presence, 0)
+
+    def test_an_identified_face_replaces_the_lost_box_of_the_same_person(self):
+        self.detect(1, 1, [Detection(self.box_a, self.a, .3, True)])
+        self.detect(7, 1.2, [Detection(self.box_a, self.a, .3, True)])
+        self.assertTrue(self.tracker.tracks[1].identity_valid)
+        # Alice jumps across the frame: a new track, and the old one must not linger as a ghost.
+        for seq, now in ((13, 1.4), (19, 1.6)):
+            self.detect(seq, now, [Detection(self.box_b, self.a, .3, True)])
+        self.assertEqual(list(self.tracker.tracks), [2])
+        self.assertEqual(self.tracker.tracks[2].employee_id, "A")
+
     def test_capture_coordinates_belong_to_the_analyzed_detection(self):
         self.detect(1, 1, [Detection(self.box_a, self.a, .3, True, spoof_score=.99),
                            Detection(self.box_b, self.b, .3, True, spoof_score=.99)])

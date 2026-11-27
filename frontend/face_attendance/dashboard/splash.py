@@ -3,7 +3,7 @@ import math
 import random
 from pathlib import Path
 
-from PyQt6.QtCore import (QEasingCurve, QParallelAnimationGroup, QPointF,
+from PyQt6.QtCore import (QEasingCurve, QElapsedTimer, QParallelAnimationGroup, QPointF,
                           QPropertyAnimation, QRectF, QSequentialAnimationGroup,
                           Qt, QThread, QTimer, pyqtProperty, pyqtSignal)
 from PyQt6.QtGui import (QColor, QFont, QFontDatabase, QLinearGradient,
@@ -16,6 +16,14 @@ _C = PALETTES["dark"]
 
 FADE_OUT_MS = 500
 
+# Layout (px). Everything below the icon is placed from these, so nothing overlaps.
+WIDTH, HEIGHT = 540, 720
+ICON_Y = 210            # centre of the icon tile
+CHECK_TOP = ICON_Y + 250
+ROW_H = 30
+BUTTONS_GAP = 12        # between the last check row and the buttons
+FOOTER_H = 20
+
 CHECK_LABELS = [
     ("settings", "Loading Settings"),
     ("face_models", "Face Recognition Models"),
@@ -24,6 +32,10 @@ CHECK_LABELS = [
     ("enrolled", "Enrolled Employees"),
     ("database", "Database Connection"),
 ]
+
+
+_FONTS = {}
+_FAMILY = None
 
 
 class _Particle:
@@ -98,14 +110,14 @@ class _CheckWorker(QThread):
             return False, str(exc)[:60]
 
     def _check_enrolled(self):
+        """Who the Live Monitor can recognize: HRM face angles when connected, else local samples."""
         try:
-            from ..template_store import read_templates
-            path = Path(self._settings.encodings_path)
-            if not path.exists():
-                return False, "No enrollment data found"
-            data = read_templates(path)
-            total_templates = sum(len(v) for v in data.values())
-            return True, f"{len(data)} employees, {total_templates} templates"
+            from .. import hrm_directory
+            catalog = hrm_directory.live_catalog(self._settings, allow_empty=True)
+            count = catalog.enrolled_count
+            if not count:
+                return False, "No one enrolled yet"
+            return True, f"{count} employee{'s' if count != 1 else ''}, {len(catalog.encodings)} faces"
         except Exception as exc:
             return False, str(exc)[:60]
 
@@ -135,7 +147,7 @@ class SplashScreen(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.resize(520, 680)
+        self.setFixedSize(WIDTH, HEIGHT)
 
         self._settings = settings
         self._icon_scale = 0.0
@@ -160,9 +172,14 @@ class SplashScreen(QWidget):
         self._checks_complete = False
         self._all_passed = True
         self._completed_count = 0
+        self._progress_shown = 0.0   # eases toward the real progress, so the bar glides
+        self._clock = QElapsedTimer()
+        self._last_tick = 0
 
+        rng_state = random.getstate()
         random.seed(42)
-        self._particles = [_Particle(520, 680) for _ in range(35)]
+        self._particles = [_Particle(WIDTH, HEIGHT) for _ in range(35)]
+        random.setstate(rng_state)
 
         self._build_animations()
         self._finished_callback = None
@@ -366,11 +383,18 @@ class SplashScreen(QWidget):
         sub_delayed.addAnimation(self._anim(b"subOpacity", 0.0, 1.0, 400))
         phase4.addAnimation(sub_delayed)
 
+        # After the icon pops in, ripple, scan and title run together (about 2 s in all),
+        # so the name is on screen while the checks are still running.
+        text_delayed = QSequentialAnimationGroup(self)
+        text_delayed.addPause(150)
+        text_delayed.addAnimation(phase4)
+        together = QParallelAnimationGroup(self)
+        together.addAnimation(ripple)
+        together.addAnimation(phase3)
+        together.addAnimation(text_delayed)
         self._sequence = QSequentialAnimationGroup(self)
         self._sequence.addAnimation(phase1)
-        self._sequence.addAnimation(ripple)
-        self._sequence.addAnimation(phase3)
-        self._sequence.addAnimation(phase4)
+        self._sequence.addAnimation(together)
 
         fade = self._anim(b"fadeOut", 1.0, 0.0, FADE_OUT_MS, QEasingCurve.Type.InQuad)
         fade.finished.connect(self._on_done)
@@ -383,8 +407,10 @@ class SplashScreen(QWidget):
         self._anim_done = False
         self._center_on_screen()
         self.show()
-        self._sequence.start()
         self._sequence.finished.connect(self._on_anim_done)
+        self._sequence.start()
+        self._clock.start()
+        self._last_tick = 0
         self._tick_timer.start()
         self._start_checks()
 
@@ -420,11 +446,9 @@ class SplashScreen(QWidget):
             QTimer.singleShot(600, self._begin_fade_out)
 
     def _show_buttons(self):
-        w = self.width()
-        cx = w / 2
-        cy = self.height() / 2 - 80
-        btn_y = int(cy + 210 + len(CHECK_LABELS) * 30 + 14)
-        btn_w, btn_h, gap = 110, 34, 10
+        cx = self.width() / 2
+        btn_y = int(CHECK_TOP + len(CHECK_LABELS) * ROW_H + BUTTONS_GAP)
+        btn_w, btn_h, gap = 120, 34, 12
         total_w = btn_w * 3 + gap * 2
         left = int(cx - total_w / 2)
 
@@ -496,10 +520,12 @@ class SplashScreen(QWidget):
             self.move(geo.center() - self.rect().center())
 
     def _begin_fade_out(self):
-        self._tick_timer.stop()
-        self._fade_anim.start()
+        if self._fade_anim.state() == QPropertyAnimation.State.Running:
+            return
+        self._fade_anim.start()  # Particles keep drifting while it fades.
 
     def _on_done(self):
+        self._tick_timer.stop()
         self.hide()
         if self._worker:
             self._worker.wait(2000)
@@ -518,8 +544,17 @@ class SplashScreen(QWidget):
         self.hide()
 
     def _tick(self):
-        self._particle_time += 0.016
-        self._check_spinner_angle += 5.0
+        # Real elapsed time, so motion stays even when a frame comes late.
+        now = self._clock.elapsed()
+        dt = min(0.05, max(0.0, (now - self._last_tick) / 1000.0))
+        self._last_tick = now
+        self._particle_time += dt
+        self._check_spinner_angle = (self._check_spinner_angle + 300.0 * dt) % 360.0
+        total = len(CHECK_LABELS)
+        target = self._completed_count / total if total else 1.0
+        self._progress_shown += (target - self._progress_shown) * min(1.0, dt * 10.0)
+        if abs(target - self._progress_shown) < 0.002:
+            self._progress_shown = target
         self.update()
 
     # ── painting ──────────────────────────────────────────────────────────
@@ -529,7 +564,7 @@ class SplashScreen(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setOpacity(self._fade_out)
         w, h = self.width(), self.height()
-        cx, cy = w / 2, h / 2 - 80
+        cx, cy = w / 2, ICON_Y
 
         self._paint_background(p, w, h, cx, cy)
         self._paint_particles(p, w, h)
@@ -721,9 +756,9 @@ class SplashScreen(QWidget):
         p.save()
         p.setOpacity(self._fade_out)
 
-        check_top = cy + 210
-        row_h = 30
-        list_w = 340
+        check_top = CHECK_TOP
+        row_h = ROW_H
+        list_w = min(400, w - 80)
         left_x = cx - list_w / 2
 
         # progress bar background
@@ -739,8 +774,8 @@ class SplashScreen(QWidget):
 
         # progress bar fill
         total = len(CHECK_LABELS)
-        progress = self._completed_count / total if total else 0
-        if progress > 0:
+        progress = self._progress_shown
+        if progress > 0.001:
             fill_rect = QRectF(left_x, bar_y, bar_w * progress, bar_h)
             fill_color = QColor(_C["success"]) if self._all_passed else QColor(_C["warn"])
             p.setBrush(fill_color)
@@ -749,7 +784,7 @@ class SplashScreen(QWidget):
         # progress text
         pct_font = self._get_font(10, True)
         p.setFont(pct_font)
-        pct_text = f"Initializing... {int(progress * 100)}%"
+        pct_text = f"Initializing... {round(progress * 100)}%"
         if self._checks_complete:
             pct_text = "All systems ready" if self._all_passed else "Some checks need attention"
         pct_color = QColor(_C["muted"])
@@ -865,7 +900,7 @@ class SplashScreen(QWidget):
         p.setOpacity(self._fade_out * vis * 0.5)
         p.setFont(self._get_font(10, False))
         p.setPen(QColor(_C["muted"]))
-        p.drawText(QRectF(0, h - 44, w, 20), Qt.AlignmentFlag.AlignCenter,
+        p.drawText(QRectF(0, h - FOOTER_H - 10, w, FOOTER_H), Qt.AlignmentFlag.AlignCenter,
                    "© 2026 SV Trucking Face Recognition. All rights reserved.")
         p.restore()
 
@@ -898,14 +933,19 @@ class SplashScreen(QWidget):
 
     @staticmethod
     def _get_font(size, bold):
-        available = set(QFontDatabase.families())
-        family = next(
-            (n for n in ("Helvetica Neue", "SF Pro Display", "Segoe UI",
-                         "DejaVu Sans", "Arial")
-             if n in available),
-            QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family(),
-        )
-        font = QFont(family, size)
-        if bold:
-            font.setWeight(QFont.Weight.Bold)
+        """Cached: listing system fonts on every paint made the animation stutter."""
+        key = (size, bool(bold))
+        font = _FONTS.get(key)
+        if font is None:
+            global _FAMILY
+            if _FAMILY is None:
+                available = set(QFontDatabase.families())
+                _FAMILY = next(
+                    (n for n in ("Helvetica Neue", "SF Pro Display", "Segoe UI", "DejaVu Sans", "Arial")
+                     if n in available),
+                    QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family())
+            font = QFont(_FAMILY, size)
+            if bold:
+                font.setWeight(QFont.Weight.Bold)
+            _FONTS[key] = font
         return font

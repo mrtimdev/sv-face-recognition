@@ -5,6 +5,8 @@ The dashboard opens a read-only connection so a report can never record,
 migrate or repair anything.  Missing tables/columns degrade to empty results.
 """
 import csv
+import json
+import shutil
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -58,6 +60,114 @@ def punctuality(epoch, work_start):
     except (OverflowError, OSError, ValueError):
         return ""
     return "LATE" if (started.hour, started.minute) > (hour, minute) else "ON TIME"
+
+
+# Report status filter: (key, label). Unknown and Inactive are face observations saved by the
+# Live Monitor (no attendance); Not enrolled are check-ins by someone HRM marks not face enrolled.
+STATUS_FILTERS = (("all", "All status"), ("known", "Known"), ("not_enrolled", "Not enrolled"),
+                  ("unknown", "Unknown"), ("inactive", "Inactive (blocked)"))
+OBSERVATION_FOLDERS = {"unknown": "unknown", "inactive": "inactive"}
+OBSERVATION_STATUS = {"unknown": "UNKNOWN", "inactive": "INACTIVE"}
+NOT_ENROLLED = "NOT ENROLLED"
+
+
+def _epoch_of(stamp):
+    try:
+        return datetime.fromisoformat(str(stamp)).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def observation_rows(capture_dir, kinds=("unknown", "inactive"), start=None, end=None, search=None):
+    """Unknown and inactive faces the Live Monitor saved, newest first, shaped like report rows."""
+    pattern = str(search or "").strip().casefold()
+    rows = []
+    for kind in kinds:
+        folder = Path(capture_dir) / OBSERVATION_FOLDERS[kind]
+        if not folder.is_dir():
+            continue
+        for entry in folder.iterdir():
+            if entry.name.startswith(".") or not (entry / "record.json").is_file():
+                continue
+            try:
+                info = json.loads((entry / "record.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(info, dict):
+                continue
+            epoch = _epoch_of(info.get("captured_at"))
+            if (start is not None and epoch < start) or (end is not None and epoch >= end):
+                continue
+            name = str(info.get("employee_name") or "") or "Unknown face"
+            employee_id = str(info.get("employee_id") or "")
+            if pattern and pattern not in name.casefold() and pattern not in employee_id.casefold():
+                continue
+            rows.append({"id": None, "observation_dir": str(entry), "epoch": epoch,
+                         "time": local_text(epoch), "event_id": str(info.get("event_id") or entry.name),
+                         "name": name, "employee_id": employee_id, "status": OBSERVATION_STATUS[kind],
+                         "snapshot": str(info.get("snapshot") or entry / "face.jpg"),
+                         "duration": float(info.get("age") or 0), "timestamp": str(info.get("captured_at") or "")})
+    rows.sort(key=lambda row: row["epoch"], reverse=True)
+    return rows
+
+
+def delete_observations(capture_dir, rows):
+    """Remove saved observation folders; only ones inside *capture_dir*. Returns how many."""
+    root = Path(capture_dir).resolve()
+    deleted = 0
+    for row in rows:
+        folder = Path(row.get("observation_dir") or "")
+        try:
+            resolved = folder.resolve()
+        except OSError:
+            continue
+        if resolved.parent.parent != root or not resolved.is_dir():
+            continue
+        shutil.rmtree(resolved, ignore_errors=True)
+        deleted += not resolved.exists()
+    return deleted
+
+
+def _observation_summary(rows):
+    return {"records": len(rows), "employees": len({r["employee_id"] for r in rows if r["employee_id"]}),
+            "first": min((r["epoch"] for r in rows), default=None),
+            "last": max((r["epoch"] for r in rows), default=None),
+            "duration": sum(r["duration"] for r in rows),
+            "days": len({local_text(r["epoch"], "%Y-%m-%d") for r in rows if r["epoch"]})}
+
+
+def report_page(reader, capture_dir, status="all", not_enrolled_ids=(), start=None, end=None,
+                search=None, limit=100, offset=0):
+    """One page of the report for a STATUS_FILTERS key: (rows, total, summary).
+
+    Check-ins by someone in *not_enrolled_ids* show as NOT ENROLLED. "all" mixes check-ins
+    with saved observations, newest first.
+    """
+    ids = tuple(sorted({str(code).strip().casefold() for code in not_enrolled_ids if str(code).strip()}))
+    limit, offset = max(1, int(limit)), max(0, int(offset))
+
+    def mark(rows):
+        for row in rows:
+            if row["employee_id"].strip().casefold() in ids:
+                row["status"] = NOT_ENROLLED
+        return rows
+
+    if status in OBSERVATION_FOLDERS:
+        rows = observation_rows(capture_dir, (status,), start, end, search)
+        return rows[offset:offset + limit], len(rows), _observation_summary(rows)
+    if status in ("known", "not_enrolled"):
+        if status == "not_enrolled" and not ids:
+            return [], 0, _observation_summary([])
+        scope = {"exclude_ids": ids} if status == "known" else {"include_ids": ids}
+        rows = mark(reader.records(start=start, end=end, search=search, limit=limit, offset=offset, **scope))
+        return (rows, reader.count(start=start, end=end, search=search, **scope),
+                reader.summary(start=start, end=end, search=search, **scope))
+    observed = observation_rows(capture_dir, tuple(OBSERVATION_FOLDERS), start, end, search)
+    checkins = mark(reader.records(start=start, end=end, search=search, limit=offset + limit, offset=0))
+    merged = sorted(checkins + observed, key=lambda row: row["epoch"], reverse=True)
+    summary = reader.summary(start=start, end=end, search=search)
+    return (merged[offset:offset + limit], reader.count(start=start, end=end, search=search) + len(observed),
+            summary)
 
 
 class AttendanceReader:
@@ -116,7 +226,7 @@ class AttendanceReader:
             self._date_expr_cache = f"date({time_column}, 'unixepoch', 'localtime')"
         return self._date_expr_cache
 
-    def _filters(self, start=None, end=None, employee_id=None, search=None):
+    def _filters(self, start=None, end=None, employee_id=None, search=None, include_ids=None, exclude_ids=None):
         time_column = self._time_expression()
         employee_column = "COALESCE(employee_id, '')" if "employee_id" in self._columns() else "''"
         clauses, params = [], []
@@ -133,6 +243,11 @@ class AttendanceReader:
             pattern = f"%{str(search).strip()}%"
             clauses.append(f"(name LIKE ? OR {employee_column} LIKE ?)")
             params += [pattern, pattern]
+        for ids, operator in ((include_ids, "IN"), (exclude_ids, "NOT IN")):
+            ids = [str(code).strip().casefold() for code in ids or ()]
+            if ids:
+                clauses.append(f"LOWER(TRIM({employee_column})) {operator} ({', '.join('?' * len(ids))})")
+                params += ids
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         return where, params, time_column, employee_column
 
@@ -150,8 +265,8 @@ class AttendanceReader:
         return rows[0] if rows else None
 
     def records(self, start=None, end=None, employee_id=None, search=None,
-                limit=100, offset=0):
-        where, params, time_column, _ = self._filters(start, end, employee_id, search)
+                limit=100, offset=0, include_ids=None, exclude_ids=None):
+        where, params, time_column, _ = self._filters(start, end, employee_id, search, include_ids, exclude_ids)
         event_column = "event_id" if "event_id" in self._columns() else "''"
         rows = self._rows(f"""SELECT id, {time_column} AS epoch, {event_column} AS event_id,
             COALESCE(name, '') AS name, COALESCE(employee_id, '') AS employee_id,
@@ -166,13 +281,13 @@ class AttendanceReader:
                  "duration": float(row["duration"] or 0), "timestamp": row["timestamp"]}
                 for row in rows]
 
-    def count(self, start=None, end=None, employee_id=None, search=None):
-        where, params, _, _ = self._filters(start, end, employee_id, search)
+    def count(self, start=None, end=None, employee_id=None, search=None, include_ids=None, exclude_ids=None):
+        where, params, _, _ = self._filters(start, end, employee_id, search, include_ids, exclude_ids)
         row = self._one(f"SELECT COUNT(*) AS total FROM attendance{where}", params)
         return int(row["total"]) if row else 0
 
-    def summary(self, start=None, end=None, employee_id=None, search=None):
-        where, params, time_column, _ = self._filters(start, end, employee_id, search)
+    def summary(self, start=None, end=None, employee_id=None, search=None, include_ids=None, exclude_ids=None):
+        where, params, time_column, _ = self._filters(start, end, employee_id, search, include_ids, exclude_ids)
         date_expr = self._date_expression(time_column)
         row = self._one(f"""SELECT COUNT(*) AS records,
             COUNT(DISTINCT employee_id) AS employees,

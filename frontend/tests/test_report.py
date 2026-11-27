@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from face_attendance.report import (AttendanceReader, PRESETS, day_start, export_rows,
-                                    local_text, preset_range, punctuality)
+from face_attendance.report import (AttendanceReader, PRESETS, day_start, delete_observations, export_rows,
+                                    local_text, observation_rows, preset_range, punctuality, report_page)
 
 SCHEMA = """
 CREATE TABLE attendance (
@@ -75,6 +75,56 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(self.reader.count(search="José"), 1)
         self.assertEqual(self.reader.count(search="emp-2"), 1)
         self.assertEqual(self.reader.count(search="nobody"), 0)
+
+    def _observe(self, kind, epoch, name="", code=""):
+        import json
+        from datetime import datetime, timezone
+        folder = Path(self.directory.name) / "captures" / kind / f"ev{epoch:.0f}"
+        folder.mkdir(parents=True)
+        stamp = datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+        (folder / "record.json").write_text(json.dumps({
+            "event_id": folder.name, "employee_id": code, "employee_name": name, "age": 2.5,
+            "captured_at": stamp, "snapshot": str(folder / "face.jpg")}), encoding="utf-8")
+        return folder
+
+    def test_status_filters_split_known_not_enrolled_unknown_and_inactive(self):
+        midnight = day_start()
+        captures = Path(self.directory.name) / "captures"
+        self._observe("unknown", midnight + 600)
+        self._observe("inactive", midnight + 1000, "Bob", "EMP-9")
+        not_enrolled = ("emp-1",)
+
+        def page(status, **kw):
+            rows, total, summary = report_page(self.reader, captures, status, not_enrolled, **kw)
+            return [(r["event_id"], r["status"]) for r in rows], total, summary
+
+        rows, total, _ = page("known")
+        self.assertEqual((rows, total), ([("e2", "PRESENT")], 1))
+        rows, total, summary = page("not_enrolled")
+        self.assertEqual(rows, [("e3", "NOT ENROLLED"), ("e1", "NOT ENROLLED")])
+        self.assertEqual((total, summary["records"]), (2, 2))
+        rows, total, _ = page("unknown")
+        self.assertEqual((rows, total), ([(f"ev{midnight + 600:.0f}", "UNKNOWN")], 1))
+        rows, total, _ = page("inactive", search="bob")
+        self.assertEqual(rows[0][1], "INACTIVE")
+        rows, total, _ = page("all")
+        self.assertEqual(total, 5)
+        self.assertEqual([status for _, status in rows],
+                         ["NOT ENROLLED", "INACTIVE", "PRESENT", "UNKNOWN", "NOT ENROLLED"])
+        rows, total, _ = page("all", limit=2, offset=2)
+        self.assertEqual([status for _, status in rows], ["PRESENT", "UNKNOWN"])
+        # Nobody marked not enrolled: nothing under that filter, everyone is known.
+        self.assertEqual(report_page(self.reader, captures, "not_enrolled", ())[1], 0)
+        self.assertEqual(report_page(self.reader, captures, "known", ())[1], 3)
+
+    def test_observations_can_be_deleted_only_inside_the_capture_folder(self):
+        captures = Path(self.directory.name) / "captures"
+        self._observe("unknown", day_start() + 60)
+        rows = observation_rows(captures)
+        outside = dict(rows[0], observation_dir=str(Path(self.directory.name)))
+        self.assertEqual(delete_observations(captures, [outside]), 0)
+        self.assertEqual(delete_observations(captures, rows), 1)
+        self.assertEqual(observation_rows(captures), [])
 
     def test_paging(self):
         self.assertEqual([r["event_id"] for r in self.reader.records(limit=1)], ["e3"])
@@ -170,3 +220,40 @@ class HelperTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class ReportScreenStatusTests(unittest.TestCase):
+    def test_status_filter_shows_unknown_and_not_enrolled_rows(self):
+        import json
+        import os
+        from datetime import datetime, timezone
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from face_attendance import hrm_directory as hd
+        from face_attendance.dashboard.screens.report import ReportScreen
+        from tests.test_dashboard import StubEngine, _app, temp_settings
+        _app()
+        with tempfile.TemporaryDirectory() as root:
+            settings = temp_settings(root)
+            now = day_start() + 3600
+            seed(settings.db_path, [("EMP0150", "e1", "Nget Tim", "t", "KNOWN", "", 1.0, now, now),
+                                    ("EMP0001", "e2", "Dara", "t", "KNOWN", "", 1.0, now + 5, now + 5)])
+            row = hd.normalize({"id": 1, "employeeCode": "EMP0150", "firstName": "Tim", "status": "ACTIVE",
+                                "faceEnrolled": False, "faceEnrolledMode": "not_enrolled"})
+            Path(hd.cache_path(settings)).write_text(json.dumps(
+                {"version": hd.CACHE_VERSION, "fetched_at": 1, "source": "x", "employees": [row]}), encoding="utf-8")
+            folder = Path(settings.capture_dir) / "unknown" / "u1"
+            folder.mkdir(parents=True)
+            (folder / "record.json").write_text(json.dumps(
+                {"event_id": "u1", "age": 1.0, "captured_at": datetime.fromtimestamp(now + 9, timezone.utc).isoformat()}))
+            screen = ReportScreen(StubEngine(), settings)
+            try:
+                screen.start_edit.setDate(screen.start_edit.date().addDays(-1))
+                statuses = lambda: [screen.table.item(i, 5).text() for i in range(screen.table.rowCount())]
+                screen.reload(reset_page=True)
+                self.assertEqual(statuses(), ["UNKNOWN", "KNOWN", "NOT ENROLLED"])
+                for key, expected in (("known", ["KNOWN"]), ("not_enrolled", ["NOT ENROLLED"]),
+                                      ("unknown", ["UNKNOWN"]), ("inactive", [])):
+                    screen.status_filter.setCurrentIndex(screen.status_filter.findData(key))
+                    self.assertEqual(statuses(), expected, key)
+            finally:
+                screen.close()

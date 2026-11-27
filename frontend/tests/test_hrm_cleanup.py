@@ -49,6 +49,21 @@ class LiveCatalogTests(unittest.TestCase):
         self.assertNotIn("gone9", people)
         self.assertEqual(catalog.enrolled_count, 1)
 
+    def test_someone_hrm_marks_not_face_enrolled_is_unknown_in_the_live_monitor(self):
+        write_directory(self.settings, ("EMP1", "Dara", "ACTIVE"), ("EMP2", "Tim", "ACTIVE"))
+        write_angles(self.settings, "EMP1", "EMP2")
+        path = hd.cache_path(self.settings)
+        before = hd.fingerprint(hd.load(path))
+        self.assertTrue(hd.set_face_enrolled(path, "EMP2", False, "not_enrolled"))
+        # The engine reloads on this change, and then has no angles to match Tim with.
+        self.assertNotEqual(hd.fingerprint(hd.load(path)), before)
+        catalog = hd.live_catalog(self.settings)
+        self.assertEqual({e.employee_id for e in catalog.employees}, {"EMP1"})
+        from face_attendance.models import Employee
+        self.assertFalse(hd.resolver(hd.load(path))(Employee("EMP2", "Tim")).active)
+        hd.set_face_enrolled(path, "EMP2", True, "enrolled")
+        self.assertEqual(hd.live_catalog(self.settings).enrolled_count, 2)
+
     def test_a_new_employee_list_changes_who_the_catalog_has(self):
         write_directory(self.settings, ("EMP1", "Dara", "ACTIVE"), ("EMP2", "Sok", "ACTIVE"))
         write_angles(self.settings, "EMP1", "EMP2")

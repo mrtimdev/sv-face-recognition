@@ -2167,6 +2167,7 @@ class EmployeesScreen(QWidget):
         except OSError as exc:
             logging.warning("Could not update the HRM directory cache: %s", exc)
         self.reload()
+        self.engine.reload_catalog()  # Live Monitor stops (or starts) recognizing them now.
         how = "automatically, from saved angles" if mode == "automatic" else "by hand"
         self._notify(f"{employee_code} is now {'face enrolled' if enrolled else 'not face enrolled'} in HRM ({how}).",
                      "ok")
