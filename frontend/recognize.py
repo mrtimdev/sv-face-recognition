@@ -9,7 +9,7 @@ from face_attendance.config import Config, parse_source
 from face_attendance.main import main
 
 
-def run(source=None, tolerance=0.5, process_every=3, capture_after=3.0):
+def run(source=None, tolerance=0.5, process_every=3, capture_after=1.0):
     """Keep existing scripts that import recognize.run working."""
     from face_attendance.runtime import AttendanceApplication
     config = replace(Config(), source=parse_source(source), face_tolerance=tolerance,

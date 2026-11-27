@@ -1,4 +1,3 @@
-# Each side has its own rules: frontend/.gitignore, and backend/ is its own repository.
-/backend/
+# The app has its own rules in frontend/.gitignore. SV HRM is the separate svhrm repository.
 .claude/
 .DS_Store

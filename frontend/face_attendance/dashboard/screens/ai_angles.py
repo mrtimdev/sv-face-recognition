@@ -1370,13 +1370,13 @@ class AIAnglesScreen(QWidget):
         if problem:
             return None, problem
 
-        def upload_checked(key, path):
-            from ...identity_check import validate_hrm_upload
-            content = Path(path).read_bytes()
-            validate_hrm_upload(config, code, content)
-            return upload_angle(config, code, key, content)
+        def upload(key, path):
+            # HRM compares every angle with all other employees' photos and angles before saving it
+            # and refuses a match ("This face matches employee …"). Repeating that here meant
+            # downloading every employee's photo first, which took minutes and timed the upload out.
+            return upload_angle(config, code, key, Path(path).read_bytes())
 
-        return upload_checked, ""
+        return upload, ""
 
     def _send_to_hrm(self):
         if self.busy or self._saving:

@@ -14,7 +14,7 @@ def parser():
     p.add_argument("--process-every", "--detection-interval", dest="detection_interval", type=int,
                    help="Minimum camera frames between detections; default 3")
     p.add_argument("--recognition-interval", type=int, help="Minimum frames between unconfirmed encodings; default 5")
-    p.add_argument("--capture-after", type=float, help="Verified presence before capture; default 3 seconds")
+    p.add_argument("--capture-after", type=float, help="Verified presence before capture; default 1 second")
     p.add_argument("--width", type=int, help="Requested camera width; default 1280")
     p.add_argument("--height", type=int, help="Requested camera height; default 720")
     p.add_argument("--fps", type=float, help="Target camera/UI FPS; default 30")

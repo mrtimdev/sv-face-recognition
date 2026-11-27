@@ -9,7 +9,7 @@ import json
 import os
 import tempfile
 from urllib.parse import urlsplit, urlunsplit
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field as dataclass_field, fields, replace
 from pathlib import Path
 
 from .config import ROOT, Config, parse_source
@@ -18,6 +18,7 @@ from .config import ROOT, Config, parse_source
 SETTINGS_PATH = ROOT / "settings.json"
 LOCK_PATH = ROOT / "attendance.lock"
 THEMES = ("dark", "light")
+MAX_LIVE_CAMERAS = 4
 
 
 def mask_url_credentials(value):
@@ -39,6 +40,28 @@ def mask_url_credentials(value):
                            "********" if parts.fragment else ""))
     except ValueError:
         return "Camera URL (redacted)"
+
+
+def source_kind(source):
+    """device, url or file, from what the source text looks like."""
+    text = str(source).strip()
+    return "device" if text.isdecimal() else "url" if "://" in text else "file"
+
+
+def camera_problem(name, source, kind=None):
+    """Why this camera cannot be saved, or "" when it can."""
+    source = str(source).strip()
+    kind = kind or source_kind(source)
+    label = str(name).strip() or "This camera"
+    if not source:
+        return f"{label}: enter a camera index, network URL or file path"
+    if kind == "device" and not source.isdecimal():
+        return f"{label}: a webcam source must be a device index such as 0 or 1"
+    if kind == "url" and "://" not in source:
+        return f"{label}: a network URL starts with rtsp:// or http://"
+    if kind == "file" and not Path(source).exists():
+        return f"{label}: video file not found"
+    return ""
 
 
 def describe_source(value):
@@ -67,7 +90,7 @@ class Settings:
     face_tolerance: float = 0.5
     identity_margin: float = 0.035
     min_confirmation_frames: int = 2
-    capture_after_sec: float = 3.0
+    capture_after_sec: float = 1.0
     cooldown_sec: float = 30.0
     opencv_threads: int = 1
     max_detect_faces: int = 5
@@ -125,6 +148,35 @@ class Settings:
     hrm_office_url: str = ""          # SV HRM on the office network; empty uses this computer's address
     hrm_api_key: str = ""             # X-API-KEY for /api/face-recognition/** on that server
     hrm_auto_upload: bool = True      # Send each generated face angle to HRM as soon as it is saved
+    # Phones on the same Wi-Fi pair with this computer by a 6-digit code (machine_server.py);
+    # the key is made here and handed to each paired phone, never typed.
+    mobile_link_enabled: bool = True
+    mobile_link_key: str = ""
+    mobile_link_id: str = ""          # Lets a paired phone find this computer again after its IP changes
+    # Saved cameras, each {"name", "source"}. The first one always uses ``source``
+    # above, so older settings files and code that sets ``source`` keep working.
+    cameras: list = dataclass_field(default_factory=list)
+    live_cameras: list = dataclass_field(default_factory=lambda: [0])  # indices shown in Live Monitor
+
+    def camera_entries(self):
+        """Every saved camera; at least one, the first using ``source``."""
+        entries = [dict(entry) for entry in self.cameras]
+        if not entries:
+            entries = [{"name": "Camera 1", "source": str(self.source)}]
+        entries[0]["source"] = str(self.source)
+        for number, entry in enumerate(entries, 1):
+            entry["name"] = entry.get("name") or f"Camera {number}"
+        return entries
+
+    def selected_cameras(self):
+        """The (index, entry) pairs Live Monitor runs, at most MAX_LIVE_CAMERAS."""
+        entries = self.camera_entries()
+        chosen = []
+        for index in self.live_cameras:
+            if 0 <= index < len(entries) and index not in chosen:
+                chosen.append(index)
+        chosen = chosen[:MAX_LIVE_CAMERAS] or [0]
+        return [(index, entries[index]) for index in chosen]
 
     def to_config(self):
         """Build a validated ``Config``; raises ``ValueError`` for bad values."""
@@ -148,6 +200,10 @@ class Settings:
                 raise ValueError("report_work_start must be HH:MM or empty")
             if not (0 <= int(parts[0]) < 24 and 0 <= int(parts[1]) < 60):
                 raise ValueError("report_work_start must be a valid time of day")
+        for entry in self.camera_entries():
+            if not str(entry["source"]).strip():
+                raise ValueError(f"{entry['name']} has no source")
+            parse_source(entry["source"])
         values["hrm_destination"] = destination_id(current_url(self))
         return replace(Config(), **values)
 
@@ -157,6 +213,12 @@ class Settings:
             if not hasattr(self, key):
                 continue
             current = getattr(self, key)
+            if key == "cameras":
+                self.cameras = _camera_list(value)
+                continue
+            if key == "live_cameras":
+                self.live_cameras = _index_list(value)
+                continue
             try:
                 if isinstance(current, bool):
                     setattr(self, key, bool(value))
@@ -170,8 +232,11 @@ class Settings:
                 raise ValueError(f"{key} expects a number") from None
 
     def to_dict(self):
-        return {key: getattr(self, key) for key in
-                (field.name for field in fields(type(self)))}
+        values = {key: getattr(self, key) for key in
+                  (field.name for field in fields(type(self)))}
+        values["cameras"] = self.camera_entries()
+        values["live_cameras"] = list(self.live_cameras)
+        return values
 
     @classmethod
     def load(cls, path=None):
@@ -229,3 +294,24 @@ class Settings:
     def reset(cls, path=None):
         Path(path or SETTINGS_PATH).unlink(missing_ok=True)
         return cls()
+
+
+def _camera_list(value):
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("cameras must be a list")
+    cameras = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise ValueError("each camera needs a name and a source")
+        cameras.append({"name": str(entry.get("name") or "").strip(),
+                        "source": str(entry.get("source") or "").strip()})
+    return cameras
+
+
+def _index_list(value):
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("live_cameras must be a list")
+    try:
+        return [int(index) for index in value]
+    except (TypeError, ValueError):
+        raise ValueError("live_cameras expects camera numbers") from None

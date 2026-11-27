@@ -304,6 +304,22 @@ class ScreenTests(unittest.TestCase):
                 self.assertEqual(len(screen.filtered_rows), 60)
                 # An HRM-only row opens Add employee with its name and ID filled in.
                 index = next(i for i, row in enumerate(screen._page_rows) if row["employee_id"] == "EMP002")
+                # It offers Enroll and a More menu, both readable in the column.
+                from PyQt6.QtWidgets import QPushButton
+                buttons = screen.employee_table.cellWidget(index, 5).findChildren(QPushButton)
+                self.assertEqual([b.text() for b in buttons], ["Enroll", "More"])
+                self.assertGreaterEqual(screen.employee_table.columnWidth(5),
+                                        sum(b.sizeHint().width() for b in buttons))
+                menu = buttons[1].menu()
+                self.assertEqual([a.text() for a in menu.actions()],
+                                 ["View profile", "Open in AI Face Angles", "", "HRM face enrolled"])
+                requested = []
+                screen.anglesRequested.connect(requested.append)
+                menu.actions()[1].trigger()
+                self.assertEqual(requested, ["EMP002"])
+                menu.actions()[0].trigger()
+                self.assertTrue(screen.editor.isVisible())
+                screen.editor.reject()
                 screen.employee_table.selectRow(index)
                 # Before angles are in use, enrolling still means local samples.
                 with patch.object(screen, "_angle_counts", return_value=None):
@@ -317,5 +333,155 @@ class ScreenTests(unittest.TestCase):
                 screen.close()
 
 
+class AvatarPrecedenceTests(unittest.TestCase):
+    """The table and profile avatar show HRM's current profile photo, not an old enrollment sample."""
+
+    def test_hrm_photo_wins_over_the_enrollment_photo_and_is_refreshed(self):
+        import cv2
+        from tests.test_dashboard import EmployeesScreenTests, _app
+        from face_attendance.enrollment import write_employee, write_encodings
+        from face_attendance.dashboard.screens import employees as screen_module
+        _app()
+        with tempfile.TemporaryDirectory() as root:
+            screen = EmployeesScreenTests()._screen(root)
+            try:
+                hd.sync(CONFIG, hd.cache_path(screen.settings),
+                        opener=FakeHTTP(page([api_row("EMP001", "Admin", "Admin", hasPhoto=True)], 0, 1, 1)))
+                write_encodings(screen.settings.encodings_path, {"Admin Admin": [np.ones(128)]})
+                write_employee(screen.settings.employees_path, "Admin Admin", "EMP001")
+                enrollment = screen._enrollment_photo_path("Admin Admin")
+                enrollment.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(enrollment), np.full((40, 40, 3), 30, np.uint8))
+                downloads, real_fetch = [], hd.fetch_photo
+                new_photo = cv2.imencode(".jpg", np.full((40, 40, 3), 220, np.uint8))[1].tobytes()
+
+                def fetch(config, settings, code, opener=None):
+                    downloads.append(code)
+                    with patch.object(hd.hrm_sync, "employee_photo", return_value=new_photo):
+                        return real_fetch(config, settings, code)
+
+                class InlineThread:  # Run the photo workers here so the test needn't wait.
+                    def __init__(self, target, **_kwargs):
+                        self.target = target
+
+                    def start(self):
+                        self.target()
+
+                # An old HRM photo was cached before HRM changed it.
+                old = hd.photo_dir(screen.settings) / hd._photo_name("EMP001")
+                old.parent.mkdir(parents=True, exist_ok=True)
+                old.write_bytes(cv2.imencode(".jpg", np.full((40, 40, 3), 120, np.uint8))[1].tobytes())
+                screen._hrm_directory = hd.load(hd.cache_path(screen.settings))
+                with patch.object(screen, "_hrm_config", return_value=CONFIG), \
+                        patch.object(screen_module.hd, "fetch_photo", side_effect=fetch), \
+                        patch.object(screen_module.threading, "Thread", InlineThread):
+                    screen.reload()
+                    index = next(i for i, row in enumerate(screen._page_rows) if row["employee_id"] == "EMP001")
+                    # HRM's photo wins over the local enrollment portrait...
+                    self.assertEqual(screen.employee_table.item(index, 0).toolTip(), "HRM profile photo")
+                    self.assertEqual(screen._avatar_photo(screen._page_rows[index])[0], old)
+                    # ...and the cached copy was downloaded again, so it is HRM's current photo.
+                    self.assertEqual(downloads, ["EMP001"])
+                    self.assertEqual(old.read_bytes(), new_photo)
+                    # Only once per session: redrawing the table doesn't download it again.
+                    screen.reload()
+                    self.assertEqual(downloads, ["EMP001"])
+                    # A manual Sync from HRM downloads the photos on screen again.
+                    screen._hrm_photo_fresh.clear()
+                    screen.reload()
+                    self.assertEqual(downloads, ["EMP001", "EMP001"])
+                # Without an HRM photo the enrollment portrait still shows.
+                row = dict(screen._page_rows[index], has_photo=False)
+                self.assertEqual(screen._avatar_photo(row), (enrollment, "Saved enrollment photo"))
+            finally:
+                screen.close()
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class FaceEnrolledMarkingTests(unittest.TestCase):
+    """Marking someone face enrolled (or not) by hand in HRM, from the employee table."""
+
+    def test_the_client_sends_the_mode_and_returns_hrms_answer(self):
+        http = FakeHTTP({"success": True, "data": {"employeeCode": "EMP 002", "faceEnrolled": True,
+                                                   "faceEnrolledMode": "enrolled"}})
+        answer = hrm.set_face_enrolled(CONFIG, "EMP 002", "enrolled", opener=http)
+        request, _ = http.requests[0]
+        self.assertEqual(request.get_method(), "PUT")
+        self.assertEqual(request.full_url,
+                         "https://hrm.example.com/api/face-recognition/employees/EMP%20002/face-enrolled")
+        self.assertEqual(json.loads(request.data), {"mode": "enrolled"})
+        self.assertEqual(header(request, "X-API-KEY"), KEY)
+        self.assertEqual(answer["faceEnrolledMode"], "enrolled")
+        with self.assertRaises(ValueError):
+            hrm.set_face_enrolled(CONFIG, "EMP002", "yes", opener=http)
+        # An older SV HRM without the endpoint answers 404; one that says nothing useful is an error too.
+        with self.assertRaises(HRMError):
+            hrm.set_face_enrolled(CONFIG, "EMP002", "automatic", opener=FakeHTTP(http_error(404)))
+        with self.assertRaises(HRMError):
+            hrm.set_face_enrolled(CONFIG, "EMP002", "automatic", opener=FakeHTTP({"success": True}))
+
+    def test_the_cache_keeps_the_mode_and_one_row_can_be_updated(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "hrm_employees.json"
+            rows = [api_row("EMP001", "A", "One", faceEnrolled=False, faceEnrolledMode="not_enrolled"),
+                    api_row("EMP002", "B", "Two", faceEnrolled=False)]
+            hd.sync(CONFIG, path, opener=FakeHTTP(page(rows, 0, 1, 2)))
+            before = {r["employee_id"]: r for r in hd.load(path).employees}
+            self.assertEqual(before["EMP001"]["face_enrolled_mode"], "not_enrolled")
+            self.assertEqual(before["EMP002"]["face_enrolled_mode"], "automatic")
+            self.assertTrue(hd.set_face_enrolled(path, "emp002", True, "enrolled"))
+            self.assertFalse(hd.set_face_enrolled(path, "EMP404", True, "enrolled"))
+            after = {r["employee_id"]: r for r in hd.load(path).employees}
+            self.assertIs(after["EMP002"]["face_enrolled"], True)
+            self.assertEqual(after["EMP002"]["face_enrolled_mode"], "enrolled")
+            self.assertEqual(after["EMP001"], before["EMP001"])
+            merged = {r["employee_id"]: r for r in hd.merge([], hd.load(path))}
+            self.assertEqual(merged["EMP002"]["face_enrolled_mode"], "enrolled")
+
+    def test_the_row_menu_marks_the_employee_and_updates_the_table(self):
+        from PyQt6.QtWidgets import QPushButton
+        from tests.test_dashboard import EmployeesScreenTests, _app
+        application = _app()
+        with tempfile.TemporaryDirectory() as root:
+            screen = EmployeesScreenTests()._screen(root)
+            try:
+                rows = [api_row("EMP002", "B", "Two", faceEnrolled=False)]
+                hd.sync(CONFIG, hd.cache_path(screen.settings), opener=FakeHTTP(page(rows, 0, 1, 1)))
+                screen._hrm_directory = hd.load(hd.cache_path(screen.settings))
+                screen.reload()
+                more = screen.employee_table.cellWidget(0, 5).findChildren(QPushButton)[1]
+                sub = next(a.menu() for a in more.menu().actions() if a.text() == "HRM face enrolled")
+                labels = [a.text() for a in sub.actions()]
+                self.assertEqual(labels, ["Mark face enrolled", "Mark not face enrolled",
+                                          "Automatic (from saved angles)"])
+                self.assertEqual([a.isChecked() for a in sub.actions()], [False, False, True])
+
+                answer = {"employeeCode": "EMP002", "faceEnrolled": True, "faceEnrolledMode": "enrolled"}
+                with patch.object(screen, "_hrm_config", return_value=CONFIG), \
+                        patch("face_attendance.dashboard.screens.employees.guard", return_value=True), \
+                        patch.object(hd.hrm_sync, "set_face_enrolled", return_value=answer) as call:
+                    sub.actions()[0].trigger()
+                    deadline = time.time() + 5
+                    while not hd.is_enrolled(screen._page_rows[0]) and time.time() < deadline:
+                        application.processEvents()
+                        time.sleep(0.01)
+                call.assert_called_once_with(CONFIG, "EMP002", "enrolled")
+                self.assertTrue(hd.is_enrolled(screen._page_rows[0]))
+                self.assertEqual(screen._page_rows[0]["face_enrolled_mode"], "enrolled")
+                more = screen.employee_table.cellWidget(0, 5).findChildren(QPushButton)[1]
+                sub = next(a.menu() for a in more.menu().actions() if a.text() == "HRM face enrolled")
+                self.assertEqual([a.isChecked() for a in sub.actions()], [True, False, False])
+
+                # A refusal from HRM is shown and changes nothing.
+                with patch.object(screen, "_hrm_config", return_value=CONFIG), \
+                        patch("face_attendance.dashboard.screens.employees.guard", return_value=True), \
+                        patch.object(screen, "_notify") as notify:
+                    screen._on_face_enrolled_set("EMP002", "not_enrolled", HRMError("Not allowed"))
+                notify.assert_called_once()
+                self.assertIn("Not allowed", notify.call_args[0][0])
+                self.assertTrue(hd.is_enrolled(screen._page_rows[0]))
+            finally:
+                screen.close()

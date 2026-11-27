@@ -74,7 +74,9 @@ def normalize(row):
             "hrm_status": status,
             "employee_type": _text(row.get("employeeType")).upper(),
             "has_photo": bool(row.get("hasPhoto")),
-            "face_enrolled": row.get("faceEnrolled")}  # None from a server without this field.
+            "face_enrolled": row.get("faceEnrolled"),  # None from a server without this field.
+            # "enrolled" / "not_enrolled" when set by hand in HRM, else "automatic" (from the angles).
+            "face_enrolled_mode": _text(row.get("faceEnrolledMode")) or "automatic"}
 
 
 def _atomic_json(path, data):
@@ -152,6 +154,20 @@ def _fetch_directory(config, opener=None, progress=None, now=None, fetched=None)
     # A row can say ACTIVE and terminated at once; normalize calls that TERMINATED.
     rows = [row for row in rows if row["employee_id"] and row["hrm_status"] == "ACTIVE"]
     return Directory(tuple(rows), now or time.time(), config.base_url.strip().rstrip("/"))
+
+
+def set_face_enrolled(path, employee_code, enrolled, mode):
+    """Record HRM's new face_enrolled for one employee in the cache, without a full sync. True if found."""
+    directory = load(path)
+    key, found, rows = _key(employee_code), False, []
+    for row in directory.employees:
+        if _key(row.get("employee_id")) == key:
+            row = dict(row, face_enrolled=bool(enrolled), face_enrolled_mode=mode)
+            found = True
+        rows.append(row)
+    if found:
+        _write_directory(path, Directory(tuple(rows), directory.fetched_at, directory.source))
+    return found
 
 
 def _write_directory(path, directory):
@@ -302,6 +318,7 @@ def merge(enrollment_rows, directory, angle_counts=None):
                       "has_photo", "hrm_id"):
             combined[field] = info.get(field, "") if info else ""
         combined["face_enrolled"] = info.get("face_enrolled") if info else None
+        combined["face_enrolled_mode"] = info.get("face_enrolled_mode", "automatic") if info else "automatic"
         if info:
             # HRM owns the name, so this table agrees with what the Live Monitor shows.
             for field in ("employee_name", "first_name", "last_name"):

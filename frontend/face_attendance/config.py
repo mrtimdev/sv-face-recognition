@@ -49,7 +49,7 @@ class Config:
     face_tolerance: float = 0.5
     identity_margin: float = 0.035
     min_confirmation_frames: int = 2
-    capture_after_sec: float = 3.0
+    capture_after_sec: float = 1.0
     cooldown_sec: float = 30.0
     detection_fresh_sec: float = 1.2
     identity_fresh_sec: float = 2.5

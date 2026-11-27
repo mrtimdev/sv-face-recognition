@@ -31,11 +31,13 @@ def fit_frame(frame, max_width, max_height):
 
 
 class CameraManager:
-    def __init__(self, config, capture_factory=None, clock=time.monotonic):
+    def __init__(self, config, capture_factory=None, clock=time.monotonic, frame_event=None,
+                 name="camera"):
         self.config = config
+        self.frame_event = frame_event  # Optional: set after every frame, to wake a multi-camera loop.
         self.frames = LatestValue()
         self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self._run, name="camera", daemon=True)
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._factory = capture_factory or self._open
         self._clock = clock
         self._lock = threading.Lock()
@@ -110,6 +112,8 @@ class CameraManager:
                             self.fps = count / (now - fps_since)
                             count, fps_since = 0, now
                         self.frames.put(FramePacket(sequence, now, time.time(), generation, frame))
+                        if self.frame_event is not None:
+                            self.frame_event.set()
                         self._set_status("CONNECTED")
             except Exception:
                 logging.exception("Camera connection/read failed")

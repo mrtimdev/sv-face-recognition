@@ -1,15 +1,21 @@
-name: sv-face-web
+name: python-face-recognite
 
 services:
   app:
+    image: python-face-recognite:latest
+    container_name: python-face-recognite
     build:
-      context: ../..
-      dockerfile: deploy/web/Dockerfile
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     environment:
       TZ: ${TZ:-Asia/Phnom_Penh}
+      # Optional machine APIs (see README): SV HRM's face verifier and the mobile app.
+      SV_FACE_VERIFIER_KEY: ${SV_FACE_VERIFIER_KEY:-}
+      SV_FACE_MOBILE_KEY: ${SV_FACE_MOBILE_KEY:-}
     ports:
-      - "127.0.0.1:${PORT:-8080}:8080"
+      # BIND=0.0.0.0 lets phones and SV HRM in another container reach it.
+      - "${BIND:-127.0.0.1}:${PORT:-8080}:8080"
     volumes:
-      - ./data:/data
+      - ./docker-data:/data
     stop_grace_period: 40s

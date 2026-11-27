@@ -115,6 +115,41 @@ proxy and keep the HTTP listener private.
 
 See [native web Docker setup](running-as-web-docker-local.md) for containers.
 
+### Face verifier and mobile app API
+
+The web server also serves two key-protected APIs for other programs
+(`face_attendance/web/machine_api.py`). Each is off until its key (at least 32
+characters) is set in the environment before launch:
+
+| API | Key variable | Caller | Header |
+|---|---|---|---|
+| `POST /v1/faces/encode` | `SV_FACE_VERIFIER_KEY` | SV HRM, before it saves a profile photo or face angle | `X-Face-Verifier-Key` |
+| `/api/mobile/**` | `SV_FACE_MOBILE_KEY` | The Flutter angle-registration app | `X-API-KEY` |
+
+The mobile API lists employees from this dashboard's synced SV HRM directory
+(`GET /api/mobile/employees?search=&page=&size=`). Angle lists, images and
+uploads (`/api/mobile/face-angles/angles`,
+`/api/mobile/employees/{code}/face-angles[/{angle}[/image]]`) are relayed to SV
+HRM with the dashboard's own `hrm_api_key`, so the phone never holds the HRM key.
+
+```bash
+SV_FACE_VERIFIER_KEY=<shared key> SV_FACE_MOBILE_KEY=<app key> python dashboard.py --web --host 0.0.0.0
+```
+
+Use `--host 0.0.0.0` so SV HRM in Docker (`http://host.docker.internal:8080`)
+and phones on the office Wi-Fi can reach it. Give SV HRM the same verifier key as
+`FACE_VERIFICATION_KEY` with `FACE_VERIFICATION_URL=http://<this machine>:8080`.
+
+The desktop app serves the same two APIs once you sign in, when either key is set
+(`face_attendance/dashboard/machine_server.py`). It listens on all addresses, port
+8080; set `SV_FACE_API_HOST` or `SV_FACE_API_PORT` to change that. Only one
+program can use a port, so stop the `python-face-recognite` container first or
+pick another port:
+
+```bash
+SV_FACE_VERIFIER_KEY=<shared key> SV_FACE_MOBILE_KEY=<app key> python dashboard.py
+```
+
 ## Dashboard (PyQt6 admin UI)
 
 Launch the graphical admin dashboard:
@@ -348,11 +383,9 @@ and enrollment against other employees' HRM profile photos and all stored angles
 employee. The updated SV HRM face-profile and face-angle endpoints enforce the
 same check before committing, including bulk items and concurrent uploads.
 
-SV HRM requires the separate Python verifier for these uploads. It lives in
-this repository's `verifier` folder; see `../verifier/README.md` for running it
-locally or with Docker. Set the matching `FACE_VERIFICATION_KEY` and private
-`FACE_VERIFICATION_URL` on Spring Boot. The SV HRM repository contains the
-Compose override and deployment instructions in `docs/face-angle-api.md`. Uploads are refused if
+SV HRM checks these uploads with this dashboard's face verifier
+(`dashboard.py --web`, see [Face verifier and mobile app API](#face-verifier-and-mobile-app-api)).
+Set the matching `FACE_VERIFICATION_KEY` and `FACE_VERIFICATION_URL` on Spring Boot. Uploads are refused if
 verification is unavailable; existing saved images remain intact.
 
 Existing records are reviewed asynchronously in **Enrolled Employees**. Use
@@ -598,7 +631,7 @@ is unchanged; encoding is scheduled separately from detection.
 | `quality_min_face_px` | 80 | Minimum original face width/height; cannot be below PAD minimum |
 | `quality_min_sharpness` | 25 | Laplacian variance on a 96 × 96 face; camera-specific tuning |
 | `min_confirmation_frames` | 2 | Matching encoded observations before identity confirmation |
-| `capture_after_sec` | 3 | Required verified presence |
+| `capture_after_sec` | 1 | Required verified presence |
 | `cooldown_sec` | 30 | Persistent employee cooldown |
 | `detection_fresh_sec / identity_fresh_sec` | 1.2 / 2.5 | Maximum trusted observation ages |
 | `max_result_age_sec` | 1.5 | Drop late worker results |

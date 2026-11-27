@@ -7,6 +7,7 @@ output is published through Qt signals instead of an OpenCV window. The loop
 runs on its own thread, so widgets never block, and the clean camera frame is
 handed to enrollment through ``grab_clean_frame``.
 """
+from dataclasses import replace
 from datetime import datetime
 import logging
 import os
@@ -22,6 +23,7 @@ from ..attendance import AttendanceService
 from ..anti_spoof import LIVE_THRESHOLD, SAMPLE_MAX_AGE, live_sample
 from ..liveness import MAX_SAMPLE_GAP
 from ..camera import CameraManager
+from ..config import parse_source
 from ..capture import face_capture
 from ..unknown_capture import save_unknown_capture
 from ..enrollment import employee_rows as load_employee_rows
@@ -40,6 +42,30 @@ PUBLISH_INTERVAL = 0.066  # ~15 Hz stats/track updates; frames follow the camera
 JOIN_TIMEOUT = 3.0
 MAX_RESTART_BACKOFF = 60.0
 UNKNOWN_ALERT_EXPIRY = 3600.0
+TRACK_ID_STRIDE = 100_000  # Camera n numbers its faces from n * stride + 1, so ids never collide.
+MULTI_PREVIEW_FPS = 15.0   # Per-tile preview cap when several cameras run.
+
+
+class CameraChannel:
+    """One camera's reader, tracker and overlay, plus its place in the loop."""
+
+    def __init__(self, position, index, name, source, config, camera, tracker, renderer, lane):
+        self.position, self.index, self.name, self.source = position, index, name, source
+        self.config, self.camera, self.tracker, self.renderer, self.lane = (
+            config, camera, tracker, renderer, lane)
+        self.reset()
+
+    def reset(self):
+        cfg = self.config
+        self.frame = np.full((cfg.camera_height, cfg.camera_width, 3), (32, 29, 25), np.uint8)
+        self.packet = None
+        self.status = "CONNECTING"
+        self.sequence, self.submitted, self.generation = -1, -cfg.detection_interval, None
+        self.count, self.preview_fps = 0, 0.0
+        self.rendered_at = float("-inf")
+        self.recognition_error = ""
+        self.clean = None
+        self.pending_camera = None  # A fresh reader from reconnect_camera, swapped in by the loop.
 
 
 def track_snapshot(track, now, tracker=None):
@@ -75,7 +101,8 @@ def track_snapshot(track, now, tracker=None):
 class AttendanceEngine(QObject):
     """Owns the attendance workers; connect to the signals instead of polling."""
 
-    frameReady = pyqtSignal(object)          # annotated BGR frame (numpy)
+    frameReady = pyqtSignal(object)          # annotated BGR frame (numpy) of the first camera
+    channelFrameReady = pyqtSignal(int, object)  # (position, frame) for the 2nd..4th camera
     _previewAvailable = pyqtSignal()
     tracksReady = pyqtSignal(object)         # list of track snapshots
     statsReady = pyqtSignal(object)          # dict of live statistics
@@ -87,6 +114,7 @@ class AttendanceEngine(QObject):
     catalogChanged = pyqtSignal(object)      # employee rows after rebuild
     runningChanged = pyqtSignal(bool)
     pausedChanged = pyqtSignal(bool)
+    cameraPausedChanged = pyqtSignal(int, bool)  # camera index (in settings), paused
     errorRaised = pyqtSignal(str)
     logMessage = pyqtSignal(str)
 
@@ -106,6 +134,8 @@ class AttendanceEngine(QObject):
         self._sleep_inhibitor = SleepInhibitor()
         self._clean = None
         self._paused = False
+        self._paused_cameras = set()   # camera indices (settings order) not recording
+        self._reconnect_lock = threading.Lock()
         self._thread = None
         self._stats = {}
         self._last_elapsed = 0.0
@@ -128,15 +158,33 @@ class AttendanceEngine(QObject):
         self._catalog_seen = self._catalog_signature()
         self._catalog_pending = None
         self.catalog = self._load_catalog()
-        self.camera = (CameraManager(self.config) if self._capture_factory is None else
-                       CameraManager(self.config, capture_factory=self._capture_factory))
+        # One recognition thread for every camera: each extra camera adds a lane.
         self.recognition = RecognitionWorker(
             RecognitionService(self.config, self.catalog, backend=self._backend))
         self.persistence = PersistenceWorker(self.config, self.catalog.employee_map, audio_enabled=False)
-        self.tracker = FaceTracker(self.config)
+        # Attendance (cooldowns, pending saves) is shared, so a person seen by two
+        # cameras is still recorded once.
         self.attendance = AttendanceService(self.config, self.persistence, async_staging=True)
-        # Qt paints the dashboard-wide flash without altering camera pixels.
-        self.renderer = UIRenderer(self.config, capture_effects=False)
+        selected = self.settings.selected_cameras()
+        self._frame_event = threading.Event() if len(selected) > 1 else None
+        self.channels = []
+        for position, (index, entry) in enumerate(selected):
+            source = parse_source(entry["source"])
+            config = self.config if source == self.config.source else replace(self.config, source=source)
+            kwargs = {"frame_event": self._frame_event,
+                      "name": "camera" if position == 0 else f"camera-{position + 1}"}
+            if self._capture_factory is not None:
+                kwargs["capture_factory"] = self._capture_factory
+            tracker = FaceTracker(config)
+            tracker.next_id = position * TRACK_ID_STRIDE + 1
+            lane = self.recognition.lanes[0] if position == 0 else self.recognition.add_lane()
+            # Qt paints the dashboard-wide flash without altering camera pixels.
+            self.channels.append(CameraChannel(
+                position, index, entry["name"], entry["source"], config,
+                CameraManager(config, **kwargs), tracker,
+                UIRenderer(config, capture_effects=False), lane))
+        first = self.channels[0]
+        self.camera, self.tracker, self.renderer = first.camera, first.tracker, first.renderer
 
     def _load_catalog(self):
         return hrm_directory.live_catalog(self.config, allow_empty=True)
@@ -160,8 +208,10 @@ class AttendanceEngine(QObject):
     def _assert_workers_stopped(self):
         if self.running:
             raise RuntimeError("The previous engine is still stopping. Restart the application if its driver remains blocked.")
-        for name in ('camera', 'recognition', 'persistence'):
-            worker = getattr(self, name, None)
+        workers = [('recognition', getattr(self, 'recognition', None)),
+                   ('persistence', getattr(self, 'persistence', None))]
+        workers += [('camera', channel.camera) for channel in getattr(self, 'channels', ())]
+        for name, worker in workers:
             if worker is not None and worker.thread.is_alive():
                 raise RuntimeError(f"The previous {name} worker has not stopped. Restart the application before starting again.")
         persistence = getattr(self, 'persistence', None)
@@ -182,17 +232,23 @@ class AttendanceEngine(QObject):
         self._stop.clear()
         self.persistence.start()
         self.recognition.start()
-        self.camera.start()
+        for channel in self.channels:
+            channel.camera.start()
         self._thread = threading.Thread(target=self._run, name="dashboard-engine", daemon=True)
         self._thread.start()
         self._sleep_inhibitor.acquire()
         self.runningChanged.emit(True)
         self.catalogChanged.emit(self.employee_rows())
-        self.logMessage.emit(f"Engine started: {describe_source(self.settings.source)} | "
+        sources = ", ".join(self._channel_label(channel) for channel in self.channels)
+        self.logMessage.emit(f"Engine started: {sources} | "
                              f"{self.catalog.enrolled_count} employee(s)")
         self.persistence.log_audit("engine_started",
-                                   f"source={describe_source(self.settings.source)}, "
+                                   f"source={sources}, "
                                    f"enrolled={self.catalog.enrolled_count}")
+
+    def _channel_label(self, channel):
+        label = describe_source(channel.source)  # Masks RTSP passwords.
+        return label if len(self.channels) == 1 else f"{channel.name} ({label})"
 
     def stop(self, on_stage=None):
         """Stop the loop, then close camera, recognition and persistence.
@@ -202,7 +258,8 @@ class AttendanceEngine(QObject):
         attendance is committed, so a caller can show real shutdown progress.
         """
         report = on_stage or (lambda _stage: None)
-        self._stop.set()
+        with self._reconnect_lock:  # No reconnect may start a reader after this.
+            self._stop.set()
         self._sleep_inhibitor.release()
         thread = self._thread
         if thread is not None:
@@ -213,13 +270,21 @@ class AttendanceEngine(QObject):
                 self._thread = None
         # Camera first, then recognition, then persistence: accepted attendance
         # jobs are committed before the database connection closes.
-        self.camera.close()
+        cameras = [channel.camera for channel in self.channels]
+        cameras += [channel.pending_camera for channel in self.channels if channel.pending_camera]
+        closers = [threading.Thread(target=camera.close, daemon=True) for camera in cameras]
+        for closer in closers:  # In parallel: one stuck RTSP read must not delay the others.
+            closer.start()
+        for closer in closers:
+            closer.join()
         self.recognition.close()
         report("capture")
         self.persistence.close()
         report("saved")
         with self._clean_lock:
             self._clean = None
+            for channel in self.channels:
+                channel.clean, channel.pending_camera = None, None
         with self._preview_lock:
             self._preview_values.clear()
         self._stats = {}
@@ -250,15 +315,66 @@ class AttendanceEngine(QObject):
         self.set_paused(not self._paused)
         return self._paused
 
-    def grab_clean_frame(self):
-        """Copy of the newest frame without overlays, for enrollment samples."""
+    def grab_clean_frame(self, position=0):
+        """Copy of the newest frame without overlays (first camera unless *position*)."""
         with self._clean_lock:
-            return None if self._clean is None else self._clean.copy()
+            if position == 0:
+                frame = self._clean
+            else:
+                channels = getattr(self, "channels", ())
+                frame = channels[position].clean if position < len(channels) else None
+            return None if frame is None else frame.copy()
+
+    def camera_paused(self, index):
+        return index in self._paused_cameras
+
+    def set_camera_paused(self, index, paused):
+        """Stop recording from one camera; its preview keeps running."""
+        paused = bool(paused)
+        if paused == (index in self._paused_cameras):
+            return
+        (self._paused_cameras.add if paused else self._paused_cameras.discard)(index)
+        self.cameraPausedChanged.emit(index, paused)
+        name = next((channel.name for channel in getattr(self, "channels", ()) if channel.index == index),
+                    f"Camera {index + 1}")
+        self.logMessage.emit(f"{name}: recording {'paused' if paused else 'resumed'}")
+
+    def reconnect_camera(self, position):
+        """Reopen one camera's stream without stopping the others.
+
+        Closing a stuck RTSP read can take its timeout, so it happens on a
+        helper thread; the loop swaps the new reader in when it is ready.
+        """
+        if not self.running or not 0 <= position < len(self.channels):
+            return False
+        channel = self.channels[position]
+
+        def work():
+            old = channel.camera
+            old.close()
+            with self._reconnect_lock:
+                if self._stop.is_set() or channel not in self.channels:
+                    return
+                kwargs = {"frame_event": self._frame_event, "name": old.thread.name}
+                if self._capture_factory is not None:
+                    kwargs["capture_factory"] = self._capture_factory
+                fresh = CameraManager(channel.config, **kwargs)
+                fresh.start()
+                channel.pending_camera = fresh
+            if self._frame_event is not None:
+                self._frame_event.set()
+
+        threading.Thread(target=work, name=f"reconnect-{position + 1}", daemon=True).start()
+        self.logMessage.emit(f"{channel.name}: reconnecting")
+        return True
 
     def _queue_preview(self, **values):
         """One pending GUI notification, regardless of UI speed or frame rate."""
         with self._preview_lock:
+            frames = values.pop('frames', None)
             self._preview_values.update(values)
+            if frames:
+                self._preview_values.setdefault('frames', {}).update(frames)
             if self._preview_pending:
                 return
             self._preview_pending = True
@@ -271,6 +387,8 @@ class AttendanceEngine(QObject):
             self._preview_pending = False
         if 'frame' in values:
             self.frameReady.emit(values['frame'])
+        for position, frame in sorted(values.get('frames', {}).items()):
+            self.channelFrameReady.emit(position, frame)
         if 'tracks' in values:
             self.tracksReady.emit(values['tracks'])
         if 'stats' in values:
@@ -382,88 +500,143 @@ class AttendanceEngine(QObject):
                 self._stop.wait(backoff)
                 backoff = min(backoff * 2, MAX_RESTART_BACKOFF)
                 if not self._stop.is_set():
-                    self.tracker.clear()
+                    for channel in self.channels:
+                        channel.tracker.clear()
                     self.logMessage.emit("Engine loop restarted")
+
+    def _all_tracks(self):
+        if len(self.channels) == 1:
+            return self.tracker.tracks
+        merged = {}
+        for channel in self.channels:
+            merged.update(channel.tracker.tracks)
+        return merged
+
+    def _channel_of(self, track_id):
+        position = min(max(0, int(track_id) // TRACK_ID_STRIDE), len(self.channels) - 1)
+        return self.channels[position]
+
+    def _step_channel(self, channel, now):
+        """Read, track and queue recognition for one camera; never blocks on it."""
+        cfg = channel.config
+        if channel.pending_camera is not None:
+            channel.camera, channel.pending_camera = channel.pending_camera, None
+            if channel.position == 0:
+                self.camera = channel.camera
+            channel.sequence, channel.generation = -1, None
+            channel.tracker.clear()
+        paused = channel.index in self._paused_cameras
+        packet = channel.camera.frames.get()
+        status = channel.camera.status(now)
+        channel.packet, channel.status = packet, status
+        new_frame = (packet is not None and packet.sequence != channel.sequence
+                     and status == "CONNECTED")
+        if new_frame:
+            if packet.generation != channel.generation:
+                channel.submitted, channel.generation = -cfg.detection_interval, packet.generation
+            channel.sequence, channel.frame = packet.sequence, packet.frame
+            with self._clean_lock:
+                channel.clean = packet.frame
+                if channel.position == 0:
+                    self._clean = packet.frame
+            channel.tracker.advance(packet)
+            channel.count += 1
+        if status != "CONNECTED" or paused:
+            channel.tracker.suspend()
+        result = channel.lane[1].take()
+        if paused:
+            result = None  # A late result must not revive the tracks of a paused camera.
+        if result is not None:
+            self._last_elapsed = result.elapsed
+        if result is not None and status == "CONNECTED":
+            if channel.tracker.apply(result, now):
+                channel.recognition_error = ""
+            elif result.error:
+                channel.recognition_error = result.error
+        if new_frame and not paused and channel.sequence - channel.submitted >= cfg.detection_interval:
+            self.recognition.submit(channel.lane, RecognitionRequest(packet, channel.tracker.hints()))
+            channel.submitted = channel.sequence
+        return new_frame, result
 
     def _loop(self):
         cfg = self.config
-        frame = np.full((cfg.camera_height, cfg.camera_width, 3), (32, 29, 25), np.uint8)
-        sequence, submitted, generation = -1, -cfg.detection_interval, None
-        preview_fps, count, fps_since = 0.0, 0, time.monotonic()
-        recognition_error, published, last_liveness_log = "", 0.0, float("-inf")
+        multi = len(self.channels) > 1
+        for channel in self.channels:
+            channel.reset()
+        fps_since = time.monotonic()
+        published, last_liveness_log = 0.0, float("-inf")
         frame_budget = 1 / max(1.0, float(cfg.target_fps))
-        rendered_at, frames_version = float("-inf"), -1
+        # Several tiles: cap each preview, so painting 4 streams stays cheap.
+        render_budget = max(frame_budget, 1 / MULTI_PREVIEW_FPS) if multi else frame_budget
         health_at = float('-inf')
         while not self._stop.is_set():
             started = now = time.monotonic()
             wall_time = time.time()
             frames_version = self.camera.frames.version
-            packet = self.camera.frames.get()
-            status = self.camera.status(now)
+            if multi:
+                self._frame_event.clear()
             paused = self._paused
-            new_frame = (packet is not None and packet.sequence != sequence
-                         and status == "CONNECTED")
-            if new_frame:
-                if packet.generation != generation:
-                    submitted, generation = -cfg.detection_interval, packet.generation
-                sequence, frame = packet.sequence, packet.frame
-                with self._clean_lock:
-                    self._clean = packet.frame
-                self.tracker.advance(packet)
-                count += 1
-            if status != "CONNECTED":
-                self.tracker.suspend()
-            result = self.recognition.results.take()
-            if result is not None:
-                self._last_elapsed = result.elapsed
-            if result is not None and status == "CONNECTED":
-                if self.tracker.apply(result, now):
-                    recognition_error = ""
-                elif result.error:
-                    recognition_error = result.error
-            if new_frame and sequence - submitted >= cfg.detection_interval:
-                self.recognition.requests.put(RecognitionRequest(packet, self.tracker.hints()))
-                submitted = sequence
-            for kind, saved in self.attendance.poll(self.tracker.tracks, now, wall_time):
+            updates, frames = {}, {}
+            changed = [self._step_channel(channel, now) for channel in self.channels]
+            tracks = self._all_tracks()
+            for kind, saved in self.attendance.poll(tracks, now, wall_time):
+                renderer = self._channel_of(saved.track_id if kind == 'capture'
+                                            else saved.job.track_id).renderer
                 if kind == 'capture':
-                    self.renderer.animations.capture(saved, now)
+                    renderer.animations.capture(saved, now)
                     self.captureTriggered.emit(saved)
                     continue
-                self.renderer.animations.result(kind, saved, now)
+                renderer.animations.result(kind, saved, now)
                 if kind == "success":
                     self.attendanceSaved.emit(saved)
                 else:
                     self.attendanceFailed.emit(saved)
             if not paused:
-                for job in self.attendance.update(self.tracker.tracks, packet, now,
-                                                  status == "CONNECTED"):
-                    self.renderer.animations.capture(job, now)
-                    self.captureTriggered.emit(job)
-                self.attendance.observe(self.tracker.tracks, now, wall_time)
-            elapsed = now - fps_since
-            if elapsed >= 1.0:
-                preview_fps, count, fps_since = count / elapsed, 0, now
-            updates = {}
+                for channel in self.channels:
+                    if channel.index in self._paused_cameras:
+                        continue
+                    for job in self.attendance.update(channel.tracker.tracks, channel.packet, now,
+                                                      channel.status == "CONNECTED"):
+                        channel.renderer.animations.capture(job, now)
+                        self.captureTriggered.emit(job)
+                self.attendance.observe(tracks, now, wall_time)
             # Draw only when something can have changed: a new camera frame, a new
             # recognition result, or (for the scan line and animations) once per budget.
-            if new_frame or result is not None or now - rendered_at >= frame_budget:
-                rendered_at = now
-                updates['frame'] = self.renderer.render_overlay(frame, self.tracker.tracks, now, wall_time,
-                                                                status, "" if paused else recognition_error)
+            for channel, (new_frame, result) in zip(self.channels, changed):
+                due = now - channel.rendered_at >= render_budget
+                if not (due or (not multi and (new_frame or result is not None))):
+                    continue
+                channel.rendered_at = now
+                image = channel.renderer.render_overlay(
+                    channel.frame, channel.tracker.tracks, now, wall_time, channel.status,
+                    "" if paused else channel.recognition_error)
+                if channel.position == 0:
+                    updates['frame'] = image
+                else:
+                    frames[channel.position] = image
+            elapsed = now - fps_since
+            if elapsed >= 1.0:
+                for channel in self.channels:
+                    channel.preview_fps, channel.count = channel.count / elapsed, 0
+                fps_since = now
+            if frames:
+                updates['frames'] = frames
             if now - published >= PUBLISH_INTERVAL:
                 published = now
-                updates['tracks'] = [track_snapshot(track, now, self.tracker)
-                                     for track in self.tracker.tracks.values()]
-                self._stats = self._statistics(status, preview_fps, recognition_error)
+                updates['tracks'] = [track_snapshot(track, now)
+                                     for track in tracks.values()]
+                self._stats = self._statistics(tracks=tracks)
                 updates['stats'] = self._stats
                 health_path = os.environ.get('SV_FACE_HEALTH_FILE')
+                packet = self.channels[0].packet
                 if health_path and now - health_at >= 5:
                     from ..health import write_health
                     try:
                         write_health(health_path, self._stats,
                                      None if packet is None else max(0, now - packet.captured_at),
                                      all(worker.thread.is_alive() for worker in
-                                         (self.camera, self.recognition, self.persistence))
+                                         [self.recognition, self.persistence]
+                                         + [channel.camera for channel in self.channels])
                                      and self.persistence.staging_thread.is_alive())
                     except OSError:
                         logging.warning('Could not publish engine health', exc_info=True)
@@ -473,20 +646,26 @@ class AttendanceEngine(QObject):
                     self.logMessage.emit("Attendance blocked by liveness: " +
                                          self._stats["liveness_details"].replace("\n", "; "))
                 self._expire_unknown_alerts(now)
-                self._capture_observations(now, generation, status, paused)
+                for channel in self.channels:
+                    self._capture_observations(now, channel.generation, channel.status,
+                                               paused or channel.index in self._paused_cameras,
+                                               channel.tracker)
             if updates:
                 self._queue_preview(**updates)
-            # Keep to target_fps, then wake the moment the camera delivers the next
+            # Keep to target_fps, then wake the moment a camera delivers the next
             # frame instead of sleeping a fixed interval and showing it late.
             delay = frame_budget - (time.monotonic() - started)
             if delay > 0 and self._stop.wait(delay):
                 break
-            self.camera.frames.wait_newer(frames_version, frame_budget)
+            if multi:
+                self._frame_event.wait(frame_budget)
+            else:
+                self.camera.frames.wait_newer(frames_version, frame_budget)
 
-    def _capture_observations(self, now, generation, status, paused):
+    def _capture_observations(self, now, generation, status, paused, tracker=None):
         if paused or status != "CONNECTED":
             return
-        for track in self.tracker.tracks.values():
+        for track in (tracker or self.tracker).tracks.values():
             inactive = track.identity_valid and not track.employee_active
             if inactive:
                 if not self.settings.auto_capture_inactive:
@@ -535,10 +714,19 @@ class AttendanceEngine(QObject):
         for tid in expired:
             del self._unknown_alerted[tid]
 
-    def _statistics(self, status, preview_fps, recognition_error):
-        """Snapshot of the engine state for the Live Monitor cards."""
+    def _statistics(self, status=None, preview_fps=None, recognition_error=None, tracks=None):
+        """Snapshot of the engine state for the Live Monitor cards (all cameras)."""
         cfg = self.config
-        tracks = self.tracker.tracks
+        if status is None:
+            statuses = [channel.status for channel in self.channels]
+            # One live camera keeps recognition going, so report the best status.
+            status = "CONNECTED" if "CONNECTED" in statuses else statuses[0]
+        if preview_fps is None:
+            preview_fps = self.channels[0].preview_fps
+        if recognition_error is None:
+            recognition_error = next((channel.recognition_error for channel in self.channels
+                                      if channel.recognition_error), "")
+        tracks = self._all_tracks() if tracks is None else tracks
         visible = [track for track in tracks.values() if track.visible]
         known = [track for track in visible if track.employee_id and track.identity_valid]
         inactive = [track for track in known if not track.employee_active]
@@ -558,7 +746,12 @@ class AttendanceEngine(QObject):
                                             for t in visible if not t.quality_ok or t.ambiguous),
                 "status": status,
                 "paused": self._paused,
-                "source": describe_source(self.settings.source),
+                "source": ", ".join(self._channel_label(channel) for channel in self.channels),
+                "cameras": [{"position": channel.position, "index": channel.index, "name": channel.name,
+                             "paused": channel.index in self._paused_cameras,
+                             "source": describe_source(channel.source),
+                             "status": channel.status, "fps": round(channel.camera.fps, 1)}
+                            for channel in self.channels],
                 "camera_fps": round(self.camera.fps, 1),
                 "preview_fps": round(preview_fps, 1),
                 "faces": len(visible),

@@ -89,7 +89,7 @@ class UploadTests(unittest.TestCase):
         self.assertIn(b"\xff\xd8abc", http.requests[0][0].data)
 
     def test_errors_are_plain_and_never_show_the_key(self):
-        cases = {401: "rejected the API key", 404: "no such employee", 503: "switched off"}
+        cases = {401: "rejected the API key", 404: "no such employee", 503: "temporarily unable"}
         for status, text in cases.items():
             http = FakeHTTP(http_error(status, {"message": f"detail {KEY}"}))
             with self.assertRaises(HRMError) as caught:

@@ -38,7 +38,7 @@ def verified(track_id=1, employee_id="E001", now=10.0):
 
 class AttendanceTests(unittest.TestCase):
     def setUp(self):
-        self.config = Config()
+        self.config = Config(capture_after_sec=3.0)
         self.worker = FakePersistence()
         self.service = AttendanceService(self.config, self.worker)
         self.worker.startup.put(({}, ""))

@@ -35,6 +35,8 @@ class VideoView(QWidget):
         self._resolution = ""
         self._fps = None
         self._faces = None
+        self.corner = None  # Optional widget pinned top-left, e.g. a camera switcher.
+        self.footer = None  # Optional widget pinned bottom-right, e.g. per-camera controls.
         self._guide = True
         self._radius = 12
         self.hud = None
@@ -79,6 +81,7 @@ class VideoView(QWidget):
         super().resizeEvent(event)
         if self.hud is not None:
             self.hud.setGeometry(self.rect())
+        self._place_corner()
 
     def show_message(self, title, subtitle=""):
         self._pixmap = None
@@ -106,6 +109,34 @@ class VideoView(QWidget):
             self._faces, changed = int(faces), True
         if changed:
             self.update()
+
+    def set_corner(self, widget):
+        """Pin *widget* to the top-left corner, below the controls when there are any."""
+        self.corner = widget
+        widget.setParent(self)
+        self._place_corner()
+        widget.show()
+        widget.raise_()
+
+    def set_footer(self, widget):
+        """Pin *widget* to the bottom-right corner."""
+        self.footer = widget
+        widget.setParent(self)
+        self._place_corner()
+        widget.show()
+        widget.raise_()
+
+    def _place_corner(self):
+        if self.corner is not None:
+            self.corner.adjustSize()
+            hud_shown = self.hud is not None and not self.hud.isHidden()
+            self.corner.move(12, 60 if hud_shown else 12)
+            self.corner.raise_()
+        if self.footer is not None:
+            self.footer.adjustSize()
+            self.footer.move(max(0, self.width() - self.footer.width() - 12),
+                             max(0, self.height() - self.footer.height() - 12))
+            self.footer.raise_()
 
     def set_guide(self, enabled):
         self._guide = bool(enabled)

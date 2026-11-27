@@ -26,6 +26,7 @@ from ..hrm_sync import HRMError
 from ..report import AttendanceReader, day_start, preset_range
 from ..settings import Settings, describe_source
 from ..users import AccountDisabledError, User
+from .machine_api import MACHINE_PREFIXES, create_router
 from .runtime import WebRuntime
 
 STATIC = Path(__file__).with_name("static")
@@ -55,7 +56,7 @@ class CameraSettings(BaseModel):
     attendance_mode: Literal["face", "blink", "smile", "blink_and_smile"]
 
 
-def create_app(settings_path=None, autostart=False):
+def create_app(settings_path=None, autostart=False, verifier_key=None, mobile_key=None, encoder=None):
     sessions = {}
     login_slots = asyncio.Semaphore(4)
 
@@ -76,7 +77,9 @@ def create_app(settings_path=None, autostart=False):
     async def protect(request, call_next):
         # Cross-site forms cannot set this header. Cross-origin JavaScript needs
         # a successful preflight, and this application serves no CORS headers.
-        if request.method not in {"GET", "HEAD", "OPTIONS"} and request.headers.get("x-sv-face") != "1":
+        # Machine APIs authenticate with a key header, never the cookie (machine_api.py).
+        if (request.method not in {"GET", "HEAD", "OPTIONS"} and request.headers.get("x-sv-face") != "1"
+                and not request.url.path.startswith(MACHINE_PREFIXES)):
             response = JSONResponse({"detail": "Request must come from the dashboard."}, status_code=403)
         else:
             response = await call_next(request)
@@ -279,6 +282,7 @@ def create_app(settings_path=None, autostart=False):
             raise HTTPException(409, "Set the SV HRM API key in the server settings to enable sync.")
         service.refresh.set()
 
+    app.include_router(create_router(verifier_key, mobile_key, encoder))
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app
 

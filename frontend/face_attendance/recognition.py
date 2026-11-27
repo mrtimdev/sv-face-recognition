@@ -161,19 +161,51 @@ class RecognitionService:
 
 
 class RecognitionWorker:
+    """One recognition thread. Extra cameras add lanes, served in turn, so CPU
+    use stays at one recognition at a time however many cameras run."""
+
     def __init__(self, service):
         self.service = service
         self.requests, self.results = LatestValue(), LatestValue()
+        self.lanes = [(self.requests, self.results)]
+        self.wake = threading.Event()
+        self._next_lane = 0
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, name="recognition", daemon=True)
+
+    def add_lane(self):
+        """A (requests, results) mailbox pair for another camera; call before start."""
+        lane = (LatestValue(), LatestValue())
+        self.lanes.append(lane)
+        return lane
+
+    def submit(self, lane, request):
+        lane[0].put(request)
+        self.wake.set()
 
     def start(self):
         self.thread.start()
 
+    def _take(self):
+        if len(self.lanes) == 1:
+            self.requests.ready.wait(0.1)
+            return self.requests.take(), self.results
+        self.wake.wait(0.1)
+        self.wake.clear()
+        count = len(self.lanes)
+        for step in range(count):
+            index = (self._next_lane + step) % count
+            request = self.lanes[index][0].take()
+            if request is not None:
+                self._next_lane = index + 1
+                if any(lane[0].ready.is_set() for lane in self.lanes):
+                    self.wake.set()
+                return request, self.lanes[index][1]
+        return None, None
+
     def _run(self):
         while not self.stop_event.is_set():
-            self.requests.ready.wait(0.1)
-            request = self.requests.take()
+            request, results = self._take()
             if request is None or self.stop_event.is_set():
                 continue
             # Do not spend CPU encoding a request that has already expired in the mailbox.
@@ -184,11 +216,12 @@ class RecognitionWorker:
             except Exception as exc:
                 logging.exception("Face recognition failed")
                 result = RecognitionResult(request.packet, (), 0, str(exc))
-            self.results.put(result)
+            results.put(result)
 
     def close(self):
         self.stop_event.set()
         self.requests.ready.set()
+        self.wake.set()
         if self.thread.ident is not None:
             self.thread.join(5)
         if self.thread.is_alive():

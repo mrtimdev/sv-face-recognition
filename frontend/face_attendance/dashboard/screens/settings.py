@@ -7,7 +7,7 @@ through ``Config`` itself (``Settings.to_config``) exactly like the CLI does.
 import logging
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QSize, QThread, QTime, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QSize, QThread, QTime, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QCompleter, QDoubleSpinBox,
                              QFileDialog, QFormLayout, QFrame, QGridLayout,
@@ -24,7 +24,7 @@ from ... import hrm_servers
 from ...hrm_sync import HRMConfig, HRMError
 from ...hrm_sync import check_connection as hrm_check_connection
 from ...hrm_sync import configuration_problem as hrm_configuration_problem
-from ...settings import SETTINGS_PATH, Settings, THEMES, describe_source
+from ...settings import SETTINGS_PATH, Settings, THEMES, camera_problem, describe_source, source_kind
 from ..icons import apply_button_icon, make_icon
 from ..theme import palette
 from ..widgets import Card, PageHeader, StatCard, ToastBar
@@ -358,6 +358,22 @@ class SettingsScreen(QWidget):
 
     def _build_camera_group(self):
         card, form = self._card_form("Camera", "Video source and frame capture settings.", icon="camera")
+        # Saved cameras: pick one to edit its name and source below.
+        self._cameras, self._camera_ids, self._camera_current = [], [], -1
+        self.camera_pick = QComboBox()
+        self.camera_pick.setAccessibleName("Camera to edit")
+        self.camera_add_button = QPushButton("Add camera")
+        self.camera_remove_button = QPushButton("Remove")
+        pick_row = QHBoxLayout()
+        pick_row.addWidget(self.camera_pick, 1)
+        pick_row.addWidget(self.camera_add_button)
+        pick_row.addWidget(self.camera_remove_button)
+        form.addRow("Camera", self._row_widget(pick_row))
+        self.camera_name = QLineEdit()
+        self.camera_name.setPlaceholderText("Front door")
+        self.camera_name.setMaxLength(60)
+        form.addRow("Name", self.camera_name)
+        form.addRow("", self._hint("Live Monitor can run up to four of these cameras at once."))
         self.source_type = QComboBox()
         self.source_type.addItem("Webcam / device index", "device")
         self.source_type.addItem("Network URL (RTSP/HTTP)", "url")
@@ -367,6 +383,8 @@ class SettingsScreen(QWidget):
 
         self.source_value = QLineEdit()
         self.source_value.setPlaceholderText("0, 1, rtsp://user:pass@host:554/stream1, or a video file")
+        # An RTSP address usually carries a password: dots until the eye is clicked.
+        self._source_reveal = self._add_reveal(self.source_value)
         row = QHBoxLayout()
         row.addWidget(self.source_value, 1)
         self.browse_source_button = QPushButton("Choose file")
@@ -525,6 +543,90 @@ class SettingsScreen(QWidget):
              "Only for people with an employee ID. Off: use Send to HRM on the AI Face Angles screen."),
         )))
         self.hrm_test_button.clicked.connect(self._hrm_test)
+        self._build_phone_section(card)
+
+    def _build_phone_section(self, card):
+        """Phones on the same Wi-Fi register face angles through this computer, paired by a code."""
+        card.add(self._section("Phone app on the same Wi-Fi"))
+        tuple(self._check_rows(card, (
+            ("mobile_link_enabled", "Let the SV Face Angles phone app connect to this computer",
+             "Phones find this computer on the Wi-Fi and pair with a 6-digit code. They list employees "
+             "and send angles to HRM through it, so they never need the HRM address or API key."),
+        )))
+        self.phone_address = _FormNote()
+        self.phone_address.setObjectName("screenSubtitle")
+        self.phone_address.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        card.add(self.phone_address)
+        self.phone_pair_button = QPushButton("Pair a phone")
+        self.phone_pair_button.setObjectName("softButton")
+        self.phone_reset_button = QPushButton("Disconnect all phones")
+        self.phone_reset_button.setObjectName("softButton")
+        row = QHBoxLayout()
+        row.addWidget(self.phone_pair_button)
+        row.addWidget(self.phone_reset_button)
+        row.addStretch(1)
+        card.add(self._row_widget(row))
+        self.phone_pair_button.clicked.connect(self._pair_phone)
+        self.phone_reset_button.clicked.connect(self._disconnect_phones)
+        self.fields["mobile_link_enabled"].toggled.connect(lambda _on: self._show_phone_link())
+
+    _phone_link = None
+
+    @property
+    def phone_link(self):
+        """The app's MachineServer; set by the main window once it is running."""
+        return self._phone_link
+
+    @phone_link.setter
+    def phone_link(self, link):
+        self._phone_link = link
+        self._show_phone_link()
+        QTimer.singleShot(2000, self._show_phone_link)   # The server takes a moment to start.
+
+    def _show_phone_link(self):
+        link = self.phone_link
+        enabled = self.fields["mobile_link_enabled"].isChecked()
+        saved = bool(getattr(self.settings, "mobile_link_enabled", False))
+        if link is None:
+            text = "Starts with the desktop app."
+        elif not enabled:
+            text = "Off. Paired phones can't connect until you switch this on and save."
+        elif not saved:
+            text = "Save to switch the phone app link on."
+        elif not link.running:
+            text = (f"Not listening on port {link.port}. Another program may be using it; "
+                    "restart the app to try again.")
+        else:
+            text = f"Phones on this Wi-Fi connect to {link.phone_address()}."
+        self.phone_address.setText(text)
+        ready = link is not None and enabled and saved and link.running
+        self.phone_pair_button.setEnabled(ready)
+        self.phone_reset_button.setEnabled(link is not None and saved)
+
+    def _pair_phone(self):
+        if self.phone_link is None or not guard(self, "manage_settings", "pair a phone"):
+            return
+        from ..widgets.phone_pairing import PhonePairingDialog
+        PhonePairingDialog(self.phone_link, self).exec()
+
+    def _disconnect_phones(self):
+        if self.phone_link is None or not guard(self, "manage_settings", "disconnect phones"):
+            return
+        confirmed = QMessageBox.question(
+            self, "Disconnect all phones?",
+            "Every paired phone stops working until it is paired again with a new code.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if confirmed != QMessageBox.StandardButton.Yes:
+            return
+        from ..machine_server import new_phone_key
+        new_phone_key(self.settings)
+        try:
+            self.settings.save()
+        except OSError as exc:
+            self.toast.show_message(f"Could not write settings: {exc}", "bad")
+            return
+        self.settingsApplied.emit(self.settings, False)
+        self.toast.show_message("All phones are disconnected. Pair each one again to use it.", "ok")
 
     def _hrm_test(self):
         problem = self.hrm_server.address_problem()
@@ -1064,9 +1166,93 @@ class SettingsScreen(QWidget):
         self.reset_button.clicked.connect(self._reset)
         self.browse_source_button.clicked.connect(self._browse_source)
         self.source_type.currentIndexChanged.connect(self._source_type_changed)
+        self.camera_pick.currentIndexChanged.connect(self._camera_selected)
+        self.camera_add_button.clicked.connect(self._add_camera)
+        self.camera_remove_button.clicked.connect(self._remove_camera)
+        self.camera_name.textEdited.connect(self._camera_renamed)
+
+    # --- saved cameras ----------------------------------------------------
+    def _store_camera(self):
+        """Copy the name and source fields into the camera being edited."""
+        if 0 <= self._camera_current < len(self._cameras):
+            entry = self._cameras[self._camera_current]
+            entry["name"] = self.camera_name.text().strip() or f"Camera {self._camera_current + 1}"
+            entry["source"] = self.source_value.text().strip()
+
+    def _show_camera(self, index):
+        self._camera_current = index
+        self._source_reveal.setChecked(False)
+        entry = self._cameras[index]
+        source = entry["source"]
+        self._select_data(self.source_type, source_kind(source) if source else "url")
+        self._source_type_changed()
+        self.source_value.setText(source)
+        self.camera_name.setText(entry["name"])
+        self.camera_remove_button.setEnabled(len(self._cameras) > 1)
+
+    def _fill_camera_pick(self, select):
+        self.camera_pick.blockSignals(True)
+        self.camera_pick.clear()
+        for entry in self._cameras:
+            self.camera_pick.addItem(entry["name"])
+            # Tooltips may be read aloud or screenshotted: never the password.
+            self.camera_pick.setItemData(self.camera_pick.count() - 1,
+                                         describe_source(entry["source"]) if entry["source"] else "No source yet",
+                                         Qt.ItemDataRole.ToolTipRole)
+        self.camera_pick.setCurrentIndex(select)
+        self.camera_pick.blockSignals(False)
+        self._show_camera(select)
+
+    def _camera_selected(self, index):
+        if index < 0 or index == self._camera_current:
+            return
+        self._store_camera()
+        self._show_camera(index)
+
+    def _camera_renamed(self, text):
+        if 0 <= self._camera_current < self.camera_pick.count():
+            self.camera_pick.setItemText(self._camera_current,
+                                         text.strip() or f"Camera {self._camera_current + 1}")
+
+    def _add_camera(self):
+        self._store_camera()
+        self._cameras.append({"name": f"Camera {len(self._cameras) + 1}", "source": ""})
+        self._camera_ids.append(None)
+        self._fill_camera_pick(len(self._cameras) - 1)
+        self._select_data(self.source_type, "url")
+        self.source_value.setFocus()
+
+    def _remove_camera(self):
+        if len(self._cameras) <= 1:
+            return
+        index = self._camera_current
+        del self._cameras[index]
+        del self._camera_ids[index]
+        self._camera_current = -1
+        self._fill_camera_pick(min(index, len(self._cameras) - 1))
+
+    def _collect_cameras(self):
+        """Validated camera list, and Live Monitor's selection mapped onto it."""
+        self._store_camera()
+        for number, entry in enumerate(self._cameras, 1):
+            is_current = number - 1 == self._camera_current
+            problem = camera_problem(entry["name"], entry["source"],
+                                     self.source_type.currentData() if is_current else None)
+            if problem:
+                raise ValueError(problem)
+        names = [entry["name"].casefold() for entry in self._cameras]
+        if len(set(names)) != len(names):
+            raise ValueError("Give each camera a different name")
+        positions = {old: new for new, old in enumerate(self._camera_ids) if old is not None}
+        live = [positions[index] for index in self.settings.live_cameras if index in positions]
+        return [dict(entry) for entry in self._cameras], live or [0]
 
     def _source_type_changed(self):
+        url = self.source_type.currentData() == "url"
         self.browse_source_button.setEnabled(self.source_type.currentData() == "file")
+        self._source_reveal.setVisible(url)
+        self.source_value.setEchoMode(QLineEdit.EchoMode.Password if url and not self._source_reveal.isChecked()
+                                      else QLineEdit.EchoMode.Normal)
 
     def _browse_source(self):
         chosen, _ = QFileDialog.getOpenFileName(self, "Choose a video file",
@@ -1085,11 +1271,11 @@ class SettingsScreen(QWidget):
     def load_settings(self, settings):
         self.settings = settings
         self.updates_page.set_settings(settings)
-        source = str(settings.source).strip()
-        self._select_data(self.source_type, "device" if source.isdecimal()
-                          else "url" if "://" in source else "file")
-        self._source_type_changed()
-        self.source_value.setText(source)
+        self._cameras = [{"name": entry["name"], "source": str(entry["source"]).strip()}
+                         for entry in settings.camera_entries()]
+        self._camera_ids = list(range(len(self._cameras)))
+        self._camera_current = -1
+        self._fill_camera_pick(0)
         for key, widget in self.fields.items():
             if key in ("source_type", "source"):
                 continue
@@ -1115,21 +1301,15 @@ class SettingsScreen(QWidget):
         self._sync_sound_checks()
         self._load_ai(settings)
         self.hrm_server.set_profile(hrm_servers.profile(settings))
+        self._show_phone_link()
         self.subtitle.setText(f"Stored in {SETTINGS_PATH.name}. "
                               f"Active source: {describe_source(settings.source)}")
 
     # --- save / reset -----------------------------------------------------
     def collect(self):
         """Raw form values; validated afterwards by ``Settings.to_config``."""
-        source = self.source_value.text().strip()
-        kind = self.source_type.currentData()
-        if not source:
-            raise ValueError("Enter a camera index, network URL or file path")
-        if kind == "device" and not source.isdecimal():
-            raise ValueError("A webcam source must be a device index such as 0 or 1")
-        if kind == "file" and not Path(source).exists():
-            raise ValueError(f"Video file not found: {source}")
-        values = {"source": source}
+        cameras, live = self._collect_cameras()
+        values = {"source": cameras[0]["source"], "cameras": cameras, "live_cameras": live}
         for key, widget in self.fields.items():
             if key in ("source_type", "source"):
                 continue
@@ -1179,6 +1359,7 @@ class SettingsScreen(QWidget):
         self.load_settings(self.settings)
         self.toast.show_message(note, "ok")
         self.settingsApplied.emit(self.settings, restart)
+        QTimer.singleShot(2000, self._show_phone_link)   # A link just switched on is starting.
         return True
 
     def _reset(self):

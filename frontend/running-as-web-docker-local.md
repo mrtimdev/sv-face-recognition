@@ -3,10 +3,10 @@
 From `frontend/`:
 
 ```bash
-mkdir -p deploy/web/data
+mkdir -p docker-data
 ```
 
-Create `deploy/web/data/settings.json` with your SV HRM URL, integration key,
+Create `docker-data/settings.json` with your SV HRM URL, integration key,
 and camera address. The file and directory must be writable by the container
 user (UID 1000 on Linux). Keep the settings file private.
 
@@ -19,7 +19,7 @@ user (UID 1000 on Linux). Keep the settings file private.
 ```
 
 ```bash
-docker compose -f deploy/web/compose.yaml up -d --build
+docker compose up -d --build
 ```
 
 Open [Face ID at localhost:8080](http://127.0.0.1:8080), sign in with SV HRM,
@@ -27,14 +27,14 @@ and use **Live monitor → Start engine**. On Docker Desktop, use a network
 camera reachable from the container. To record on every container start, add
 `command: ["--start"]` under the Compose `app` service.
 
-The bind-mounted `deploy/web/data/` directory keeps settings, attendance,
+The bind-mounted `docker-data/` directory keeps settings, attendance,
 unsent events, face templates and captures after a rebuild or shutdown. When
 moving an existing installation, stop its engine before copying data and update
 any configured absolute storage paths to point inside `/data`.
 
 ```bash
-docker compose -f deploy/web/compose.yaml logs --tail 100
-docker compose -f deploy/web/compose.yaml down
+docker compose logs --tail 100
+docker compose down
 ```
 
 Docker health checks the HTTP service. Live Monitor shows camera, storage and

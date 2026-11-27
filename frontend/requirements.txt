@@ -9,3 +9,7 @@ openpyxl>=3.1,<4              # Excel report export
 # PostgreSQL/MySQL cannot open the user database and nobody can sign in.
 psycopg2-binary==2.9.10        # PostgreSQL
 mysql-connector-python==26.7.0  # MySQL
+# Machine APIs (SV HRM face verifier, mobile app) served by the desktop app too.
+fastapi>=0.115,<1
+pydantic>=2,<3
+uvicorn>=0.30,<1

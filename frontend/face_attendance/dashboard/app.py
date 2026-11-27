@@ -28,6 +28,7 @@ from .detached import DetachedPageController
 from .engine import AttendanceEngine
 from .errors import DashboardErrorHandler
 from .hrm_angles import AngleTemplateWorker
+from .machine_server import MachineServer, ensure_phone_link
 from .hrm_attendance import AttendanceUplink
 from .hrm_live import HrmLiveLink
 from .icons import IconLabel, apply_button_icon, make_icon
@@ -458,6 +459,17 @@ class MainWindow(QMainWindow):
         self.engine.attendanceSaved.connect(lambda _result: self.hrm_uplink.kick())
         self.hrm_live.configure(hrm_config_from_settings(self.settings))
         self.hrm_angles.request()   # Without the live connection nothing else would ask for them.
+        # SV HRM's face verifier and the phone app's link on this Wi-Fi (machine_server.py).
+        # Only settings read from a file are written back: never a default path by accident.
+        if ensure_phone_link(self.settings) and getattr(self.settings, "_path", None):
+            try:
+                self.settings.save()
+            except OSError:
+                logging.exception("Could not save the phone app key")
+        self.machine_server = MachineServer(lambda: self.settings, self.hrm_angles)
+        self.screens[4].phone_link = self.machine_server
+        if self.machine_server.start():
+            self._note(f"Phones on this Wi-Fi can connect at {self.machine_server.phone_address()}")
         updates_page = self.screens[4].updates_page
         updates_page.installRequested.connect(self._install_update)
         updates_page.updateFound.connect(self._on_update_found)
@@ -861,6 +873,13 @@ class MainWindow(QMainWindow):
             handler = getattr(screen, "on_settings_changed", None)
             if callable(handler):
                 handler(settings)
+        if ensure_phone_link(settings) and getattr(settings, "_path", None):
+            try:
+                settings.save()
+            except OSError:
+                logging.exception("Could not save the phone app key")
+        if getattr(self, "machine_server", None) is not None:
+            self.machine_server.reconfigure()
         self._refresh_header()
         self._note(f"Settings saved{'' if restart else ' (restart the engine to apply)'}")
         if self.engine.running:
@@ -1172,6 +1191,7 @@ class MainWindow(QMainWindow):
         self.capture_flash.cancel()
         self.clock_timer.stop()
         self.hrm_uplink.close()
+        self.machine_server.stop()
         self.hrm_live.stop()
         if not self._exit_done:
             # Programmatic close (tests, error paths): stop synchronously.

@@ -1,10 +1,11 @@
 FROM python:3.12-slim-trixie
 
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=300 PIP_RETRIES=10 \
     SV_FACE_DATA_DIR=/data SV_FACE_HEALTH_FILE=/data/engine-health.json
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libglib2.0-0t64 libgl1 libegl1 libdbus-1-3 libxkbcommon0 tzdata \
+        libglib2.0-0t64 libgl1 libegl1 libdbus-1-3 libxkbcommon0 libbrotli1 tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/sv-face
@@ -12,8 +13,8 @@ COPY requirements.txt requirements-web.txt ./
 RUN sed -i 's/^opencv-python==/opencv-python-headless==/' requirements.txt \
     && pip install -r requirements-web.txt
 
-COPY dashboard.py ./
-COPY face_attendance ./face_attendance
+COPY --chmod=a+rX dashboard.py ./
+COPY --chmod=a+rX face_attendance ./face_attendance
 RUN useradd --uid 1000 --create-home sv && install -d -o sv -g sv /data
 USER sv
 

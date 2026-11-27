@@ -7,6 +7,12 @@ from face_attendance import hrm_servers
 
 
 @pytest.fixture(autouse=True)
+def no_real_settings_file(tmp_path, monkeypatch):
+    # A test must never overwrite the developer's own settings.json (camera, HRM key, database).
+    monkeypatch.setattr("face_attendance.settings.SETTINGS_PATH", tmp_path / "settings.json")
+
+
+@pytest.fixture(autouse=True)
 def no_real_hrm():
     # With no saved address the app assumes SV HRM runs on this computer's network address,
     # which on a developer's machine is the real one. Port 9 refuses instead.

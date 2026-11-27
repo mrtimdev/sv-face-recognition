@@ -53,6 +53,8 @@ hiddenimports = [
     "face_attendance",
     "face_attendance.dashboard",
     "face_attendance.dashboard.app",
+    "face_attendance.dashboard.machine_server",
+    "face_attendance.web.machine_api",
     "face_attendance.dashboard.engine",
     "face_attendance.dashboard.screens",
     "face_attendance.dashboard.screens.live",
@@ -113,13 +115,15 @@ if _missing:
 
 # These are imported lazily or guarded, so a build without them still starts and only
 # fails on the device that uses the feature. Refuse to build an app like that too.
-_missing = [name for name in ("requests", "openpyxl", "certifi") if find_spec(name) is None]
+_missing = [name for name in ("requests", "openpyxl", "certifi", "fastapi", "uvicorn") if find_spec(name) is None]
 if _missing:
     raise SystemExit("Missing package(s): " + ", ".join(_missing) +
                      ". Run: pip install -r requirements.txt")
 
 # MySQL's sign-in plugins and error messages are imported by name at run time.
 hiddenimports += collect_submodules("mysql.connector")
+# uvicorn picks its protocol and loop modules by name at run time.
+hiddenimports += collect_submodules("uvicorn")
 
 # Windows doesn't have fcntl
 if platform.system() == "Windows":

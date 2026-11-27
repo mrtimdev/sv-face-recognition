@@ -92,3 +92,7 @@ mobile_enrollment.db-shm
 *.recovery.sqlite*
 engine-health.json
 test-results/
+
+# Docker (compose.yaml)
+/docker-data/
+/.env

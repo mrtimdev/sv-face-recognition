@@ -299,6 +299,7 @@ class EmployeesScreen(QWidget):
     hrmSyncProgress = pyqtSignal(int, int)
     hrmPhotoReady = pyqtSignal(str)
     hrmAnglesReady = pyqtSignal(str, object)  # employee code, (items, problems) or an exception
+    hrmFaceEnrolledDone = pyqtSignal(str, str, object)  # employee code, mode, HRM's answer or an exception
 
     def __init__(self, engine, settings, parent=None, preview_capture_factory=None):
         super().__init__(parent)
@@ -329,6 +330,7 @@ class EmployeesScreen(QWidget):
         self._hrm_sync_error = ""
         self._hrm_photo_pending = set()
         self._hrm_photo_missing = set()
+        self._hrm_photo_fresh = set()  # Codes whose HRM photo was downloaded since start or the last manual sync.
         self._hrm_photo_lock = threading.Lock()
         self.countdown = 0
         self.probing = False
@@ -488,7 +490,7 @@ class EmployeesScreen(QWidget):
         self.employee_table.setIconSize(QSize(48, 48))
         header = self.employee_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        for col, width in ((0, 80), (2, 170), (3, 160), (4, 85), (5, 90)):
+        for col, width in ((0, 80), (2, 170), (3, 160), (4, 85), (5, 200)):
             self.employee_table.setColumnWidth(col, width)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setMinimumSectionSize(80)
@@ -817,6 +819,7 @@ class EmployeesScreen(QWidget):
         self.hrmOverrideChecked.connect(self._on_override_checked)
         self.hrmSyncProgress.connect(self._on_hrm_progress)
         self.hrmPhotoReady.connect(self._on_hrm_photo)
+        self.hrmFaceEnrolledDone.connect(self._on_face_enrolled_set)
         self.hrmAnglesReady.connect(self._on_profile_angles)
         self.folder_button.clicked.connect(self._open_folder)
         self.enroll_cta.clicked.connect(self._switch_to_wizard)
@@ -1100,9 +1103,8 @@ class EmployeesScreen(QWidget):
         if row is None:
             return
 
-        # -- enrollment photo (main profile image) --
-        enrollment_photo = self._find_enrollment_photo(
-            row["name"], row["employee_name"])
+        # -- profile photo: the HRM one, else the enrollment photo --
+        enrollment_photo, _tip = self._avatar_photo(row)
         if enrollment_photo:
             photo = self._thumbnail_for(enrollment_photo, PROFILE_PHOTO_SIZE)
             if photo and not photo.isNull():
@@ -2022,6 +2024,9 @@ class EmployeesScreen(QWidget):
                 review.triggered.connect(lambda checked=False, label=counterpart: self._show_duplicate_profile(label))
             if duplicates:
                 menu.addSeparator()
+            if row.get("in_hrm"):
+                self._add_face_enrolled_menu(menu, row)
+                menu.addSeparator()
             toggle = menu.addAction("Mark inactive (terminated)" if row.get("active", True) else "Reactivate employee")
             toggle.triggered.connect(lambda checked=False, i=index: self._row_action(i, self._toggle_employee_active))
             del_act = menu.addAction("Delete employee")
@@ -2035,13 +2040,17 @@ class EmployeesScreen(QWidget):
         self.employee_table.setUpdatesEnabled(True)
         self._request_hrm_photos(self._page_rows)
 
-    def _set_photo_cell(self, index, row):
-        photo = self._find_enrollment_photo(row["name"], row["employee_name"]) if row.get("name") else None
-        tip = "Saved enrollment photo" if photo else "No saved enrollment photo"
-        if photo is None and row.get("in_hrm"):
-            photo = hd.cached_photo(self.settings, row["employee_id"])
+    def _avatar_photo(self, row):
+        """(path, tooltip) for this row's avatar: HRM owns the profile photo, so it wins over enrollment samples."""
+        if row.get("in_hrm") and row.get("has_photo"):
+            photo = hd.cached_photo(self.settings, row.get("employee_id"))
             if photo is not None:
-                tip = "HRM profile photo"
+                return photo, "HRM profile photo"
+        photo = self._find_enrollment_photo(row["name"], row["employee_name"]) if row.get("name") else None
+        return photo, "Saved enrollment photo" if photo else "No saved enrollment photo"
+
+    def _set_photo_cell(self, index, row):
+        photo, tip = self._avatar_photo(row)
         pixmap = self._thumbnail_for(photo, 48) if photo else None
         if pixmap is None or pixmap.isNull():
             initials = "".join(word[0] for word in row["employee_name"].split()[:2]) or "?"
@@ -2052,7 +2061,7 @@ class EmployeesScreen(QWidget):
         self.employee_table.setItem(index, 0, image_item)
 
     def _render_hrm_only_row(self, index, row):
-        """An HRM employee with no face enrolled yet: one action, Enroll face."""
+        """An HRM employee with no face enrolled yet: Enroll, plus More (profile, angles)."""
         status = QWidget()
         status.setObjectName("employeeCell")
         status.setStyleSheet("QWidget#employeeCell { background: transparent; }")
@@ -2081,9 +2090,86 @@ class EmployeesScreen(QWidget):
         apply_button_icon(enroll, "camera", palette(self._theme)["text_secondary"])
         enroll.clicked.connect(lambda checked=False, i=index: self._row_action(i, self._enroll_selected_from_hrm))
         action_layout.addWidget(enroll)
+        more = QPushButton("More")
+        more.setObjectName("controlButton")
+        more.setProperty("overflowMenu", True)
+        more.setToolTip(f"Actions: {row['employee_name']}")
+        apply_button_icon(more, "more", palette(self._theme)["text_secondary"])
+        menu = QMenu(more)
+        view = menu.addAction("View profile")
+        view.setIcon(make_icon("user", 16, palette(self._theme)["text_secondary"]))
+        view.triggered.connect(lambda checked=False, i=index: self._row_action(i, self._show_profile))
+        angles = menu.addAction("Open in AI Face Angles")
+        angles.setIcon(make_icon("camera", 16, palette(self._theme)["text_secondary"]))
+        angles.triggered.connect(lambda checked=False, code=row["employee_id"]: self.anglesRequested.emit(code))
+        menu.addSeparator()
+        self._add_face_enrolled_menu(menu, row)
+        more.setMenu(menu)
+        action_layout.addWidget(more)
         action_layout.addStretch()
         self.employee_table.setCellWidget(index, 5, actions)
         self.employee_table.setRowHeight(index, 64)
+
+    FACE_ENROLLED_CHOICES = (("enrolled", "Mark face enrolled"),
+                             ("not_enrolled", "Mark not face enrolled"),
+                             ("automatic", "Automatic (from saved angles)"))
+
+    def _add_face_enrolled_menu(self, menu, row):
+        """HRM's face_enrolled for this employee: set by hand, or follow their angles. Current choice ticked."""
+        sub = menu.addMenu("HRM face enrolled")
+        sub.setIcon(make_icon("user", 16, palette(self._theme)["text_secondary"]))
+        current = row.get("face_enrolled_mode") or "automatic"
+        state = row.get("face_enrolled")
+        sub.setToolTip("Now: " + ("enrolled" if state is True else "not enrolled" if state is False else "unknown")
+                       + ("" if current == "automatic" else " (set by hand)"))
+        for mode, label in self.FACE_ENROLLED_CHOICES:
+            action = sub.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(mode == current)
+            action.triggered.connect(lambda checked=False, code=row["employee_id"], m=mode: self.set_face_enrolled(code, m))
+        return sub
+
+    def set_face_enrolled(self, employee_code, mode):
+        """Change HRM's face_enrolled for one employee on a worker thread; the row updates when HRM answers."""
+        if not guard(self, "manage_employees", "change face enrollment in HRM"):
+            return False
+        config = self._hrm_config()
+        if not config.configured:
+            problem = hd.hrm_sync.configuration_problem(config)
+            self._notify(problem.replace("send angles to HRM", "change face enrollment in HRM"), "warn")
+            return False
+
+        def work():
+            try:
+                result = hd.hrm_sync.set_face_enrolled(config, employee_code, mode)
+            except HRMError as exc:
+                result = exc
+            except Exception as exc:  # Never let a worker die silently.
+                result = HRMError(f"Could not change face enrollment in HRM: {exc}")
+            try:
+                self.hrmFaceEnrolledDone.emit(employee_code, mode, result)
+            except RuntimeError:
+                pass  # The screen was closed meanwhile.
+
+        threading.Thread(target=work, name="hrm-face-enrolled", daemon=True).start()
+        return True
+
+    def _on_face_enrolled_set(self, employee_code, mode, result):
+        if isinstance(result, Exception):
+            self._notify(f"HRM didn't change face enrollment for {employee_code}: {result}", "bad")
+            return
+        enrolled = bool(result.get("faceEnrolled"))
+        mode = result.get("faceEnrolledMode") or mode
+        path = hd.cache_path(self.settings)
+        try:
+            if hd.set_face_enrolled(path, employee_code, enrolled, mode):
+                self._hrm_directory = hd.load(path)
+        except OSError as exc:
+            logging.warning("Could not update the HRM directory cache: %s", exc)
+        self.reload()
+        how = "automatically, from saved angles" if mode == "automatic" else "by hand"
+        self._notify(f"{employee_code} is now {'face enrolled' if enrolled else 'not face enrolled'} in HRM ({how}).",
+                     "ok")
 
     def _activate_selected(self):
         row = self.selected_row()
@@ -2277,6 +2363,8 @@ class EmployeesScreen(QWidget):
         changed = result.employees != self._hrm_directory.employees
         self._hrm_directory = result
         self._hrm_photo_missing.clear()
+        if not getattr(self, "_hrm_quiet", False):
+            self._hrm_photo_fresh.clear()  # Sync from HRM also re-downloads the photos on screen.
         # Checking every minute without a live connection mustn't redraw the table for no change.
         if changed or not getattr(self, "_hrm_quiet", False):
             self.reload(refresh_profile_photos=False)
@@ -2317,7 +2405,11 @@ class EmployeesScreen(QWidget):
         self.hrm_status_label.setText(text)
 
     def _request_hrm_photos(self, rows):
-        """Fetch HRM photos for rows on screen that show initials, a few at a time, in the background."""
+        """Fetch HRM photos for rows on screen, a few at a time, in the background.
+
+        A cached photo is shown at once but still downloaded again once per session (and after a
+        manual sync): HRM may have changed it while this app wasn't listening for live updates.
+        """
         config = self._hrm_config()
         if not config.configured:
             return
@@ -2325,8 +2417,7 @@ class EmployeesScreen(QWidget):
         for row in rows:
             code = row.get("employee_id")
             if (not row.get("in_hrm") or not row.get("has_photo") or code in self._hrm_photo_missing
-                    or (row.get("name") and self._find_enrollment_photo(row["name"], row["employee_name"]))
-                    or hd.cached_photo(self.settings, code) is not None):
+                    or code in self._hrm_photo_fresh):
                 continue
             with self._hrm_photo_lock:
                 if code in self._hrm_photo_pending:
@@ -2336,7 +2427,8 @@ class EmployeesScreen(QWidget):
         if not wanted:
             return
         settings = self.settings
-        lock, pending, missing = self._hrm_photo_lock, self._hrm_photo_pending, self._hrm_photo_missing
+        lock, pending, missing, fresh = (self._hrm_photo_lock, self._hrm_photo_pending, self._hrm_photo_missing,
+                                         self._hrm_photo_fresh)
         queue = list(wanted)
 
         def work():
@@ -2347,13 +2439,16 @@ class EmployeesScreen(QWidget):
                     code = queue.pop(0)
                 try:
                     path = hd.fetch_photo(config, settings, code)
+                    failed = False
                 except (HRMError, OSError):
-                    path = None
+                    path, failed = None, True
                 with lock:
                     pending.discard(code)
+                    if not failed:
+                        fresh.add(code)
                     if path is None:
                         missing.add(code)
-                if path is not None:
+                if not failed:  # Also when HRM removed the photo: the row falls back to the enrollment photo.
                     try:
                         self.hrmPhotoReady.emit(code)
                     except RuntimeError:
@@ -2370,6 +2465,14 @@ class EmployeesScreen(QWidget):
         for index, row in enumerate(self._page_rows):
             if row.get("employee_id") == code and index < self.employee_table.rowCount():
                 self._set_photo_cell(index, row)
+        shown = getattr(self, "_profile_row", None)
+        if shown and str(shown.get("employee_id") or "").casefold() == str(code).casefold():
+            photo, _tip = self._avatar_photo(shown)
+            pixmap = self._thumbnail_for(photo, PROFILE_PHOTO_SIZE) if photo else None
+            if pixmap is None or pixmap.isNull():
+                pixmap = _placeholder_pixmap(PROFILE_PHOTO_SIZE, shown["employee_name"], self._theme)
+            self.profile_photo.setPixmap(pixmap)
+            self._profile_photo_path = str(photo) if photo else ""
 
     def _row_action(self, index, action):
         self.employee_table.selectRow(index)

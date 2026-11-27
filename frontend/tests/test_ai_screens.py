@@ -436,16 +436,20 @@ class AnglesScreenTests(Base):
         saved.assert_not_called()
         self.assertIn("EMP002", self.screen.photo_status.text())
 
-    def test_duplicate_generated_angles_are_never_uploaded(self):
+    def test_hrm_refusing_a_duplicate_angle_shows_why_on_the_tile(self):
+        # HRM does the duplicate check itself; the app no longer downloads every employee's photo first.
         self._with_hrm()
         self._new_person()
         self.screen.id_edit.setText("EMP002")
-        self.identity_check.side_effect = HRMError("This face matches employee EMP001.")
-        with self._fake_generate(), patch.object(ai_angles, "upload_angle") as upload:
+        refused = HRMError("HRM returned an error (HTTP 400). This face matches employee EMP001's profile photo.", 400)
+        with self._fake_generate(), patch.object(ai_angles, "upload_angle", side_effect=refused) as upload:
             self.screen.generate_button.click()
             self.assertTrue(pump(lambda: not self.screen.busy))
-        upload.assert_not_called()
-        self.assertTrue(self.identity_check.called)
+        self.assertTrue(upload.called)
+        self.assertFalse(self.identity_check.called)
+        reasons = " ".join(tile.status.toolTip() for tile in self.screen.tiles.values())
+        self.assertIn("EMP001", reasons)
+        self.assertFalse(any(tile.hrm_sent for tile in self.screen.tiles.values()))
 
     def test_a_dropped_photo_is_saved_to_the_profile_straight_away(self):
         saved = self._drop(self._existing_employee())

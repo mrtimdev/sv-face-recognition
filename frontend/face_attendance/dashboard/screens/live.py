@@ -6,26 +6,29 @@ from pathlib import Path
 import threading
 
 import cv2
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import QEvent, QSize, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
-                             QHBoxLayout, QLabel,
-                             QListWidget, QListWidgetItem, QMenu, QPushButton,
+                             QGridLayout, QHBoxLayout, QLabel,
+                             QDialog, QListWidget, QListWidgetItem, QMenu, QMessageBox,
+                             QPushButton, QSplitter, QToolButton,
                              QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from ... import hrm_directory
 from ...hrm_sync import HRMError, config_from_settings, configuration_problem
-from ...settings import describe_source
+from ...settings import MAX_LIVE_CAMERAS, describe_source
 from ...config import ATTENDANCE_MODES
 from ...storage import context_path, write_jpeg
 from ..access import guard
-from ..icons import IconLabel, apply_button_icon
+from ..icons import IconLabel, apply_button_icon, make_icon
 from ..bridge import to_pixmap
 from ...sound_events import EventSounds, SOUND_LABELS
 from ...audio import format_checkin_speech
 from ..theme import palette, tone_color
 from ..widgets import (ActivityFeed, Card, StatCard,
                        ToastBar, ToggleSwitch, VideoView)
+from ..widgets.camera_bar import CameraBar, CameraDialog
+from ..widgets.tile_controls import SplitterAnimator, TileControls
 from ..widgets.activity_detail import ActivityDetailDialog, angle_photos, enrollment_photos, load_photo
 
 STATUS_TONES = {"CONNECTED": "ok", "CONNECTING": "warn", "RECONNECTING": "warn",
@@ -37,6 +40,7 @@ STATUS_ROW_ICONS = (("camera", "Camera"), ("database", "Database"),
 
 LOG_ROW_LIMIT = 250
 PREVIEW_MIN_HEIGHT = 520
+TILE_MIN_SIZE = QSize(120, 90)  # Small, so splitters can animate a tile shut smoothly.
 
 
 class LogRow(QWidget):
@@ -131,20 +135,20 @@ class LiveScreen(QWidget):
         self._build_control_actions()
 
         # Keep the preview and activity visible together; setup stays below.
-        body = QHBoxLayout()
-        body.setSpacing(12)
+        # Drag the divider to give the cameras or the activity list more room.
+        body = QSplitter(Qt.Orientation.Horizontal)
+        body.setObjectName("liveBodySplitter")
+        body.setChildrenCollapsible(False)
+        body.setHandleWidth(12)
+        body.addWidget(self._build_camera_card())
+        body.addWidget(self._build_activity_card())
+        body.setStretchFactor(0, 7)
+        body.setStretchFactor(1, 3)
+        body.setSizes([7000, 3000])
+        body.setStyleSheet("QSplitter#liveBodySplitter::handle { background: transparent; }")
+        self.body_splitter = body
 
-        left = QVBoxLayout()
-        left.setSpacing(10)
-        left.addWidget(self._build_camera_card(), 1)
-        body.addLayout(left, 7)
-
-        right = QVBoxLayout()
-        right.setSpacing(10)
-        right.addWidget(self._build_activity_card(), 1)
-        body.addLayout(right, 3)
-
-        root.addLayout(body, 1)
+        root.addWidget(body, 1)
         root.addLayout(cards_row)
         diagnostics = QHBoxLayout()
         diagnostics.setSpacing(12)
@@ -256,6 +260,15 @@ class LiveScreen(QWidget):
         self.live_badge.setFixedHeight(22)
         card.actions.addWidget(self.live_badge)
 
+        # Which saved cameras Live Monitor runs; each gets its own tile.
+        self.camera_bar = CameraBar(theme=self._theme)
+        self.camera_bar.toggled.connect(self._set_camera_selected)
+        self.camera_bar.soloRequested.connect(lambda index: self._apply_cameras([index]))
+        self.camera_bar.addRequested.connect(lambda: self._edit_camera(None))
+        self.camera_bar.editRequested.connect(self._edit_camera)
+        self.camera_bar.removeRequested.connect(self._remove_camera)
+        card.add(self.camera_bar)
+
         self.gear_button = QPushButton()
         self.gear_button.setObjectName("iconButton")
         self.gear_button.setFixedSize(34, 34)
@@ -283,7 +296,7 @@ class LiveScreen(QWidget):
 
         self.video = VideoView(theme=self._theme, message="Position your face in the frame",
                                subtitle="The engine is running and ready to detect")
-        self.video.setMinimumHeight(PREVIEW_MIN_HEIGHT)
+        self.video.setMinimumSize(TILE_MIN_SIZE)
         self.preview_hud = self.video.enable_controls()
         self.preview_hud.set_source(describe_source(self.settings.source))
         self.preview_hud.record.clicked.connect(self._toggle_engine)
@@ -302,7 +315,30 @@ class LiveScreen(QWidget):
         frame.setObjectName("cameraFrame")
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(1, 1, 1, 1)
-        frame_layout.addWidget(self.video)
+        # Tiles live in splitters: drag a divider to resize them; enlarging animates.
+        self.tile_rows = QSplitter(Qt.Orientation.Vertical)
+        self.tile_rows.setObjectName("tileSplitter")
+        self.tile_row_splitters = [QSplitter(Qt.Orientation.Horizontal) for _row in range(2)]
+        for splitter in [self.tile_rows] + self.tile_row_splitters:
+            splitter.setChildrenCollapsible(True)
+            splitter.setHandleWidth(8)
+            splitter.setOpaqueResize(True)
+        for row in self.tile_row_splitters:
+            self.tile_rows.addWidget(row)
+        self.tile_row_splitters[0].addWidget(self.video)
+        self.tile_rows.setMinimumHeight(PREVIEW_MIN_HEIGHT)
+        self.tile_rows.setStyleSheet(
+            "QSplitter::handle { background: transparent; }"
+            "QSplitter::handle:hover { background: rgba(59,130,246,0.55); border-radius: 3px; }")
+        self._row_animator = SplitterAnimator(self.tile_rows, self)
+        self._column_animators = [SplitterAnimator(row, self) for row in self.tile_row_splitters]
+        frame_layout.addWidget(self.tile_rows)
+        self.extra_videos = []  # Tiles for the 2nd..4th selected camera.
+        self._switchers = []    # One camera switcher per tile.
+        self._focused = None    # Tile position enlarged by a double-click.
+        self.video.installEventFilter(self)
+        self.preview_hud.installEventFilter(self)
+        self._layout_tiles(animate=False)
         card.add(frame, 1)
 
         info = QHBoxLayout()
@@ -316,13 +352,348 @@ class LiveScreen(QWidget):
         self.cam_fps_label.setObjectName("cameraInfo")
         self.cam_pipeline = QLabel("Pipeline: idle")
         self.cam_pipeline.setObjectName("cameraInfo")
+        # Several cameras: engine-wide controls sit under the tiles like a player bar.
+        info.addWidget(self._build_engine_strip())
         info.addWidget(self.cam_source_label)
         info.addStretch(1)
         info.addWidget(self.cam_pipeline)
         info.addWidget(self.cam_resolution)
         info.addWidget(self.cam_fps_label)
         card.add_layout(info)
+        multi = len(self._tile_views()) > 1
+        self.engine_strip.setVisible(multi)
+        self.cam_source_label.setVisible(not multi)
         return card
+
+    # ── cameras ──────────────────────────────────────────────────────────
+
+    def _build_engine_strip(self):
+        """Engine-wide controls shown above the grid when several cameras run."""
+        strip = QWidget()
+        strip.setObjectName("engineStrip")
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.strip_start = QPushButton("Start")
+        self.strip_start.clicked.connect(self._toggle_engine)
+        self.strip_pause = QPushButton("Pause all")
+        self.strip_pause.clicked.connect(self._toggle_pause)
+        self.strip_restart = QPushButton("Restart")
+        self.strip_restart.setToolTip("Restart the engine and every camera")
+        self.strip_restart.clicked.connect(self._restart)
+        self.strip_fullscreen = QPushButton()
+        self.strip_fullscreen.setToolTip("Full screen")
+        self.strip_fullscreen.clicked.connect(self._toggle_fullscreen)
+        self.strip_more = QPushButton()
+        self.strip_more.setToolTip("More monitor actions")
+        self.strip_more.setMenu(self.more_button.menu())
+        for button in (self.strip_start, self.strip_pause, self.strip_restart,
+                       self.strip_fullscreen, self.strip_more):
+            button.setObjectName("stripButton")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setAccessibleName(button.toolTip() or button.text())
+            row.addWidget(button)
+        self.engine_strip = strip
+        self._style_engine_strip()
+        return strip
+
+    def _style_engine_strip(self):
+        c = palette(self._theme)
+        self.engine_strip.setStyleSheet(f"""
+            QWidget#engineStrip {{ background: transparent; }}
+            QPushButton#stripButton {{ color: {c['text']}; background: {c['panel_alt']};
+                border: 1px solid {c['border']}; border-radius: 15px; padding: 5px 12px;
+                font-size: 13px; font-weight: 600; min-height: 20px; }}
+            QPushButton#stripButton:hover {{ background: {c['hover']}; border-color: {c['primary']}; }}
+            QPushButton#stripButton::menu-indicator {{ image: none; width: 0; }}
+            QPushButton#stripButton[tone="go"] {{ color: white; background: {c['success']};
+                border-color: {c['success']}; }}
+            QPushButton#stripButton[tone="stop"] {{ color: {c['danger']}; border-color: {c['danger_border']}; }}
+        """)
+        icon_color = c["text"]
+        self.strip_restart.setIcon(make_icon("restart", 15, icon_color))
+        self.strip_fullscreen.setIcon(make_icon("expand", 15, icon_color))
+        self.strip_more.setIcon(make_icon("more", 15, icon_color))
+        self._sync_engine_strip()
+
+    def _sync_engine_strip(self, running=None):
+        if not hasattr(self, "strip_start"):
+            return
+        running = self.engine.running if running is None else running
+        c = palette(self._theme)
+        self.strip_start.setText("Stop" if running else "Start")
+        self.strip_start.setToolTip("Stop the engine and every camera" if running else "Start every camera")
+        self.strip_start.setIcon(make_icon("stop" if running else "play", 15,
+                                           c["danger"] if running else "#FFFFFF"))
+        self.strip_start.setProperty("tone", "stop" if running else "go")
+        self.strip_start.style().unpolish(self.strip_start)
+        self.strip_start.style().polish(self.strip_start)
+        paused = self.engine.paused
+        self.strip_pause.setEnabled(bool(running))
+        self.strip_pause.setText("Resume all" if paused else "Pause all")
+        self.strip_pause.setIcon(make_icon("play" if paused else "pause", 15, c["text"]))
+        self.strip_pause.setToolTip("Resume recording on every camera" if paused
+                                    else "Pause recording on every camera; previews stay live")
+        self.strip_restart.setEnabled(bool(running))
+
+    def _tile_views(self):
+        return [self.video] + self.extra_videos
+
+    def _layout_tiles(self, animate=True):
+        """One tile per selected camera: 1 full, 2 side by side, 3-4 in two rows."""
+        selected = self.settings.selected_cameras()
+        while len(self.extra_videos) < len(selected) - 1:
+            view = VideoView(theme=self._theme, message="Engine stopped",
+                             subtitle="Press Start Engine to begin")
+            view.setMinimumSize(TILE_MIN_SIZE)
+            view.installEventFilter(self)
+            self.extra_videos.append(view)
+        while len(self.extra_videos) > len(selected) - 1:
+            view = self.extra_videos.pop()
+            view.setParent(None)
+            view.deleteLater()
+        views = self._tile_views()
+        multi = len(views) > 1
+        if self._focused is not None and self._focused >= len(views):
+            self._focused = None
+        rows = [views[:2], views[2:]]
+        fresh = set()
+        for splitter, row_views in zip(self.tile_row_splitters, rows):
+            for position, view in enumerate(row_views):
+                if splitter.indexOf(view) < 0:
+                    fresh.add(view)
+                splitter.insertWidget(position, view)
+            splitter.setVisible(bool(row_views))
+        # Single camera: the full HUD. Several: compact per-tile controls + engine strip.
+        self.preview_hud.setVisible(not multi)
+        if hasattr(self, "engine_strip"):
+            self.engine_strip.setVisible(multi)
+            self.cam_source_label.setVisible(not multi)
+        entries = self.settings.camera_entries()
+        for position, (view, (index, entry)) in enumerate(zip(views, selected)):
+            self._dress_tile(position, view, index, entry, entries, multi)
+        self.camera_bar.set_cameras(entries, [index for index, _entry in selected])
+        first = selected[0][1]
+        self.preview_hud.set_source(f"{first['name']} · {describe_source(first['source'])}"
+                                    if len(entries) > 1 else describe_source(first["source"]))
+        self._resize_tiles(animate, fresh)
+
+    def _dress_tile(self, position, view, index, entry, entries, multi):
+        """Camera switcher top-left, per-camera controls bottom-right."""
+        paused = self.engine.camera_paused(index)
+        switcher = view.corner
+        if switcher is None:
+            switcher = QToolButton()
+            switcher.setObjectName("tileSwitcher")
+            switcher.setCursor(Qt.CursorShape.PointingHandCursor)
+            switcher.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            switcher.setStyleSheet(
+                "QToolButton#tileSwitcher { color: white; background: rgba(2,6,23,0.72);"
+                " border: 1px solid rgba(255,255,255,0.18); border-radius: 12px;"
+                " padding: 4px 10px; font-size: 12px; font-weight: 700; }"
+                "QToolButton#tileSwitcher:hover { background: rgba(30,58,138,0.85); }"
+                "QToolButton#tileSwitcher::menu-indicator { image: none; width: 0; }")
+            switcher.setMenu(QMenu(switcher))
+            view.set_corner(switcher)
+        menu = switcher.menu()
+        menu.clear()
+        for other, other_entry in enumerate(entries):
+            action = menu.addAction(other_entry["name"])
+            action.setCheckable(True)
+            action.setChecked(other == index)
+            action.setToolTip(describe_source(other_entry["source"]))
+            action.triggered.connect(lambda _checked, position=position, other=other:
+                                     self._switch_tile(position, other))
+        if multi:
+            menu.addSeparator()
+            menu.addAction("Back to grid" if self._focused == position else "Enlarge  (double-click)",
+                           lambda position=position: self._toggle_focus(position))
+        switcher.setText(f"{entry['name']}{'  ·  Paused' if paused else ''}  ▾")
+        switcher.setToolTip(f"{describe_source(entry['source'])}\nSwitch the camera shown in this tile")
+        switcher.setVisible(len(entries) > 1)
+        controls = view.footer
+        if controls is None and multi:
+            controls = TileControls(view)
+            controls.pauseClicked.connect(lambda position=position: self._toggle_camera_paused(position))
+            controls.snapshotClicked.connect(lambda position=position: self._save_snapshot(position=position))
+            controls.reconnectClicked.connect(lambda position=position: self._reconnect_camera(position))
+            controls.enlargeClicked.connect(lambda position=position: self._toggle_focus(position))
+            view.set_footer(controls)
+        if controls is not None:
+            controls.setVisible(multi)
+            controls.set_paused(paused)
+            controls.set_enlarged(self._focused == position)
+            controls.set_running(self.engine.running)
+        view._place_corner()
+
+    def _resize_tiles(self, animate=True, fresh=()):
+        """Equal tiles, or one enlarged tile; eased so the change is easy to follow."""
+        views = self._tile_views()
+        rows = [views[:2], views[2:]]
+        focus = self._focused
+        if focus is None:
+            row_weights = [1, 1] if rows[1] else [1, 0]
+            column_weights = [[1] * len(row) for row in rows]
+        else:
+            row_weights = [1, 0] if focus < 2 else [0, 1]
+            column_weights = [[1 if views.index(view) == focus else 0 for view in row] for row in rows]
+        self._tile_targets = (row_weights, column_weights)
+        for splitter, animator, row, weights in zip(self.tile_row_splitters, self._column_animators,
+                                                   rows, column_weights):
+            if not row:
+                continue
+            if animate and fresh:
+                # Newly added tiles grow out of zero width.
+                sizes = splitter.sizes()
+                total = sum(sizes) or 1
+                old = [size for view, size in zip(row, sizes) if view not in fresh]
+                share = total / max(1, len(old))
+                splitter.setSizes([0 if view in fresh else round(share) for view in row])
+            animator.animate(weights, animate)
+        self._row_animator.animate(row_weights, animate)
+        for position, view in enumerate(views):
+            if view.footer is not None:
+                view.footer.set_enlarged(focus == position)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseButtonDblClick:
+            views = self._tile_views()
+            view = self.video if watched is self.preview_hud else watched
+            if view in views and len(views) > 1:
+                self._toggle_focus(views.index(view))
+                return True
+        return super().eventFilter(watched, event)
+
+    def _toggle_focus(self, position):
+        """Enlarge one tile; the other cameras keep recognizing in the background."""
+        self._focused = None if self._focused == position else position
+        self._layout_tiles()
+
+    def _toggle_camera_paused(self, position):
+        if not guard(self, "control_engine", "pause or resume a camera"):
+            return
+        selected = self.settings.selected_cameras()
+        if position >= len(selected):
+            return
+        index = selected[position][0]
+        self.engine.set_camera_paused(index, not self.engine.camera_paused(index))
+
+    def _on_camera_paused(self, _index, _paused):
+        # Re-label the tiles only: keep any sizes the user dragged.
+        entries = self.settings.camera_entries()
+        views = self._tile_views()
+        for position, (view, (index, entry)) in enumerate(zip(views, self.settings.selected_cameras())):
+            self._dress_tile(position, view, index, entry, entries, len(views) > 1)
+
+    def _reconnect_camera(self, position):
+        if not guard(self, "control_engine", "reconnect a camera"):
+            return
+        if self.engine.reconnect_camera(position):
+            views = self._tile_views()
+            if position < len(views):
+                views[position].show_message("Reconnecting…", "Opening the stream again")
+
+    def _switch_tile(self, position, index):
+        chosen = [shown for shown, _entry in self.settings.selected_cameras()]
+        if chosen[position] == index:
+            return
+        if index in chosen:  # Already on another tile: swap the two.
+            other = chosen.index(index)
+            chosen[other] = chosen[position]
+        chosen[position] = index
+        self._apply_cameras(chosen)
+
+    def _set_camera_selected(self, index, selected):
+        if not guard(self, "control_engine", "choose the cameras to run"):
+            self._layout_tiles()
+            return
+        chosen = [position for position, _entry in self.settings.selected_cameras()]
+        if selected and index not in chosen:
+            if len(chosen) >= MAX_LIVE_CAMERAS:
+                self.toast.show_message(f"Up to {MAX_LIVE_CAMERAS} cameras run at once. "
+                                        "Hide one first.", "warn")
+                self._layout_tiles()
+                return
+            chosen.append(index)
+        elif not selected and index in chosen:
+            if len(chosen) == 1:
+                self.toast.show_message("At least one camera stays on. Show another one first.", "info")
+                self._layout_tiles()
+                return
+            chosen.remove(index)
+        else:
+            return
+        self._apply_cameras(chosen)
+
+    def _edit_camera(self, index):
+        if not guard(self, "manage_settings", "add or edit cameras"):
+            return
+        entries = self.settings.camera_entries()
+        entry = None if index is None else entries[index]
+        taken = [other["name"] for position, other in enumerate(entries) if position != index]
+        dialog = CameraDialog(entry, taken, theme=self._theme, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = [shown for shown, _entry in self.settings.selected_cameras()]
+        if index is None:
+            entries.append(dialog.values())
+            if len(chosen) < MAX_LIVE_CAMERAS:
+                chosen.append(len(entries) - 1)  # A new camera shows up right away.
+            restart = True
+        else:
+            restart = index in chosen and entries[index]["source"] != dialog.values()["source"]
+            entries[index] = dialog.values()
+        self._apply_cameras(chosen, entries, restart)
+
+    def _remove_camera(self, index):
+        if not guard(self, "manage_settings", "remove cameras"):
+            return
+        entries = self.settings.camera_entries()
+        if len(entries) <= 1:
+            return
+        answer = QMessageBox.question(self, "Remove camera",
+                                      f"Remove “{entries[index]['name']}” from the saved cameras?")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        chosen = [shown for shown, _entry in self.settings.selected_cameras()]
+        del entries[index]
+        remaining = [shown - (shown > index) for shown in chosen if shown != index]
+        self._apply_cameras(remaining or [0], entries, restart=index in chosen)
+
+    def _apply_cameras(self, chosen, cameras=None, restart=None):
+        """Save the camera list and choice; restart a running engine when it changes."""
+        changes = {"live_cameras": list(chosen)}
+        if cameras is not None:
+            changes.update(cameras=cameras, source=cameras[0]["source"])
+        previous = self.settings.selected_cameras()
+        candidate = replace(self.settings, **changes)
+        try:
+            candidate.to_config()
+            candidate._path = candidate.save(getattr(self.settings, "_path", None))
+        except (OSError, ValueError) as exc:
+            self.toast.show_message(f"Could not save the camera choice: {exc}", "bad")
+            return
+        running = self.engine.running
+        if restart is None:
+            restart = candidate.selected_cameras() != previous
+        restart = running and restart
+        self.settings = candidate
+        self.engine.settings = candidate
+        self._layout_tiles()
+        if restart:
+            self._sync_running(True)
+        self.settingsApplied.emit(candidate, restart)
+        if restart:
+            self._restart()
+
+    def _permission_source(self):
+        """A local webcam among the selected cameras needs macOS camera access first."""
+        sources = [entry["source"] for _index, entry in self.settings.selected_cameras()]
+        return next((source for source in sources if str(source).strip().isdecimal()), sources[0])
+
+    def _on_channel_frame(self, position, frame):
+        if 0 < position <= len(self.extra_videos):
+            self.extra_videos[position - 1].set_frame(frame)
 
     def _build_control_actions(self):
         # Keep action state in one place; visible controls live on the video HUD.
@@ -477,6 +848,8 @@ class LiveScreen(QWidget):
 
     def _connect(self):
         self.engine.frameReady.connect(self.on_frame)
+        self.engine.channelFrameReady.connect(self._on_channel_frame)
+        self.engine.cameraPausedChanged.connect(self._on_camera_paused)
         self.engine.statsReady.connect(self.on_stats)
         self.engine.tracksReady.connect(self._on_tracks)
         self.engine.captureTriggered.connect(self.on_capture)
@@ -515,7 +888,7 @@ class LiveScreen(QWidget):
                 self.engine.stop()
             else:
                 from ..camera_permission import with_camera_permission
-                with_camera_permission(self.settings.source, self.engine.start, self.on_error, context=self)
+                with_camera_permission(self._permission_source(), self.engine.start, self.on_error, context=self)
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             self.on_error(str(exc))
 
@@ -530,7 +903,7 @@ class LiveScreen(QWidget):
             return
         try:
             from ..camera_permission import with_camera_permission
-            with_camera_permission(self.settings.source, self.engine.restart, self.on_error, context=self)
+            with_camera_permission(self._permission_source(), self.engine.restart, self.on_error, context=self)
         except (FileNotFoundError, ValueError, RuntimeError) as exc:
             self.on_error(str(exc))
         self._update_pause_button()
@@ -543,15 +916,20 @@ class LiveScreen(QWidget):
         self.log_list.setVisible(visible)
         self.log_toggle.setText("Hide" if visible else "Show")
 
-    def _save_snapshot(self):
+    def _save_snapshot(self, _checked=False, position=0):
         if not guard(self, "export_data", "save camera snapshots"):
             return
-        frame = self.engine.grab_clean_frame()
+        frame = self.engine.grab_clean_frame(position)
         if frame is None:
             self.toast.show_message("No camera frame yet - start the engine first.", "warn")
             return
+        selected = self.settings.selected_cameras()
+        label = ""
+        if len(selected) > 1 and position < len(selected):
+            label = "".join(ch if ch.isalnum() else "_" for ch in selected[position][1]["name"]).strip("_")
+            label = f"{label}_" if label else ""
         default = str(Path(self.settings.capture_dir) /
-                      f"snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
+                      f"snapshot_{label}{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
         target, _ = QFileDialog.getSaveFileName(self, "Save snapshot", default, "JPEG image (*.jpg)")
         if not target:
             return
@@ -606,7 +984,7 @@ class LiveScreen(QWidget):
         verified = stats.get("verified_today")
         self.cards["verified"].set_value("-" if verified is None else verified, "ok" if verified else "idle")
         presence = stats.get("presence", 0.0)
-        target = max(0.1, float(stats.get("capture_after", 3.0)))
+        target = max(0.1, float(stats.get("capture_after", 1.0)))
         self.cards["waiting"].set_value(
             f"{presence:.1f}s",
             "warn" if 0 < presence < target else "ok" if presence >= target else "idle")
@@ -641,6 +1019,15 @@ class LiveScreen(QWidget):
                                        fps=fps, faces=faces)
             else:
                 self.video.set_overlay(fps=fps, faces=faces)
+        shown = [index for index, _entry in self.settings.selected_cameras()]
+        statuses = {}
+        for camera in stats.get("cameras", ()):
+            position = camera.get("position", 0)
+            if position < len(shown):
+                statuses[shown[position]] = camera.get("status")
+            if 0 < position <= len(self.extra_videos):
+                self.extra_videos[position - 1].set_overlay(fps=camera.get("fps", 0))
+        self.camera_bar.set_statuses(statuses if self.engine.running else {})
         self._sync_preview_controls()
         self.preview_hud.set_metrics(self.video._resolution, fps)
         queue = stats.get("queue", 0)
@@ -779,6 +1166,8 @@ class LiveScreen(QWidget):
             self._banner_icon.set_icon_color(tone_color(self._theme, "ok"))
             self.video.show_message("Position your face in the frame",
                                     "The engine is watching for enrolled employees")
+            for view in self.extra_videos:
+                view.show_message("Connecting…", "Waiting for this camera")
         else:
             self.start_button.setText("Start Engine")
             self.start_button.setObjectName("controlButtonSuccess")
@@ -788,6 +1177,10 @@ class LiveScreen(QWidget):
             self._banner_icon.set_icon("alert")
             self._banner_icon.set_icon_color(tone_color(self._theme, "muted"))
             self.video.show_message("Engine stopped", "Press Start Engine to begin")
+            self.camera_bar.set_statuses({})
+            for view in self.extra_videos:
+                view.show_message("Engine stopped", "Press Start Engine to begin")
+                view.set_overlay(resolution="", fps=0)
             self.cards["verified"].set_value("-", "idle")
             self.cards["waiting"].set_value("-")
             self.cards["unknown"].set_value("0", "idle")
@@ -824,6 +1217,10 @@ class LiveScreen(QWidget):
                                    self._storage_ready, self.video.has_frame())
         self.live_badge.setVisible(running and not self.engine.paused and
                                   self._camera_status == "CONNECTED")
+        self._sync_engine_strip(running)
+        for view in self._tile_views():
+            if view.footer is not None:
+                view.footer.set_running(running)
 
     def _retint_buttons(self, running=None):
         """Buttons carry vector glyphs, so re-colour them when state or theme changes."""
@@ -1005,7 +1402,7 @@ class LiveScreen(QWidget):
                 w.hide()
 
         # expand video
-        self.video.setMinimumHeight(0)
+        self.tile_rows.setMinimumHeight(0)
         win.showFullScreen()
 
     def _exit_fullscreen(self):
@@ -1022,7 +1419,7 @@ class LiveScreen(QWidget):
             w.show()
         self._fs_hidden = []
 
-        self.video.setMinimumHeight(PREVIEW_MIN_HEIGHT)
+        self.tile_rows.setMinimumHeight(PREVIEW_MIN_HEIGHT)
         if self._was_maximized:
             win.showMaximized()
         else:
@@ -1053,7 +1450,7 @@ class LiveScreen(QWidget):
 
     def on_settings_changed(self, settings):
         self.settings = settings
-        self.preview_hud.set_source(describe_source(settings.source))
+        self._layout_tiles()
         self._sound.stop()
         self._sound = EventSounds(settings)
         self._sync_requirements()
@@ -1063,6 +1460,10 @@ class LiveScreen(QWidget):
     def set_theme(self, theme):
         self._theme = theme
         self.video.set_theme(theme)
+        for view in self.extra_videos:
+            view.set_theme(theme)
+        self.camera_bar.set_theme(theme)
+        self._style_engine_strip()
         self.toast.set_theme(theme)
         self.auto_toggle.set_theme(theme)
         self.activity.set_theme(theme)

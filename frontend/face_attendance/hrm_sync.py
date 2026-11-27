@@ -124,7 +124,7 @@ def _status_message(status, detail):
             403: "This API key isn't allowed to do that.",
             404: "HRM has no such employee code, or the address is wrong.",
             413: "The image is too large for the HRM server.",
-            503: "The HRM face recognition API is switched off (no API key set on the server)."}.get(
+            503: "HRM is temporarily unable to do that."}.get(
         status, f"HRM returned an error (HTTP {status}).")
     if 300 <= status < 400:
         lead = "HRM redirected the request. Check the address (http vs https)."
@@ -211,6 +211,25 @@ def angle_summary(config, opener=None):
     """Every active employee's stored angles, without images: [{employeeCode, angle, sha256, version}]."""
     rows = _request(config, "GET", "/face-angles/summary", opener=opener).get("data") or []
     return [row for row in rows if isinstance(row, dict)]
+
+
+FACE_ENROLLED_MODES = ("enrolled", "not_enrolled", "automatic")
+
+
+def set_face_enrolled(config, employee_code, mode, opener=None):
+    """Mark the employee face enrolled or not in HRM by hand, or back to "automatic" (from their angles).
+
+    Returns HRM's answer: {"employeeCode", "faceEnrolled", "faceEnrolledMode"}.
+    """
+    if mode not in FACE_ENROLLED_MODES:
+        raise ValueError(f"mode must be one of {FACE_ENROLLED_MODES}")
+    body = json.dumps({"mode": mode}).encode("utf-8")
+    answer = _request(config, "PUT", f"{_employee_path(employee_code)}/face-enrolled", body=body,
+                      content_type="application/json", opener=opener)
+    data = answer.get("data") if isinstance(answer, dict) else None
+    if not isinstance(data, dict) or not isinstance(data.get("faceEnrolled"), bool):
+        raise HRMError("HRM didn't confirm the change. Update SV HRM to a version with face-enrolled marking.")
+    return data
 
 
 def report_angle_checks(config, employee_code, checks, opener=None):

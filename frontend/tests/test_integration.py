@@ -104,7 +104,8 @@ class IntegrationTests(unittest.TestCase):
         catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.zeros((1, 128)))
         for mode in ("face", "blink"):
             with self.subTest(mode=mode):
-                config = replace(Config(), detection_scale=.25, attendance_mode=mode, stable_recheck_sec=1.0)
+                config = replace(Config(), detection_scale=.25, attendance_mode=mode, stable_recheck_sec=1.0,
+                                 capture_after_sec=3.0)
                 tracker, backend, worker, pad = FaceTracker(config), ExpressionBackend(), FakePersistence(), FakeAntiSpoof()
                 backend.faces, backend.checker = 1, tracker.liveness
                 recognition = RecognitionService(config, catalog, backend, quality=PassingQuality(), anti_spoof=pad)
@@ -260,7 +261,7 @@ class IntegrationTests(unittest.TestCase):
             self.test_two_employees_auto_capture_and_restart_cooldown()
 
     def test_early_departure_and_return_require_new_continuous_verification(self):
-        config = replace(Config(), detection_scale=.25)
+        config = replace(Config(), detection_scale=.25, capture_after_sec=3.0)
         frame = np.random.default_rng(31).integers(0, 255, (240, 480, 3), dtype=np.uint8)
         catalog = SimpleNamespace(employees=(Employee("A", "Alice"),), encodings=np.array([np.zeros(128)]))
         backend = ExpressionBackend()
