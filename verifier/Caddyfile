@@ -1,3 +1,0 @@
-{$VERIFIER_DOMAIN} {
-    reverse_proxy verifier:8091
-}
