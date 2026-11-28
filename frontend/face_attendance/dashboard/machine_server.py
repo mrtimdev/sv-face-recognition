@@ -14,6 +14,7 @@ import logging
 import os
 import secrets
 import socket
+import sys
 import threading
 
 from ..hrm_sync import config_from_settings, local_ip
@@ -113,7 +114,11 @@ class MachineServer:
         except ImportError as exc:
             logging.warning("Machine APIs are off: %s. Run: pip install -r requirements-web.txt", exc)
             return False
+        # A windowed Windows exe has no console. Use the dashboard's file logger
+        # there, since Uvicorn's console formatter calls sys.stdout.isatty().
+        has_console = sys.stdout is not None and sys.stderr is not None
         config = uvicorn.Config(app, host=self.host, port=self.port, workers=1,
+                                log_config=uvicorn.config.LOGGING_CONFIG if has_console else None,
                                 log_level="warning", timeout_graceful_shutdown=5)
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._serve, name="machine-api", daemon=True)

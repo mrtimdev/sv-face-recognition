@@ -1,9 +1,11 @@
 """The desktop dashboard serves the same machine APIs as the web dashboard."""
 import socket
+import sys
 import time
 from dataclasses import replace
 
 import httpx
+import pytest
 
 from face_attendance import hrm_directory
 from face_attendance.dashboard.machine_server import MachineServer
@@ -41,7 +43,8 @@ def wait_until(check, seconds=10):
     return False
 
 
-def test_desktop_serves_verifier_and_mobile_employees(tmp_path, monkeypatch):
+@pytest.mark.parametrize("windowed_exe", [False, True])
+def test_desktop_serves_verifier_and_mobile_employees(tmp_path, monkeypatch, windowed_exe):
     settings = replace(Settings.load(settings_file(tmp_path, monkeypatch)), hrm_api_key="hrm-key")
     rows = [{"employee_id": "SV001", "employee_name": "Dara Sok", "hrm_status": "ACTIVE"}]
     hrm_directory._write_directory(hrm_directory.cache_path(settings),
@@ -49,6 +52,9 @@ def test_desktop_serves_verifier_and_mobile_employees(tmp_path, monkeypatch):
     port = free_port()
     machine = MachineServer(lambda: settings, FakeAngles(), verifier_key=VERIFIER_KEY,
                             mobile_key=MOBILE_KEY, host="127.0.0.1", port=port, encoder=FakeEncoder())
+    if windowed_exe:
+        monkeypatch.setattr(sys, "stdout", None)
+        monkeypatch.setattr(sys, "stderr", None)
     assert machine.start()
     try:
         assert wait_until(lambda: machine.running)
